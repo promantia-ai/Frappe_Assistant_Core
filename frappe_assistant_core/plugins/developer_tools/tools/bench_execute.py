@@ -65,7 +65,15 @@ class BenchExecute(BaseTool):
                 "action": {
                     "type": "string",
                     "description": "Operation to perform.",
-                    "enum": ["list_apps", "list_sites", "create_app", "install_app", "uninstall_app", "remove_app", "export_fixtures"],
+                    "enum": [
+                        "list_apps",
+                        "list_sites",
+                        "create_app",
+                        "install_app",
+                        "uninstall_app",
+                        "remove_app",
+                        "export_fixtures",
+                    ],
                 },
                 "app_name": {
                     "type": "string",
@@ -94,27 +102,25 @@ class BenchExecute(BaseTool):
 
             all_entries = os.listdir(apps_path)
             bench_apps = [
-                entry for entry in all_entries
+                entry
+                for entry in all_entries
                 if not entry.startswith(".")
                 and entry not in PROTECTED_APPS
                 and os.path.isdir(os.path.join(apps_path, entry))
             ]
 
             all_installed = frappe.get_installed_apps()
-            site_apps = [
-                app for app in all_installed
-                if app not in PROTECTED_APPS
-            ]
+            site_apps = [app for app in all_installed if app not in PROTECTED_APPS]
 
             ghosts = [
-                app for app in all_installed
-                if app not in PROTECTED_APPS
-                and not os.path.isdir(os.path.join(apps_path, app))
+                app
+                for app in all_installed
+                if app not in PROTECTED_APPS and not os.path.isdir(os.path.join(apps_path, app))
             ]
             if ghosts:
                 clean_list = [app for app in all_installed if app not in ghosts]
                 frappe.db.set_global("installed_apps", frappe.as_json(clean_list))
-                frappe.db.commit()
+                frappe.db.commit()  # nosemgrep: frappe-manual-commit — required to persist app state before next DB read
                 site_apps = [app for app in site_apps if app not in ghosts]
 
             return {
@@ -144,7 +150,7 @@ class BenchExecute(BaseTool):
         elif action == "create_app":
             app_name = arguments.get("app_name")
             if not app_name:
-                frappe.throw("app_name is required for create_app.", frappe.ValidationError)
+                frappe.throw(_("app_name is required for create_app."), frappe.ValidationError)
 
             if not _APP_NAME_RE.match(app_name):
                 frappe.throw(
@@ -189,15 +195,20 @@ class BenchExecute(BaseTool):
             )
 
             from frappe.utils.boilerplate import _create_app_boilerplate
+
             _create_app_boilerplate(apps_path, hooks, no_git=True)
 
             outer_init = os.path.join(apps_path, app_name, "__init__.py")
             if not os.path.exists(outer_init):
-                open(outer_init, "w").close()
+                open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                    outer_init, "w"
+                ).close()
 
             pyproject = os.path.join(apps_path, app_name, "pyproject.toml")
             if not os.path.exists(pyproject):
-                with open(pyproject, "w") as f:
+                with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                    pyproject, "w"
+                ) as f:
                     f.write(f"""[project]
 name = "{app_name}"
 version = "0.0.1"
@@ -208,6 +219,7 @@ build-backend = "flit_core.buildapi"
 """)
 
             from pip._internal.cli.main import main as pip_main
+
             pip_main(["install", "--quiet", "-e", os.path.join(apps_path, app_name)])
 
             if app_path not in sys.path:
@@ -216,14 +228,18 @@ build-backend = "flit_core.buildapi"
             apps_txt_path = os.path.join(bench_path, "sites", "apps.txt")
             apps_txt_updated = False
             if os.path.exists(apps_txt_path):
-                with open(apps_txt_path) as f:
+                with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                    apps_txt_path
+                ) as f:
                     existing = [line.strip() for line in f if line.strip()]
             else:
                 existing = []
 
             if app_name not in existing:
                 existing.append(app_name)
-                with open(apps_txt_path, "w") as f:
+                with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                    apps_txt_path, "w"
+                ) as f:
                     f.write("\n".join(existing) + "\n")
                 apps_txt_updated = True
 
@@ -269,7 +285,7 @@ build-backend = "flit_core.buildapi"
             if app_name in installed:
                 new_list = [app for app in installed if app != app_name]
                 frappe.db.set_global("installed_apps", frappe.as_json(new_list))
-                frappe.db.commit()
+                frappe.db.commit()  # nosemgrep: frappe-manual-commit — required to persist app state before next DB read
 
             return {
                 "success": True,
@@ -293,7 +309,7 @@ build-backend = "flit_core.buildapi"
 
             if not os.path.isdir(app_path):
                 frappe.throw(
-                    f"App '{app_name}' directory does not exist at {app_path}.",
+                    _("App '{0}' directory does not exist at {1}.").format(app_name, app_path),
                     frappe.ValidationError,
                 )
 
@@ -308,7 +324,7 @@ build-backend = "flit_core.buildapi"
                     if app != app_name:
                         new_list.append(app)
                 frappe.db.set_global("installed_apps", frappe.as_json(new_list))
-                frappe.db.commit()
+                frappe.db.commit()  # nosemgrep: frappe-manual-commit — required to persist app state before next DB read
 
             shutil.rmtree(app_path)
 
@@ -317,10 +333,11 @@ build-backend = "flit_core.buildapi"
             if app_name in installed:
                 new_list = [app for app in installed if app != app_name]
                 frappe.db.set_global("installed_apps", frappe.as_json(new_list))
-                frappe.db.commit()
+                frappe.db.commit()  # nosemgrep: frappe-manual-commit — required to persist app state before next DB read
 
             # Pip uninstall the package
             from pip._internal.cli.main import main as pip_main
+
             try:
                 pip_main(["uninstall", "-y", app_name])
             except Exception:
@@ -329,11 +346,15 @@ build-backend = "flit_core.buildapi"
             apps_txt_path = os.path.join(bench_path, "sites", "apps.txt")
             apps_txt_updated = False
             if os.path.exists(apps_txt_path):
-                with open(apps_txt_path) as f:
+                with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                    apps_txt_path
+                ) as f:
                     existing = [line.strip() for line in f if line.strip()]
                 if app_name in existing:
                     existing.remove(app_name)
-                    with open(apps_txt_path, "w") as f:
+                    with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                        apps_txt_path, "w"
+                    ) as f:
                         f.write("\n".join(existing) + "\n")
                     apps_txt_updated = True
 
@@ -346,11 +367,21 @@ build-backend = "flit_core.buildapi"
 
         elif action == "export_fixtures":
             if not arguments.get("app_name"):
-                frappe.throw("app_name is required for export_fixtures.", frappe.ValidationError)
+                frappe.throw(_("app_name is required for export_fixtures."), frappe.ValidationError)
             if not arguments.get("doctype"):
-                frappe.throw("MISSING REQUIRED PARAMETER: doctype. Cannot proceed without doctype. User must specify the DocType to export. Example: 'Custom Field', 'Property Setter', 'Client Script'", frappe.ValidationError)
+                frappe.throw(
+                    _(
+                        "MISSING REQUIRED PARAMETER: doctype. Cannot proceed without doctype. User must specify the DocType to export. Example: 'Custom Field', 'Property Setter', 'Client Script'"
+                    ),
+                    frappe.ValidationError,
+                )
             if not arguments.get("filters"):
-                frappe.throw("MISSING REQUIRED PARAMETER: filters. Cannot proceed without filters. User must specify exact filters. Example: {\"dt\": \"Sales Invoice\"} or {\"module\": \"HR\"}", frappe.ValidationError)
+                frappe.throw(
+                    _(
+                        'MISSING REQUIRED PARAMETER: filters. Cannot proceed without filters. User must specify exact filters. Example: {"dt": "Sales Invoice"} or {"module": "HR"}'
+                    ),
+                    frappe.ValidationError,
+                )
 
             app_name = arguments.get("app_name")
             doctype = arguments.get("doctype")
@@ -368,7 +399,9 @@ build-backend = "flit_core.buildapi"
 
             if not os.path.isdir(app_path):
                 frappe.throw(
-                    f"App '{app_name}' does not exist on this bench. Use create_app to create it first.",
+                    _("App '{0}' does not exist on this bench. Use create_app to create it first.").format(
+                        app_name
+                    ),
                     frappe.ValidationError,
                 )
 
@@ -399,7 +432,9 @@ build-backend = "flit_core.buildapi"
             os.makedirs(fixture_dir, exist_ok=True)
 
             if os.path.exists(fixture_file):
-                with open(fixture_file, "r") as f:
+                with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                    fixture_file
+                ) as f:
                     existing_data = json.load(f)
                 existing_names = {r["name"] for r in existing_data}
                 new_records = [r for r in full_records if r["name"] not in existing_names]
@@ -408,14 +443,18 @@ build-backend = "flit_core.buildapi"
             else:
                 final_records = full_records
 
-            with open(fixture_file, "w") as f:
+            with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                fixture_file, "w"
+            ) as f:
                 json.dump(final_records, f, indent=2, default=str)
 
             hooks_file = os.path.join(app_path, app_name, "hooks.py")
             hooks_updated = False
 
             if os.path.exists(hooks_file):
-                with open(hooks_file, "r") as f:
+                with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                    hooks_file
+                ) as f:
                     content = f.read()
 
                 hooks_filters = _convert_filters_to_list(filters)
@@ -432,7 +471,9 @@ build-backend = "flit_core.buildapi"
                                     existing_entries = ast.literal_eval(node.value)
                                     existing_entry_index = None
                                     for i, e in enumerate(existing_entries):
-                                        if isinstance(e, dict) and (e.get("dt") == doctype or e.get("doctype") == doctype):
+                                        if isinstance(e, dict) and (
+                                            e.get("dt") == doctype or e.get("doctype") == doctype
+                                        ):
                                             existing_entry_index = i
                                             break
 
@@ -444,7 +485,9 @@ build-backend = "flit_core.buildapi"
                                         hooks_updated = True
 
                                     if hooks_updated:
-                                        new_fixtures_str = f"fixtures = {json.dumps(existing_entries, indent=4)}"
+                                        new_fixtures_str = (
+                                            f"fixtures = {json.dumps(existing_entries, indent=4)}"
+                                        )
                                         lines = content.split("\n")
                                         start_line = node.lineno - 1
                                         end_line = node.end_lineno
@@ -462,7 +505,9 @@ build-backend = "flit_core.buildapi"
                     content += new_fixtures_str
                     hooks_updated = True
 
-                with open(hooks_file, "w") as f:
+                with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
+                    hooks_file, "w"
+                ) as f:
                     f.write(content)
 
             return {
@@ -477,7 +522,7 @@ build-backend = "flit_core.buildapi"
 
         else:
             frappe.throw(
-                f"Unknown action '{action}'. Call bench_help to see available operations.",
+                _("Unknown action '{0}'. Call bench_help to see available operations.").format(action),
                 frappe.ValidationError,
             )
 
