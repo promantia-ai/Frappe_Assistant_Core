@@ -80,10 +80,10 @@ class BenchHelp(BaseTool):
                         "- Print Format → filter by: doc_type, module\n"
                         "- Notification → filter by: document_type, module\n\n"
                         "Always provide very specific filters. Examples:\n"
-                        "- Custom Field: {\"dt\": \"Sales Invoice\"}\n"
-                        "- Property Setter: {\"doc_type\": \"Sales Invoice\", \"field_name\": \"max_discount\"}\n"
-                        "- Server Script: {\"name\": [\"in\", [\"script1\", \"script2\"]]}\n"
-                        "- Role: {\"name\": [\"in\", [\"Accounts Manager\", \"Stock Manager\"]]}\n\n"
+                        '- Custom Field: {"dt": "Sales Invoice"}\n'
+                        '- Property Setter: {"doc_type": "Sales Invoice", "field_name": "max_discount"}\n'
+                        '- Server Script: {"name": ["in", ["script1", "script2"]]}\n'
+                        '- Role: {"name": ["in", ["Accounts Manager", "Stock Manager"]]}\n\n'
                         "The more specific the filters, the fewer and more precise the records exported."
                     ),
                     "params": ["app_name", "doctype", "filters"],

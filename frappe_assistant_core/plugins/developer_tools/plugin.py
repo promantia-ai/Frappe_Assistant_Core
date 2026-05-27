@@ -55,6 +55,7 @@ class DeveloperToolsPlugin(BasePlugin):
         try:
             bench_path = frappe.utils.get_bench_path()
             import os
+
             apps_path = os.path.join(bench_path, "apps")
             if not os.path.exists(apps_path):
                 return False, f"apps/ directory not found at {apps_path}"

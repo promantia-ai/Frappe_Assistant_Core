@@ -2,7 +2,9 @@
 # Developer Tools Plugin — Shared security helpers
 
 import os
+
 import frappe
+from frappe import _
 
 PROTECTED_APPS = {
     "frappe",
@@ -25,16 +27,15 @@ def assert_system_manager():
     user = frappe.session.user
 
     if user == "Guest":
-        frappe.throw(
-            "Guest users are not allowed to use Developer Tools.",
-            frappe.PermissionError
-        )
+        frappe.throw(_("Guest users are not allowed to use Developer Tools."), frappe.PermissionError)
 
     if "System Manager" not in frappe.get_roles(user):
         frappe.throw(
-            f"User {user} does not have System Manager role. "
-            f"System Manager is required for all Developer Tools.",
-            frappe.PermissionError
+            _(
+                "User {0} does not have System Manager role. "
+                "System Manager is required for all Developer Tools."
+            ).format(user),
+            frappe.PermissionError,
         )
 
 
@@ -51,17 +52,14 @@ def resolve_and_validate_path(relative_path):
     """
     # Null byte check
     if "\x00" in relative_path:
-        frappe.throw(
-            "Invalid path: null bytes are not allowed.",
-            frappe.ValidationError
-        )
+        frappe.throw(_("Invalid path: null bytes are not allowed."), frappe.ValidationError)
 
     # Depth check
     parts = [p for p in relative_path.replace("\\", "/").split("/") if p]
     if len(parts) > 10:
         frappe.throw(
-            f"Invalid path: too many directory levels ({len(parts)}). Max is 10.",
-            frappe.ValidationError
+            _("Invalid path: too many directory levels ({0}). Max is 10.").format(len(parts)),
+            frappe.ValidationError,
         )
 
     # Build full path
@@ -75,9 +73,11 @@ def resolve_and_validate_path(relative_path):
     # Boundary check
     if not real_path.startswith(apps_path + os.sep) and real_path != apps_path:
         frappe.throw(
-            f"Invalid path: resolves outside the apps/ directory. "
-            f"Path traversal and symlink escapes are not allowed.",
-            frappe.ValidationError
+            _(
+                "Invalid path: resolves outside the apps/ directory. "
+                "Path traversal and symlink escapes are not allowed."
+            ),
+            frappe.ValidationError,
         )
 
     return real_path
