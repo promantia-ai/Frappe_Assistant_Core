@@ -56,9 +56,9 @@ def resolve_and_validate_path(relative_path):
 
     # Depth check
     parts = [p for p in relative_path.replace("\\", "/").split("/") if p]
-    if len(parts) > 10:
+    if len(parts) > 15:
         frappe.throw(
-            _("Invalid path: too many directory levels ({0}). Max is 10.").format(len(parts)),
+            _("Invalid path: too many directory levels ({0}). Max is 15.").format(len(parts)),
             frappe.ValidationError,
         )
 
