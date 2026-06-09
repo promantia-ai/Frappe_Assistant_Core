@@ -23,6 +23,7 @@ and integrates seamlessly with Frappe's existing tool infrastructure.
 
 import frappe
 from frappe import _
+from frappe.rate_limiter import rate_limit
 
 from frappe_assistant_core.mcp.server import MCPServer
 
@@ -327,7 +328,22 @@ def _authenticate_mcp_request():
     return response
 
 
+def _get_rate_limit():
+    try:
+        return frappe.db.get_single_value("Assistant Core Settings", "tool_rate_limit") or 0
+    except Exception:
+        return 0
+
+
+def _get_rate_window():
+    try:
+        return frappe.db.get_single_value("Assistant Core Settings", "tool_rate_limit_window") or 0
+    except Exception:
+        return 0
+
+
 @mcp.register(allow_guest=True, xss_safe=True, methods=["GET", "POST", "HEAD"])
+@rate_limit(limit=_get_rate_limit, seconds=_get_rate_window(), ip_based=True)
 def handle_mcp():
     """
     MCP StreamableHTTP endpoint.
