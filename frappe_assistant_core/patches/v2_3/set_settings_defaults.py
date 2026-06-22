@@ -34,6 +34,8 @@ def execute():
         "code_execution_max_cpu_seconds": 60,
         "code_execution_max_recursion": 500,
         "audit_log_retention_days": 180,
+        "tool_rate_limit": 60,
+        "tool_rate_limit_window": 60,
         "mcp_server_name": "frappe-assistant-core",
         "enable_dynamic_client_registration": 1,
         "show_auth_server_metadata": 1,

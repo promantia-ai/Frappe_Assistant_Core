@@ -22,6 +22,11 @@
   "code_execution_max_cpu_seconds",
   "code_execution_max_recursion",
   "execution_limits_info",
+  "mcp_rate_limit_section",
+  "tool_rate_limit",
+  "mcp_rate_limit_column_break",
+  "tool_rate_limit_window",
+  "mcp_rate_limit_info",
   "audit_log_section",
   "audit_log_retention_days",
   "ocr_tab",
@@ -159,6 +164,36 @@
    "fieldtype": "HTML",
    "label": "Limits Info",
    "options": "<div class=\"alert alert-info\" style=\"margin-top: 10px;\"><strong>Note:</strong> These limits use OS-level resource controls (signals, rlimit) and only work on Unix-like systems (Linux, macOS). On Windows, limits are not enforced. Changes take effect immediately for new code executions.</div>"
+  },
+  {
+   "fieldname": "mcp_rate_limit_section",
+   "fieldtype": "Section Break",
+   "label": "MCP Rate Limiting",
+   "description": "Configure rate limiting for the MCP endpoint to prevent abuse. Limits are enforced per IP address. Set limit to 0 to disable rate limiting."
+  },
+  {
+   "fieldname": "tool_rate_limit",
+   "fieldtype": "Int",
+   "label": "Request Limit",
+   "default": "60",
+   "description": "Maximum number of MCP requests allowed per time window. Set to 0 to disable rate limiting."
+  },
+  {
+   "fieldname": "mcp_rate_limit_column_break",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "tool_rate_limit_window",
+   "fieldtype": "Int",
+   "label": "Time Window (seconds)",
+   "default": "60",
+   "description": "Duration of the rate limit window in seconds. Requests exceeding the limit within this window will be rejected. Range: 1-3600 seconds."
+  },
+  {
+   "fieldname": "mcp_rate_limit_info",
+   "fieldtype": "HTML",
+   "label": "Rate Limit Info",
+   "options": "<div class=\"alert alert-info\" style=\"margin-top: 10px;\"><strong>Note:</strong> Rate limiting is applied per IP address using Frappe's built-in rate limiter. A limit of 0 disables rate limiting entirely. Changes require bench restart to take effect.</div>"
   },
   {
    "fieldname": "audit_log_section",
