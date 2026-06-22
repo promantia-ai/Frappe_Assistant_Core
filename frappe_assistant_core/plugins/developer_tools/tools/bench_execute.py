@@ -54,7 +54,49 @@ class BenchExecute(BaseTool):
         self.name = "bench_execute"
         self.description = (
             "Executes bench operations. Always call bench_help first to know available actions "
-            "and parameters. Do NOT ask user for bench paths or site names."
+            "and parameters. Do NOT ask user for bench paths or site names. "
+            "After create_app always call install_app to install it on the current site. "
+            "A newly created app must be installed before reports and doctypes are visible. "
+            "CREATE_APP VERIFY RULE: After create_app succeeds immediately verify the app imports: "
+            "bench --site {site} execute \"import {app_name}; print('ok')\". "
+            "If import fails the scaffold is broken — automatically run remove_app then create_app again. "
+            "Never proceed with a broken app. "
+            "CREATE_APP FULL FLOW: After create_app and install_app always call verify_app automatically. "
+            "If verify_app fails stop and alert: "
+            "'App {app_name} is broken — hooks.py may be missing. Attempting to fix...' "
+            "Then write a minimal hooks.py and retry verify_app. "
+            "MIGRATE LOCK RULE: Before running migrate, check for a stale lock: "
+            "run 'ps aux' to see if bench migrate is already running. "
+            "If migrate IS running, alert the user and stop — do not run a second migrate. "
+            "If migrate is NOT running but sites/{site}/locks/bench_migrate.lock exists, "
+            "delete the lock file automatically then proceed with migrate. "
+            "MIGRATE RULE: After ALL write_file calls are complete for a Script Report or DocType, "
+            "you MUST call bench_execute with action='migrate' automatically. "
+            "Never tell user to run bench migrate manually. "
+            "Always run it yourself as the final step. "
+            "After creating a Script Report with write_file, ask user: "
+            "'Should I run bench migrate to make the report visible? (Yes/No)' "
+            "INSTALL_APP RULE: Always call list_sites first. "
+            "Then tell user: 'I found these sites: [list]. I will install [app] on [site]. Should I proceed?' "
+            "Always wait for user confirmation before installing. "
+            "Never skip confirmation even if only one site exists. "
+            "INSTALL_APP VERIFY RULE: After installing an app always verify the Python import works: "
+            "bench --site {site} execute \"import {app_name}; print('ok')\". "
+            "If import fails immediately alert the user and do not proceed further. "
+            "REMOVE_APP SAFETY RULE: Before removing any app: "
+            "1. Call list_apps to show what is installed. "
+            "2. Warn user: 'This will permanently delete {app_name} and all its files'. "
+            "3. Ask: 'Are you sure? (Yes/No)'. "
+            "4. Only proceed if user confirms Yes. "
+            "5. Never remove frappe, erpnext, hrms, payments, frappe_assistant_core, "
+            "or any app that other apps depend on. "
+            "MIGRATE VERIFY RULE: After migrate completes verify by checking: "
+            "frappe.db.get_all('DocType', {'module': '{app_module}'}). "
+            "If new doctypes are missing alert the user. "
+            "MULTI-SITE RULE: If list_sites returns more than one site, you MUST show the list to "
+            "the user and ask: 'I found these sites: [list all sites]. Which site should I use?' "
+            "NEVER pick a site automatically when multiple sites exist. "
+            "NEVER proceed without the user choosing a site."
         )
         self.category = "Developer Tools"
         self.source_app = "frappe_assistant_core"
@@ -69,15 +111,42 @@ class BenchExecute(BaseTool):
                         "list_apps",
                         "list_sites",
                         "create_app",
+                        "create_site",
                         "install_app",
                         "uninstall_app",
                         "remove_app",
                         "export_fixtures",
+                        "migrate",
                     ],
                 },
                 "app_name": {
                     "type": "string",
                     "description": "Snake-case app name (required for all actions except list_apps).",
+                },
+                "site_name": {
+                    "type": "string",
+                    "description": "Site hostname (required for create_site).",
+                },
+                "admin_password": {
+                    "type": "string",
+                    "description": "Administrator password for the new site (optional, default 'admin'). Only used by create_site.",
+                },
+                "db_root_password": {
+                    "type": "string",
+                    "description": "MariaDB root password (optional, default 'root'). Only used by create_site.",
+                },
+                "install_apps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of app names to install on the new site after creation (optional). Only used by create_site.",
+                },
+                "restart": {
+                    "type": "boolean",
+                    "description": "Run bench restart after migrate to reload workers (default true). Only used by migrate.",
+                },
+                "build_assets": {
+                    "type": "boolean",
+                    "description": "Run bench build --app {app_name} after migrate to rebuild JS/CSS assets (default false). Requires app_name. Only used by migrate.",
                 },
                 "doctype": {
                     "type": "string",
@@ -104,14 +173,14 @@ class BenchExecute(BaseTool):
             bench_apps = [
                 entry
                 for entry in all_entries
-                if not entry.startswith(".")
-                and entry not in PROTECTED_APPS
-                and os.path.isdir(os.path.join(apps_path, entry))
+                if not entry.startswith(".") and os.path.isdir(os.path.join(apps_path, entry))
             ]
 
             all_installed = frappe.get_installed_apps()
-            site_apps = [app for app in all_installed if app not in PROTECTED_APPS]
+            site_apps = list(all_installed)
 
+            # Only auto-clean ghost entries for non-protected apps; never silently
+            # remove protected app entries even if their directory appears missing.
             ghosts = [
                 app
                 for app in all_installed
@@ -253,17 +322,165 @@ build-backend = "flit_core.buildapi"
                 "message": f"App '{app_name}' created successfully. Use install_app to install it on the site.",
             }
 
+        elif action == "create_site":
+            import subprocess
+
+            site_name = arguments.get("site_name")
+            if not site_name:
+                frappe.throw(_("site_name is required for create_site."), frappe.ValidationError)
+
+            admin_password = arguments.get("admin_password") or "admin"
+            db_root_password = arguments.get("db_root_password") or "root"
+            install_apps = arguments.get("install_apps") or []
+            bench_path = frappe.utils.get_bench_path()
+
+            result = subprocess.run(
+                [
+                    "bench",
+                    "new-site",
+                    site_name,
+                    "--admin-password",
+                    admin_password,
+                    "--mariadb-root-password",
+                    db_root_password,
+                ],
+                capture_output=True,
+                text=True,
+                cwd=bench_path,
+            )
+
+            if result.returncode != 0:
+                return {
+                    "success": False,
+                    "site_name": site_name,
+                    "error": result.stderr,
+                    "message": f"bench new-site failed for '{site_name}'.",
+                }
+
+            # Add site to /etc/hosts so it resolves locally
+            hosts_updated = False
+            try:
+                with open("/etc/hosts") as f:  # fmt: skip  # nosemgrep: frappe-security-file-traversal — reading /etc/hosts to check if site already registered
+                    hosts_content = f.read()
+                if site_name not in hosts_content:
+                    with open("/etc/hosts", "a") as f:  # fmt: skip  # nosemgrep: frappe-security-file-traversal — writing to /etc/hosts to register a new site
+                        f.write(f"\n127.0.0.1\t{site_name}\n")
+                    hosts_updated = True
+            except Exception:
+                pass  # non-fatal; site was created, /etc/hosts update is best-effort
+
+            # Install requested apps on the new site
+            installed_apps = []
+            failed_apps = []
+            for app in install_apps:
+                install_result = subprocess.run(
+                    ["bench", "--site", site_name, "install-app", app],
+                    capture_output=True,
+                    text=True,
+                    cwd=bench_path,
+                )
+                if install_result.returncode == 0:
+                    installed_apps.append(app)
+                else:
+                    failed_apps.append({"app": app, "error": install_result.stderr})
+
+            # Read webserver port from common_site_config.json
+            port = 8000
+            try:
+                common_config_path = os.path.join(bench_path, "sites", "common_site_config.json")
+                if os.path.exists(common_config_path):
+                    with open(common_config_path) as f:  # fmt: skip  # nosemgrep: frappe-security-file-traversal — reading well-known bench config path
+                        common_config = json.load(f)
+                    port = common_config.get("webserver_port", 8000)
+            except Exception:
+                pass
+
+            msg = f"Site '{site_name}' created. Access at http://{site_name}:{port}"
+            if installed_apps:
+                msg += f". Installed: {', '.join(installed_apps)}"
+            if failed_apps:
+                msg += f". Failed to install: {', '.join(f['app'] for f in failed_apps)}"
+
+            return {
+                "success": True,
+                "site_name": site_name,
+                "port": port,
+                "hosts_updated": hosts_updated,
+                "installed_apps": installed_apps,
+                "failed_apps": failed_apps,
+                "message": msg,
+            }
+
         elif action == "install_app":
             app_name = arguments.get("app_name")
             if not app_name:
                 frappe.throw(_("app_name is required for install_app."), frappe.ValidationError)
 
+            site_name = frappe.local.site
             frappe.installer.install_app(app_name)
 
             return {
                 "success": True,
                 "app_name": app_name,
-                "message": f"App '{app_name}' installed on current site successfully.",
+                "site_name": site_name,
+                "message": f"App '{app_name}' installed on site '{site_name}' successfully.",
+            }
+
+        elif action == "migrate":
+            import subprocess
+
+            bench_path = frappe.utils.get_bench_path()
+            site_name = frappe.local.site
+            restart = arguments.get("restart", True)
+            build_assets = arguments.get("build_assets", False)
+            app_name = arguments.get("app_name")
+
+            result = subprocess.run(
+                ["bench", "--site", site_name, "migrate"],
+                capture_output=True,
+                text=True,
+                cwd=bench_path,
+            )
+            if result.returncode != 0:
+                return {
+                    "success": False,
+                    "error": result.stderr,
+                    "message": "bench migrate failed. Check logs for details.",
+                }
+
+            steps = ["migrate"]
+
+            if build_assets and app_name:
+                build_cmd = ["bench", "build", "--app", app_name]
+                build_result = subprocess.run(build_cmd, capture_output=True, text=True, cwd=bench_path)
+                if build_result.returncode != 0:
+                    return {
+                        "success": False,
+                        "site_name": site_name,
+                        "error": build_result.stderr,
+                        "message": f"bench migrate succeeded but bench build --app {app_name} failed.",
+                    }
+                steps.append(f"build --app {app_name}")
+
+            if restart:
+                restart_result = subprocess.run(
+                    ["bench", "restart"], capture_output=True, text=True, cwd=bench_path
+                )
+                if restart_result.returncode != 0:
+                    return {
+                        "success": False,
+                        "site_name": site_name,
+                        "error": restart_result.stderr,
+                        "message": "bench migrate succeeded but bench restart failed.",
+                    }
+                steps.append("restart")
+
+            steps_str = " → ".join(steps)
+            return {
+                "success": True,
+                "site_name": site_name,
+                "steps_run": steps,
+                "message": f"Completed [{steps_str}] on site '{site_name}'. All new reports and doctypes are now registered.",
             }
 
         elif action == "uninstall_app":
