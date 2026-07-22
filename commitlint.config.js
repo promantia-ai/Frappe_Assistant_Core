@@ -26,5 +26,13 @@ module.exports = {
         // Squash-merged without a conventional-commit type prefix ("Fix"
         // instead of "fix:"), violating both type-empty and subject-case.
         (message) => message.includes('(#143)') && message.includes('Fix audit log false-success'),
+
+        // 4f043ac — fix: repair HRMS Skill link corruption from v2.4.0 rename patch.
+        // Pre-existing commit on this branch with an unwrapped body (lines up to 291
+        // chars vs. the 100-char limit). The properly-wrapped squash-merge of the
+        // same fix (PR #153, commit 973c2e7) already lints cleanly and is not
+        // affected by this predicate since it matches on the exact bare subject.
+        (message) =>
+            message.split('\n')[0] === 'fix: repair HRMS Skill link corruption from v2.4.0 rename patch',
     ],
 };
