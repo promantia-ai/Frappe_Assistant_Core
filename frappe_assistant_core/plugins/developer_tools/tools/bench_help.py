@@ -170,6 +170,7 @@ class BenchHelp(BaseTool):
                     "params": ["app_name", "doctype", "filters"],
                 },
             ],
+            "message": "Available bench_execute actions and their required parameters.",
         }
 
 

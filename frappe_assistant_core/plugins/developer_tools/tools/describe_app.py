@@ -4,18 +4,24 @@
 import ast
 import importlib
 import os
-import re
 from typing import Any, Dict
 
 import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
-from frappe_assistant_core.plugins.developer_tools.tools import (
+from frappe_assistant_core.plugins.developer_tools.guards import (
+    assert_app_dir_exists,
+    assert_required,
     assert_system_manager,
+    assert_valid_app_name,
+    get_app_path,
+)
+from frappe_assistant_core.plugins.developer_tools.pagination import (
+    coerce_int_in_range,
+    coerce_offset,
 )
 
-_APP_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _MAX_TREE_FILES = 50
 
 
@@ -201,42 +207,26 @@ class DescribeApp(BaseTool):
         app_name = arguments.get("app_name", "").strip()
         max_depth = arguments.get("max_depth", 4)
         include_metadata = arguments.get("include_metadata", True)
-        offset = arguments.get("offset", 0)
-        try:
-            offset = int(offset)
-        except (TypeError, ValueError):
-            offset = 0
-        if offset < 0:
-            offset = 0
+        offset = coerce_offset(arguments.get("offset", 0))
 
-        if not app_name:
-            frappe.throw(_("app_name is required."), frappe.ValidationError)
+        assert_required(app_name, _("app_name is required."))
 
-        if not _APP_NAME_RE.match(app_name):
-            frappe.throw(
-                _(
-                    "Invalid app_name '{0}'. Must match ^[a-z][a-z0-9_]*$ "
-                    "(lowercase letters, digits, underscores; must start with a letter)."
-                ).format(app_name),
-                frappe.ValidationError,
-            )
+        assert_valid_app_name(app_name)
 
-        try:
-            max_depth = int(max_depth)
-        except (TypeError, ValueError):
-            frappe.throw(_("max_depth must be an integer."), frappe.ValidationError)
+        max_depth = coerce_int_in_range(
+            max_depth,
+            1,
+            6,
+            _("max_depth must be an integer."),
+            _("max_depth must be between 1 and 6. Got: {0}"),
+        )
 
-        if not (1 <= max_depth <= 6):
-            frappe.throw(_("max_depth must be between 1 and 6."), frappe.ValidationError)
+        app_root = get_app_path(app_name)
 
-        bench_path = frappe.utils.get_bench_path()
-        app_root = os.path.join(bench_path, "apps", app_name)
-
-        if not os.path.isdir(app_root):
-            frappe.throw(
-                _("App '{0}' not found on this bench.").format(app_name),
-                frappe.ValidationError,
-            )
+        assert_app_dir_exists(
+            app_root,
+            _("App '{0}' not found on this bench.").format(app_name),
+        )
 
         try:
             mod = importlib.import_module(app_name)
@@ -265,6 +255,7 @@ class DescribeApp(BaseTool):
             "modules": modules,
             "tree": tree,
             "summary": summary,
+            "message": f"Directory tree and structural metadata for '{app_name}'.",
         }
 
 

@@ -8,12 +8,19 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
-from frappe_assistant_core.plugins.developer_tools.tools import (
+from frappe_assistant_core.plugins.developer_tools.guards import (
+    ALLOWED_TEXT_EXTENSIONS,
+    assert_allowed_extension,
+    assert_required,
     assert_system_manager,
+    assert_within_size_limit,
     resolve_and_validate_path,
 )
+from frappe_assistant_core.plugins.developer_tools.pagination import (
+    coerce_int_in_range,
+    paginate,
+)
 
-ALLOWED_EXTENSIONS = {".py", ".js", ".json", ".html", ".css", ".txt", ".md"}
 _MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
@@ -68,20 +75,17 @@ class ReadFile(BaseTool):
         assert_system_manager()
 
         file_path = arguments.get("file_path", "").strip()
-        if not file_path:
-            frappe.throw(_("file_path is required."), frappe.ValidationError)
+        assert_required(file_path, _("file_path is required."))
 
         # Coerce and validate max_lines
         raw_max_lines = arguments.get("max_lines", 500)
-        try:
-            max_lines = int(raw_max_lines)
-        except (TypeError, ValueError):
-            frappe.throw(_("max_lines must be an integer."), frappe.ValidationError)
-        if max_lines < 1 or max_lines > 2000:
-            frappe.throw(
-                _("max_lines must be between 1 and 2000. Got: {0}").format(max_lines),
-                frappe.ValidationError,
-            )
+        max_lines = coerce_int_in_range(
+            raw_max_lines,
+            1,
+            2000,
+            _("max_lines must be an integer."),
+            _("max_lines must be between 1 and 2000. Got: {0}"),
+        )
 
         offset = int(arguments.get("offset", 0))
         if offset < 0:
@@ -90,13 +94,12 @@ class ReadFile(BaseTool):
         abs_path = resolve_and_validate_path(file_path)
 
         ext = os.path.splitext(abs_path)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            frappe.throw(
-                _("File type '{0}' is not allowed. Allowed: {1}").format(
-                    ext or "(none)", " ".join(sorted(ALLOWED_EXTENSIONS))
-                ),
-                frappe.ValidationError,
-            )
+        assert_allowed_extension(
+            ext,
+            _("File type '{0}' is not allowed. Allowed: {1}").format(
+                ext or "(none)", " ".join(sorted(ALLOWED_TEXT_EXTENSIONS))
+            ),
+        )
 
         if not os.path.isfile(abs_path):
             frappe.throw(
@@ -105,13 +108,13 @@ class ReadFile(BaseTool):
             )
 
         size_bytes = os.path.getsize(abs_path)
-        if size_bytes > _MAX_FILE_SIZE_BYTES:
-            frappe.throw(
-                _("File too large ({0} MB). Maximum allowed size is 5 MB.").format(
-                    round(size_bytes / (1024 * 1024), 1)
-                ),
-                frappe.ValidationError,
-            )
+        assert_within_size_limit(
+            size_bytes,
+            _MAX_FILE_SIZE_BYTES,
+            _("File too large ({0} MB). Maximum allowed size is 5 MB.").format(
+                round(size_bytes / (1024 * 1024), 1)
+            ),
+        )
 
         with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
             abs_path, encoding="utf-8", errors="replace"
@@ -119,10 +122,8 @@ class ReadFile(BaseTool):
             raw = f.read()
 
         all_lines = raw.splitlines()
-        total_lines = len(all_lines)
 
-        lines_to_return = all_lines[offset : offset + max_lines]
-        truncated = (offset + len(lines_to_return)) < total_lines
+        lines_to_return, total_lines, truncated = paginate(all_lines, offset, max_lines)
 
         content = "\n".join(lines_to_return)
         if truncated:
@@ -131,7 +132,7 @@ class ReadFile(BaseTool):
                 f"\n[showing lines {offset + 1} to {end} of {total_lines}. Call with offset={end} for more]"
             )
 
-        result = {
+        return {
             "success": True,
             "file_path": file_path,
             "content": content,
@@ -139,12 +140,8 @@ class ReadFile(BaseTool):
             "total_lines": total_lines,
             "truncated": truncated,
             "size_bytes": size_bytes,
+            "message": "File is empty." if total_lines == 0 else "File read successfully.",
         }
-
-        if total_lines == 0:
-            result["warning"] = "File is empty."
-
-        return result
 
 
 read_file = ReadFile

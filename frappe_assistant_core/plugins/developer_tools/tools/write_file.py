@@ -10,14 +10,16 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
-from frappe_assistant_core.plugins.developer_tools.tools import (
-    PROTECTED_APPS,
-    assert_developer_mode,
+from frappe_assistant_core.plugins.developer_tools.guards import (
+    assert_allowed_extension,
+    assert_not_protected_app,
+    assert_required,
     assert_system_manager,
+    assert_within_size_limit,
+    get_apps_path,
     resolve_and_validate_path,
 )
 
-ALLOWED_EXTENSIONS = {".py", ".json", ".js", ".html", ".css", ".md", ".txt"}
 _MAX_CONTENT_BYTES = 1_048_576  # 1 MB
 
 
@@ -124,42 +126,36 @@ class WriteFile(BaseTool):
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         assert_system_manager()
-        assert_developer_mode()
 
         file_path = arguments.get("file_path", "").strip()
         content = arguments.get("content", "")
         overwrite = arguments.get("overwrite", True)
 
-        if not file_path:
-            frappe.throw(_("file_path is required."), frappe.ValidationError)
+        assert_required(file_path, _("file_path is required."))
 
         content_bytes = content.encode("utf-8")
-        if len(content_bytes) > _MAX_CONTENT_BYTES:
-            frappe.throw(
-                _("Content exceeds maximum size of 1 MB ({0} bytes).").format(len(content_bytes)),
-                frappe.ValidationError,
-            )
+        assert_within_size_limit(
+            len(content_bytes),
+            _MAX_CONTENT_BYTES,
+            _("Content exceeds maximum size of 1 MB ({0} bytes).").format(len(content_bytes)),
+        )
 
         abs_path = resolve_and_validate_path(file_path)
 
-        bench_apps = os.path.join(frappe.utils.get_bench_path(), "apps")
+        bench_apps = get_apps_path()
         rel = os.path.relpath(abs_path, bench_apps)
         app_name = rel.split(os.sep)[0]
 
-        if app_name in PROTECTED_APPS:
-            frappe.throw(
-                _("Cannot write to protected app '{0}'. Only custom apps allowed.").format(app_name),
-                frappe.ValidationError,
-            )
+        assert_not_protected_app(
+            app_name,
+            _("Cannot write to protected app '{0}'. Only custom apps allowed.").format(app_name),
+        )
 
         ext = os.path.splitext(abs_path)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            frappe.throw(
-                _("File extension '{0}' is not allowed. Allowed: .py .json .js .html .css .md .txt").format(
-                    ext
-                ),
-                frappe.ValidationError,
-            )
+        assert_allowed_extension(
+            ext,
+            _("File extension '{0}' is not allowed. Allowed: .py .json .js .html .css .md .txt").format(ext),
+        )
 
         file_exists = os.path.isfile(abs_path)
         if not overwrite and file_exists:
@@ -254,6 +250,7 @@ class WriteFile(BaseTool):
             "dirs_created": dirs_created,
             "files_created": files_created,
             "validation": validation,
+            "message": f"File '{file_path}' written successfully.",
         }
 
         if previous_size is not None:

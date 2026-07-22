@@ -9,9 +9,16 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
-from frappe_assistant_core.plugins.developer_tools.tools import (
+from frappe_assistant_core.plugins.developer_tools.guards import (
     assert_system_manager,
+    get_apps_path,
     resolve_and_validate_path,
+)
+from frappe_assistant_core.plugins.developer_tools.pagination import (
+    coerce_int_in_range,
+    coerce_offset,
+    paginate,
+    safe_getsize,
 )
 
 _MAX_RESULTS = 100
@@ -110,27 +117,18 @@ class ListAppFiles(BaseTool):
         offset = arguments.get("offset", 0)
         recursive = bool(arguments.get("recursive", False))
 
-        try:
-            max_results = int(max_results)
-        except (TypeError, ValueError):
-            frappe.throw(_("max_results must be an integer."), frappe.ValidationError)
+        max_results = coerce_int_in_range(
+            max_results,
+            1,
+            _MAX_RESULTS_LIMIT,
+            _("max_results must be an integer."),
+            _("max_results must be between 1 and {0}. Got: {{0}}").format(_MAX_RESULTS_LIMIT),
+        )
 
-        if max_results < 1 or max_results > _MAX_RESULTS_LIMIT:
-            frappe.throw(
-                _("max_results must be between 1 and {0}.").format(_MAX_RESULTS_LIMIT),
-                frappe.ValidationError,
-            )
-
-        try:
-            offset = int(offset)
-        except (TypeError, ValueError):
-            offset = 0
-        if offset < 0:
-            offset = 0
+        offset = coerce_offset(offset)
 
         if path == "":
-            bench_path = frappe.utils.get_bench_path()
-            abs_path = os.path.join(bench_path, "apps")
+            abs_path = get_apps_path()
         else:
             abs_path = resolve_and_validate_path(path)
 
@@ -155,10 +153,7 @@ class ListAppFiles(BaseTool):
                         continue
                     full = os.path.join(dirpath, name)
                     rel = os.path.relpath(full, abs_path)
-                    try:
-                        size = os.path.getsize(full)
-                    except OSError:
-                        size = 0
+                    size = safe_getsize(full)
                     all_entries.append({"name": rel, "type": "file", "size": size})
         else:
             try:
@@ -183,15 +178,10 @@ class ListAppFiles(BaseTool):
             for name in dirs:
                 all_entries.append({"name": name, "type": "dir", "size": 0})
             for name in files:
-                try:
-                    size = os.path.getsize(os.path.join(abs_path, name))
-                except OSError:
-                    size = 0
+                size = safe_getsize(os.path.join(abs_path, name))
                 all_entries.append({"name": name, "type": "file", "size": size})
 
-        total = len(all_entries)
-        page = all_entries[offset : offset + max_results]
-        truncated = (offset + len(page)) < total
+        page, total, truncated = paginate(all_entries, offset, max_results)
 
         if truncated:
             end = offset + len(page)
@@ -203,13 +193,15 @@ class ListAppFiles(BaseTool):
                 }
             )
 
+        files_shown = len(page) - (1 if truncated else 0)
         return {
             "success": True,
             "path": path,
             "entries": page,
             "total": total,
-            "files_shown": len(page) - (1 if truncated else 0),
+            "files_shown": files_shown,
             "truncated": truncated,
+            "message": f"{files_shown} of {total} entries listed.",
         }
 
 
