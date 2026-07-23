@@ -23,6 +23,7 @@ and integrates seamlessly with Frappe's existing tool infrastructure.
 
 import frappe
 from frappe import _
+from frappe.rate_limiter import rate_limit
 
 from frappe_assistant_core.mcp.server import MCPServer
 
@@ -327,6 +328,61 @@ def _authenticate_mcp_request():
     return response
 
 
+def _get_rate_limit():
+    try:
+        return frappe.db.get_single_value("Assistant Core Settings", "tool_rate_limit") or 0
+    except Exception:
+        return 0
+
+
+def _get_rate_window():
+    try:
+        return frappe.db.get_single_value("Assistant Core Settings", "tool_rate_limit_window") or None
+    except Exception:
+        return None
+
+
+def _mcp_rate_limit_sentinel():
+    """Named sentinel used as the rate-limit key; must not be a lambda."""
+    pass
+
+
+def _rate_limited_response(fallback_seconds):
+    """
+    Build the 429 response for a rate-limit breach, with an accurate
+    Retry-After header.
+
+    The inline `rate_limit()` decorator (frappe.rate_limiter.rate_limit) never
+    exposes its cache key or a RateLimiter instance, so there is nothing to
+    call .headers() on. Instead, reconstruct the same cache key it uses
+    internally (rl:{cmd}:{identity}, identity=request IP since ip_based=True
+    and no key= is passed) and read its actual remaining TTL from Redis.
+    Falls back to the configured window only if that TTL read is unavailable.
+    """
+    from werkzeug.wrappers import Response
+
+    try:
+        identity = frappe.local.request_ip
+        cache_key = frappe.cache.make_key(f"rl:{frappe.form_dict.cmd}:{identity}")
+        ttl = frappe.cache.ttl(cache_key)
+        retry_after = ttl if ttl and ttl > 0 else fallback_seconds
+    except Exception:
+        retry_after = fallback_seconds
+
+    response = Response(
+        frappe.as_json(
+            {
+                "error": "rate_limited",
+                "message": "You hit the rate limit because of too many requests. Please try after sometime.",
+            }
+        ),
+        status=429,
+        content_type="application/json",
+    )
+    response.headers["Retry-After"] = str(retry_after)
+    return response
+
+
 @mcp.register(allow_guest=True, xss_safe=True, methods=["GET", "POST", "HEAD"])
 def handle_mcp():
     """
@@ -345,6 +401,17 @@ def handle_mcp():
     from werkzeug.wrappers import Response
 
     from frappe_assistant_core.api.oauth_discovery import get_public_base_url
+
+    # Apply rate limiting only when both settings are configured.
+    # Reading window here (not at decoration time) prevents seconds=0
+    # being passed to Redis setex on fresh installs where the setting is unset.
+    _limit = _get_rate_limit()
+    _window = _get_rate_window()
+    if _limit and _window:
+        try:
+            rate_limit(limit=_limit, seconds=_window, ip_based=True)(_mcp_rate_limit_sentinel)()
+        except frappe.RateLimitExceededError:
+            return _rate_limited_response(_window)
 
     # Handle HEAD request for connectivity check (Claude Web uses this)
     if frappe.request.method == "HEAD":

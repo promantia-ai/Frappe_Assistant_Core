@@ -129,6 +129,7 @@ def toggle_tool(tool_name: str, enabled: bool):
     """
     frappe.only_for(["System Manager", "Assistant Admin"])
     from frappe_assistant_core.core.tool_registry import get_tool_registry
+    from frappe_assistant_core.plugins.developer_tools.guards import DEV_MODE_REQUIRED_TOOLS
     from frappe_assistant_core.utils.plugin_manager import get_plugin_manager
     from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
 
@@ -147,6 +148,15 @@ def toggle_tool(tool_name: str, enabled: bool):
 
         # Convert enabled to boolean
         enabled = frappe.utils.cint(enabled)
+
+        if enabled and tool_name in DEV_MODE_REQUIRED_TOOLS and not frappe.conf.get("developer_mode"):
+            return {
+                "success": False,
+                "message": _(
+                    f"Tool '{tool_name}' requires developer_mode=1 in site_config.json "
+                    "and cannot be enabled on this site."
+                ),
+            }
 
         # Use savepoint for atomic operation
         frappe.db.savepoint("toggle_tool")
@@ -207,26 +217,39 @@ def bulk_toggle_tools(tool_names: list, enabled: bool):
         Success status with details
     """
     frappe.only_for(["System Manager", "Assistant Admin"])
+    from frappe_assistant_core.plugins.developer_tools.guards import DEV_MODE_REQUIRED_TOOLS
+
     if isinstance(tool_names, str):
         import json
 
         tool_names = json.loads(tool_names)
 
-    results = {"success": True, "toggled": [], "failed": []}
+    results = {"success": True, "toggled": [], "failed": [], "skipped": []}
 
     for tool_name in tool_names:
         result = toggle_tool(tool_name, enabled)
         if result.get("success"):
             results["toggled"].append(tool_name)
+        elif (
+            frappe.utils.cint(enabled)
+            and tool_name in DEV_MODE_REQUIRED_TOOLS
+            and not frappe.conf.get("developer_mode")
+        ):
+            # toggle_tool() already blocked this one (dev-mode policy) -- label it
+            # distinctly from a genuine failure rather than lumping it into "failed".
+            results["skipped"].append({"tool": tool_name, "skipped": True, "reason": result.get("message")})
         else:
             results["failed"].append({"name": tool_name, "error": result.get("message")})
 
+    action = "enabled" if frappe.utils.cint(enabled) else "disabled"
     if results["failed"]:
         results["success"] = False
-        results["message"] = _(f"Failed to toggle {len(results['failed'])} tools")
+        message = _(f"Failed to toggle {len(results['failed'])} tools")
     else:
-        action = "enabled" if enabled else "disabled"
-        results["message"] = _(f"Successfully {action} {len(results['toggled'])} tools")
+        message = _(f"Successfully {action} {len(results['toggled'])} tools")
+    if results["skipped"]:
+        message += _(f"; skipped {len(results['skipped'])} tool(s) requiring developer_mode=1")
+    results["message"] = message
 
     return results
 
@@ -245,6 +268,7 @@ def bulk_toggle_tools_by_category(category: str = None, enabled: bool = True, pl
         {"success": bool, "toggled": [...], "failed": [...], "total": int, "message": str}
     """
     frappe.only_for(["System Manager", "Assistant Admin"])
+    from frappe_assistant_core.plugins.developer_tools.guards import DEV_MODE_REQUIRED_TOOLS
 
     # Parse JSON if passed as string
     if isinstance(enabled, str):
@@ -285,24 +309,29 @@ def bulk_toggle_tools_by_category(category: str = None, enabled: bool = True, pl
             "success": True,
             "toggled": [],
             "failed": [],
+            "skipped": [],
             "total": 0,
             "message": _(f"No tools found matching {filter_str}"),
         }
 
     # Toggle each tool
-    results = {"success": True, "toggled": [], "failed": [], "total": len(tool_names)}
+    results = {"success": True, "toggled": [], "failed": [], "skipped": [], "total": len(tool_names)}
 
     for tool_name in tool_names:
         result = toggle_tool(tool_name, enabled)
         if result.get("success"):
             results["toggled"].append(tool_name)
+        elif enabled and tool_name in DEV_MODE_REQUIRED_TOOLS and not frappe.conf.get("developer_mode"):
+            # toggle_tool() already blocked this one (dev-mode policy) -- label it
+            # distinctly from a genuine failure rather than lumping it into "failed".
+            results["skipped"].append({"tool": tool_name, "skipped": True, "reason": result.get("message")})
         else:
             results["failed"].append({"name": tool_name, "error": result.get("message")})
 
     # Set overall status and message
     if results["failed"]:
         results["success"] = len(results["toggled"]) > 0  # Partial success
-        results["message"] = _(f"{len(results['toggled'])} tools toggled, {len(results['failed'])} failed")
+        message = _(f"{len(results['toggled'])} tools toggled, {len(results['failed'])} failed")
     else:
         action = "enabled" if enabled else "disabled"
         filter_desc = []
@@ -311,7 +340,10 @@ def bulk_toggle_tools_by_category(category: str = None, enabled: bool = True, pl
         if plugin_name:
             filter_desc.append(f"in '{plugin_name}'")
         filter_str = " ".join(filter_desc) if filter_desc else ""
-        results["message"] = _(f"Successfully {action} {len(results['toggled'])} {filter_str} tools")
+        message = _(f"Successfully {action} {len(results['toggled'])} {filter_str} tools")
+    if results["skipped"]:
+        message += _(f"; skipped {len(results['skipped'])} tool(s) requiring developer_mode=1")
+    results["message"] = message
 
     return results
 

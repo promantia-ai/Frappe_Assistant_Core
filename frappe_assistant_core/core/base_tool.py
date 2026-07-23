@@ -194,6 +194,18 @@ class BaseTool(ABC):
             # Validate arguments
             self.validate_arguments(arguments)
 
+            # Check developer_mode for tools that require it (e.g. bench_execute,
+            # write_file). Centralized here so any tool added to
+            # DEV_MODE_REQUIRED_TOOLS is protected even if its own execute() forgets
+            # to call assert_developer_mode() itself.
+            from frappe_assistant_core.plugins.developer_tools.guards import (
+                DEV_MODE_REQUIRED_TOOLS,
+                assert_developer_mode,
+            )
+
+            if self.name in DEV_MODE_REQUIRED_TOOLS:
+                assert_developer_mode()
+
             # Execute tool
             result = self.execute(arguments)
 
