@@ -4,6 +4,7 @@
 import ast
 import json
 import os
+import threading
 
 import frappe
 from frappe import _
@@ -36,6 +37,22 @@ def _convert_filters_to_list(filters: dict) -> list:
         else:
             result.append([field, "=", value])
     return result
+
+
+def _pending_export_marker_path(app_name):
+    """
+    Path to the marker signaling app_name's background fixture-file/hooks.py
+    write (scheduled by export_fixtures) hasn't finished yet. Lives under
+    logs/, never under apps/, so creating/removing it never touches this
+    bench's watched-path reloader.
+    """
+    bench_path = frappe.utils.get_bench_path()
+    marker_dir = os.path.join(bench_path, "logs", "fac_export_pending")
+    return os.path.join(marker_dir, f"{app_name}.marker")
+
+
+def _is_export_pending(app_name):
+    return os.path.exists(_pending_export_marker_path(app_name))
 
 
 class FixtureService:
@@ -79,6 +96,13 @@ class FixtureService:
                 frappe.ValidationError,
             )
 
+        if _is_export_pending(app_name):
+            return build_failure(
+                f"A previous fixture export for '{app_name}' is still finishing in the "
+                f"background. Wait a few seconds and retry.",
+                export_in_progress=True,
+            )
+
         records = frappe.get_all(doctype, filters=filters, fields=["*"])
 
         if not records:
@@ -92,8 +116,10 @@ class FixtureService:
         doctype_snake = frappe.scrub(doctype)
         fixture_dir = os.path.join(app_path, app_name, "fixtures")
         fixture_file = os.path.join(fixture_dir, f"{doctype_snake}.json")
-        os.makedirs(fixture_dir, exist_ok=True)
 
+        # Reading any existing fixture file here is safe (no watched-path write yet) —
+        # it's needed to compute the merged content that gets written later, in the
+        # background.
         if os.path.exists(fixture_file):
             with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
                 fixture_file
@@ -106,15 +132,22 @@ class FixtureService:
         else:
             final_records = full_records
 
-        with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
-            fixture_file, "w"
-        ) as f:
-            json.dump(final_records, f, indent=2, default=str)
+        fixture_content = json.dumps(final_records, indent=2, default=str)
 
         hooks_file = os.path.join(app_path, app_name, "hooks.py")
         hooks_updated = False
+        hooks_update_warning = None
+        new_hooks_content = None
 
-        if os.path.exists(hooks_file):
+        if not os.path.exists(hooks_file):
+            hooks_update_warning = (
+                f"hooks.py not found at '{hooks_file}'; the fixture was exported but not "
+                f"registered, so a real 'bench migrate'/install will not pick it up."
+            )
+        else:
+            # Reading + ast-parsing the existing hooks.py is safe (no write yet) — this
+            # computes the new content entirely in memory; only the actual write below
+            # is deferred.
             with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
                 hooks_file
             ) as f:
@@ -156,25 +189,79 @@ class FixtureService:
                                         lines[:start_line] + new_fixtures_str.split("\n") + lines[end_line:]
                                     )
                                     content = "\n".join(new_lines)
-                            except Exception:
-                                pass
+                            except (ValueError, SyntaxError, TypeError) as e:
+                                # ast.literal_eval raises these when the existing
+                                # `fixtures = ...` value isn't a plain literal (e.g. a
+                                # function call or variable) — leave hooks.py untouched
+                                # rather than guess, but say so instead of silently
+                                # reporting hooks_updated: false with no explanation.
+                                hooks_update_warning = (
+                                    f"Found an existing 'fixtures' assignment in hooks.py that "
+                                    f"isn't a plain list literal, so it could not be updated "
+                                    f"automatically ({e}). Add the fixture entry for '{doctype}' "
+                                    f"to hooks.py manually."
+                                )
 
             if not fixtures_found:
                 new_fixtures_str = f"\nfixtures = {json.dumps([new_entry], indent=4)}\n"
                 content += new_fixtures_str
                 hooks_updated = True
 
-            with open(  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()
-                hooks_file, "w"
-            ) as f:
-                f.write(content)
+            if hooks_updated:
+                new_hooks_content = content
 
-        return {
+        # Everything above is DB reads (frappe.get_all/get_doc) or reads/pure computation
+        # against files already on disk — no apps/ write has happened yet, so the result
+        # below is already fully known. Only the actual writes are deferred: this bench's
+        # dev server auto-restarts on any file change under apps/ (watchdog-based
+        # reloader), and writing fixture_file/hooks_file synchronously here would risk
+        # dropping this request's own HTTP response mid-flight even though the export
+        # already succeeded — the exact pattern already fixed for remove_app.
+        marker_path = _pending_export_marker_path(app_name)
+        os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+        open(  # nosemgrep: frappe-security-file-traversal — path derived from validated app_name, not user input
+            marker_path, "w"
+        ).close()
+
+        def _write_files():
+            # Runs on a background Timer thread with no initialized frappe.local —
+            # must stick to plain filesystem calls only, no frappe.* here.
+            os.makedirs(fixture_dir, exist_ok=True)
+            with open(  # nosemgrep: frappe-security-file-traversal — path derived from validated app_name/doctype, not user input
+                fixture_file, "w"
+            ) as f:
+                f.write(fixture_content)
+            if new_hooks_content is not None:
+                with open(  # nosemgrep: frappe-security-file-traversal — path derived from validated app_name, not user input
+                    hooks_file, "w"
+                ) as f:
+                    f.write(new_hooks_content)
+            try:
+                os.remove(marker_path)
+            except OSError:
+                pass
+
+        # Delayed so this request's response has a chance to flush before the file
+        # writes fire the reloader's watched-path restart. Reduces, but can't fully
+        # guarantee against, that race — see note above.
+        threading.Timer(1.5, _write_files).start()
+
+        result = {
             "success": True,
             "app_name": app_name,
             "doctype": doctype,
             "records_exported": len(full_records),
             "fixture_file": os.path.join(app_name, app_name, "fixtures", f"{doctype_snake}.json"),
             "hooks_updated": hooks_updated,
-            "message": f"{len(full_records)} {doctype} records exported to {app_name}",
+            "file_write": "in_progress",
+            "message": (
+                f"{len(full_records)} {doctype} record(s) will be written to "
+                f"fixtures/{doctype_snake}.json in the background"
+                + (" and hooks.py updated" if hooks_updated else "")
+                + ". This may cause a brief dev-server restart in the next couple of "
+                "seconds, which is expected and not a failure."
+            ),
         }
+        if hooks_update_warning is not None:
+            result["hooks_update_warning"] = hooks_update_warning
+        return result

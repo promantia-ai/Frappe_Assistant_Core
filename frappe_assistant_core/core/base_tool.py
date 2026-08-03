@@ -321,9 +321,18 @@ class BaseTool(ABC):
         Returns:
             Tool metadata including class info, permissions, etc.
         """
+        from frappe_assistant_core.plugins.developer_tools.guards import (
+            DEV_MODE_REQUIRED_MESSAGE,
+            DEV_MODE_REQUIRED_TOOLS,
+        )
+
+        description = self.description
+        if self.name in DEV_MODE_REQUIRED_TOOLS and not frappe.conf.get("developer_mode"):
+            description = f"{description} ({DEV_MODE_REQUIRED_MESSAGE})"
+
         return {
             "name": self.name,
-            "description": self.description,
+            "description": description,
             "class": self.__class__.__name__,
             "module": self.__class__.__module__,
             "source_app": self.source_app,
