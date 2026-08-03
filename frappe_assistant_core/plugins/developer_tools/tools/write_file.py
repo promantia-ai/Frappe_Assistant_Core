@@ -97,7 +97,12 @@ class WriteFile(BaseTool):
             "in Frappe UI? (Yes/No)' "
             "If user says yes, call bench_execute with action='migrate'. "
             "This applies to Script Reports, DocTypes, and any other Frappe files that need "
-            "migration to take effect."
+            "migration to take effect. "
+            "CONNECTION DROP RECOVERY RULE: writing a .py file can trigger this bench's dev "
+            "server to auto-restart (it watches apps/ for file changes), occasionally mid-request. "
+            "If a write_file call returns a raw execution error instead of a normal result, do "
+            "NOT assume the write failed — call read_file on the same path to check whether the "
+            "content actually landed before telling the user something went wrong."
         )
         self.source_app = "frappe_assistant_core"
 
@@ -157,6 +162,12 @@ class WriteFile(BaseTool):
             _("File extension '{0}' is not allowed. Allowed: .py .json .js .html .css .md .txt").format(ext),
         )
 
+        if os.path.isdir(abs_path):
+            frappe.throw(
+                _("'{0}' is a directory, not a file.").format(file_path),
+                frappe.ValidationError,
+            )
+
         file_exists = os.path.isfile(abs_path)
         if not overwrite and file_exists:
             frappe.throw(
@@ -200,11 +211,17 @@ class WriteFile(BaseTool):
         # For JSON files, inject the real current timestamp into modified/creation.
         # This prevents Frappe from storing a stale hardcoded date and showing
         # reports as "1-2 years old" in the UI.
+        timestamp_rewrite_warning = None
         if ext == ".json":
-            try:
-                import json as _json
+            import json as _json
 
+            doc = None
+            try:
                 doc = _json.loads(content)
+            except _json.JSONDecodeError:
+                pass  # invalid JSON — leave as-is; validation below will report the error
+
+            if doc is not None:
                 now_str = frappe.utils.now()
                 changed = False
                 if "modified" in doc:
@@ -215,11 +232,13 @@ class WriteFile(BaseTool):
                     changed = True
                 if changed:
                     new_content = _json.dumps(doc, indent=1)
-                    with open(abs_path, "w", encoding="utf-8") as f:  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()  # fmt: skip
-                        f.write(new_content)
-                    content = new_content
-            except Exception:
-                pass  # invalid JSON — leave as-is; validation below will report the error
+                    try:
+                        with open(abs_path, "w", encoding="utf-8") as f:  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()  # fmt: skip
+                            f.write(new_content)
+                        content = new_content
+                        content_bytes = content.encode("utf-8")
+                    except OSError as e:
+                        timestamp_rewrite_warning = str(e)
 
         try:
             os.chmod(abs_path, 0o644)
@@ -227,16 +246,24 @@ class WriteFile(BaseTool):
             pass
 
         files_created = []
+        init_warning = None
 
         if ext == ".json" and '"report_type": "Script Report"' in content:
             init_path = os.path.join(os.path.dirname(abs_path), "__init__.py")
             if not os.path.exists(init_path):
-                open(init_path, "w").close()  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()  # fmt: skip
                 try:
-                    os.chmod(init_path, 0o644)
-                except OSError:
-                    pass
-                files_created.append(os.path.relpath(init_path, bench_apps))
+                    open(init_path, "w").close()  # nosemgrep: frappe-security-file-traversal — path validated by resolve_and_validate_path()  # fmt: skip
+                    try:
+                        os.chmod(init_path, 0o644)
+                    except OSError:
+                        pass
+                    files_created.append(os.path.relpath(init_path, bench_apps))
+                except OSError as e:
+                    init_warning = str(e)
+                    self.logger.warning(
+                        f"write_file: main content write for '{file_path}' succeeded but "
+                        f"__init__.py creation at '{init_path}' failed: {e}"
+                    )
 
         lines_written = len(content.splitlines())
         validation = _validate_syntax(content, ext)
@@ -257,6 +284,21 @@ class WriteFile(BaseTool):
             result["previous_size"] = previous_size
         if previous_lines is not None:
             result["previous_lines"] = previous_lines
+        warnings = []
+        if timestamp_rewrite_warning is not None:
+            warnings.append(
+                f"File was written, but re-writing it with an updated modified/creation "
+                f"timestamp failed: {timestamp_rewrite_warning}. The file on disk keeps "
+                f"whatever modified/creation values were in the original content."
+            )
+        if init_warning is not None:
+            warnings.append(
+                f"File written successfully, but required __init__.py could not be created "
+                f"at '{os.path.relpath(init_path, bench_apps)}': {init_warning}. "
+                f"The Script Report may fail to import until this is created manually."
+            )
+        if warnings:
+            result["warning"] = " ".join(warnings)
 
         return result
 

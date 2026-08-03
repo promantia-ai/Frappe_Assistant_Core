@@ -108,7 +108,10 @@ def handle_tool_call(params: Dict[str, Any], request_id: Optional[Any]) -> Dict[
             )
             response = {
                 "jsonrpc": "2.0",
-                "error": {"code": ErrorCodes.AUTHENTICATION_REQUIRED, "message": ErrorMessages.ACCESS_DENIED},
+                "error": {
+                    "code": ErrorCodes.AUTHENTICATION_REQUIRED,
+                    "message": str(e) or ErrorMessages.ACCESS_DENIED,
+                },
             }
             if request_id is not None:
                 response["id"] = request_id

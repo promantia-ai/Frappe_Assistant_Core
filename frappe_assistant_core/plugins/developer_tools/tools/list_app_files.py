@@ -37,6 +37,24 @@ def _should_skip(name: str) -> bool:
     return False
 
 
+def _format_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    return f"{size_bytes / 1024:.1f} KB"
+
+
+def _format_entries(path: str, entries: list) -> str:
+    lines = [(path or "apps/") + "/"]
+    for entry in entries:
+        if entry["type"] == "notice":
+            lines.append(entry["name"])
+        elif entry["type"] == "dir":
+            lines.append(f"{entry['name']}/")
+        else:
+            lines.append(f"{entry['name']} ({_format_size(entry['size'])})")
+    return "\n".join(lines)
+
+
 class ListAppFiles(BaseTool):
     """
     Lists files and directories inside a Frappe app folder on the bench.
@@ -47,7 +65,12 @@ class ListAppFiles(BaseTool):
         self.name = "list_app_files"
         self.description = (
             "List files and directories inside a Frappe app folder on the bench. "
-            "Returns a flat list of entries with name, type, and size. "
+            "Returns a flat list of entries with name, type, and size, plus a "
+            "'formatted' field: a human-readable, one-entry-per-line rendering "
+            "(directories shown as 'name/', files shown as 'name (size)') with sizes "
+            "in B/KB instead of raw bytes. Always display the 'formatted' field "
+            "verbatim in a code block to the user — do not re-serialize or summarize "
+            "the raw 'entries' list; 'entries' is for programmatic use only. "
             "MANDATORY WORKFLOW - NEVER SKIP: "
             "Step 1: ALWAYS call describe_app first to get the full app tree and exact folder paths. "
             "Step 2: Use the exact path from describe_app tree output in the 'path' parameter. "
@@ -63,11 +86,17 @@ class ListAppFiles(BaseTool):
             "1. When describe_app returns truncated=true — use list_app_files to explore specific folders. MANDATORY — do not ask user, just call it. "
             "2. When user asks for files in a specific folder — use list_app_files with that exact path. "
             "3. When user asks to filter by file type — use list_app_files with pattern filter. "
-            "NEVER call list_app_files without calling describe_app first — no exceptions. "
+            "4. When the user wants to find a specific file by name and doesn't know which "
+            'app it\'s in — call list_app_files with path="", recursive=true, '
+            'pattern="<filename>" to search the entire bench at once. '
+            "NEVER call list_app_files without calling describe_app first, UNLESS searching "
+            "for a specific filename across the whole bench and the app isn't known yet — in "
+            'that case call list_app_files directly with path="" (empty), recursive=true, '
+            'and pattern="<filename>" to search every app in one call, skipping describe_app. '
             "NEVER give up and tell user the app is not accessible — always try describe_app first to find the correct path. "
-            "DISPLAY RULE: Always show the full entries list as returned. Never summarize or group the results. "
-            "Show every file name and size exactly as returned in the response. "
-            "Do not pick and choose which files to show."
+            "DISPLAY RULE: Show the 'formatted' field verbatim in a code block. Never summarize, "
+            "group, or pick and choose which entries to show — every entry in 'formatted' must "
+            "be shown exactly as returned."
         )
         self.source_app = "frappe_assistant_core"
 
@@ -198,6 +227,7 @@ class ListAppFiles(BaseTool):
             "success": True,
             "path": path,
             "entries": page,
+            "formatted": _format_entries(path, page),
             "total": total,
             "files_shown": files_shown,
             "truncated": truncated,

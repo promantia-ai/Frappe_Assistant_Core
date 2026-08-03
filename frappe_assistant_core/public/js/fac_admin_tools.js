@@ -335,6 +335,7 @@
         const toolsHtml = filteredTools.map(tool => {
             const isToggling = ns.state.toggleInProgress[`tool_${tool.name}`];
             const pluginDisabled = !tool.plugin_enabled;
+            const devModeBlocked = !!tool.dev_mode_blocked;
             const isPanelOpen = ns.state.openConfigPanels[tool.name];
             const roleTagsHtml = (tool.role_access || []).map(r =>
                 `<span class="fac-role-tag" data-role="${r.role}">
@@ -349,7 +350,7 @@
             const titleHtml = ns.highlight(tool.display_name, q);
             const descHtml = ns.highlight(tool.description || 'No description available', q);
             return `
-                <div class="fac-tool-item-detailed ${isToggling ? 'toggle-in-progress' : ''} ${pluginDisabled ? 'fac-disabled-overlay' : ''}" data-tool-name="${tool.name}">
+                <div class="fac-tool-item-detailed ${isToggling ? 'toggle-in-progress' : ''} ${pluginDisabled || devModeBlocked ? 'fac-disabled-overlay' : ''}" data-tool-name="${tool.name}">
                     <div class="fac-tool-header">
                         <div class="fac-tool-title">
                             ${titleHtml}
@@ -367,8 +368,8 @@
                                 <input type="checkbox" class="fac-tool-toggle"
                                        data-tool="${tool.name}"
                                        aria-label="Enable tool ${frappe.utils.escape_html(tool.display_name)}"
-                                       ${tool.tool_enabled ? 'checked' : ''}
-                                       ${isToggling || pluginDisabled ? 'disabled' : ''}>
+                                       ${tool.tool_enabled && !devModeBlocked ? 'checked' : ''}
+                                       ${isToggling || pluginDisabled || devModeBlocked ? 'disabled' : ''}>
                                 <span class="slider round"></span>
                             </label>
                         </div>
@@ -380,6 +381,7 @@
                     <div class="fac-tool-footer">
                         <span class="fac-tool-badge">${tool.plugin_display_name}</span>
                         ${pluginDisabled ? '<span class="fac-plugin-disabled-notice"><i class="fa fa-exclamation-circle"></i> Plugin disabled</span>' : ''}
+                        ${devModeBlocked ? '<span class="fac-plugin-disabled-notice"><i class="fa fa-exclamation-circle"></i> Requires developer_mode=1</span>' : ''}
                         ${tool.role_access_mode !== 'Allow All' ? '<span class="fac-tool-badge" style="background: var(--blue-100); color: var(--blue-600);"><i class="fa fa-lock"></i> Role restricted</span>' : ''}
                     </div>
 

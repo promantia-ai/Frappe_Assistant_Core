@@ -17,6 +17,7 @@ def get_tool_configurations() -> dict:
     """
     frappe.only_for(["System Manager", "Assistant Admin"])
     from frappe_assistant_core.core.tool_registry import get_tool_registry
+    from frappe_assistant_core.plugins.developer_tools.guards import DEV_MODE_REQUIRED_TOOLS
     from frappe_assistant_core.utils.plugin_manager import get_plugin_manager
     from frappe_assistant_core.utils.tool_category_detector import get_category_info
 
@@ -58,6 +59,10 @@ def get_tool_configurations() -> dict:
             # Get configuration if exists
             config = existing_configs.get(tool_name, {})
             tool_enabled = config.get("enabled", 1) if config else 1
+            requires_developer_mode = tool_name in DEV_MODE_REQUIRED_TOOLS
+            dev_mode_blocked = requires_developer_mode and not frappe.conf.get("developer_mode")
+            if dev_mode_blocked:
+                tool_enabled = 0
             category = config.get("tool_category", "read_write") if config else "read_write"
             # Normalize 'dangerous' to 'privileged' for UI consistency
             if category == "dangerous":
@@ -102,6 +107,8 @@ def get_tool_configurations() -> dict:
                     "role_access_mode": role_access_mode,
                     "role_access": role_access,
                     "has_config": bool(config),
+                    "requires_developer_mode": requires_developer_mode,
+                    "dev_mode_blocked": dev_mode_blocked,
                 }
             )
 
