@@ -116,7 +116,7 @@ through the `assistant_skills` hook.
 
 ## Tools at a glance
 
-FAC ships 24 tools across four plugins: **Core** (Frappe operations),
+FAC ships 22 tools across four plugins: **Core** (Frappe operations),
 **Data Science** (Python execution, analytics, file extraction),
 **Visualization** (dashboards and charts), and **Custom Tools** (the
 registry for tools contributed by external apps).
@@ -124,7 +124,7 @@ registry for tools contributed by external apps).
 | Category | Tools |
 |---|---|
 | Documents | `get_document`, `list_documents`, `create_document`, `update_document`, `delete_document`, `submit_document` |
-| Search | `search`, `search_documents`, `search_doctype`, `search_link`, `fetch` |
+| Search | `search_documents` (global, DocType-scoped, or Link value), plus `search` / `fetch` for ChatGPT connectors |
 | Reports | `report_list`, `report_requirements`, `generate_report` |
 | Approvals | `get_pending_approvals`, `run_workflow` |
 | Schema | `get_doctype_info` |
@@ -134,6 +134,40 @@ registry for tools contributed by external apps).
 
 Full specification for each tool is in the
 [Tool Reference](docs/api/TOOL_REFERENCE.md).
+
+---
+
+## Schema access is live
+
+FAC reads your schema from Frappe's metadata API at the moment a tool is
+called. It keeps no schema copy of its own — no snapshot table, no
+embedded or vector index of your data model, and no sync command. There
+is nothing to re-run and no staleness window to reason about.
+
+In practice that means:
+
+- **Custom DocTypes, Custom Fields, and Property Setters are visible on
+  the next tool call.** Create a field in the desk and the LLM sees it
+  immediately. `get_doctype_info` returns custom fields merged inline
+  with standard fields, along with child-table field definitions, Link
+  targets, and the DocType's permission rules.
+- **Renames, added options, and changed labels take effect the same
+  way** — they come from the same live metadata read.
+- **Permissions are evaluated per call against the requesting user**,
+  never snapshotted. FAC asks Frappe on each call, so a role change
+  applies as soon as Frappe applies it.
+
+FAC does cache a few operational things — whether the server is
+enabled, the MCP and OAuth endpoint URLs, and dashboard/health
+statistics. None of them describe your schema or your data.
+
+If you reach FAC through another product that embeds or orchestrates it,
+that layer may maintain its own schema cache with its own refresh
+behaviour. Staleness seen through a wrapper is worth tracing there
+first; FAC itself has no such step.
+
+Implementation details are in
+[Architecture Overview](docs/internals/INTERNALS.md#schema-access).
 
 ---
 

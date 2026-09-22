@@ -41,6 +41,7 @@ class SkillManager:
         "owner_user",
         "visibility",
         "is_system",
+        "modified",
     )
 
     def get_user_accessible_skills(self, user: str = None) -> List[Dict[str, Any]]:
@@ -98,7 +99,7 @@ class SkillManager:
                 """
                 SELECT DISTINCT sk.name, sk.skill_id, sk.title, sk.description,
                        sk.status, sk.skill_type, sk.linked_tool, sk.category,
-                       sk.owner_user, sk.visibility, sk.is_system
+                       sk.owner_user, sk.visibility, sk.is_system, sk.modified
                 FROM `tabFAC Skill` sk
                 INNER JOIN `tabHas Role` hr
                     ON hr.parent = sk.name AND hr.parenttype = 'FAC Skill'
@@ -150,19 +151,29 @@ class SkillManager:
 
         return skill_doc.content
 
-    def get_skill_by_tool(self, tool_name: str) -> Optional[Dict[str, Any]]:
-        """Find a Published skill linked to ``tool_name`` that the caller can see."""
-        skill_name = frappe.db.get_value(
-            "FAC Skill",
-            {"linked_tool": tool_name, "status": "Published"},
-            "name",
-        )
-        if not skill_name:
+    def get_skill_by_tool(self, tool_name: str, user: str = None) -> Optional[Dict[str, Any]]:
+        """
+        Find the Published skill linked to ``tool_name`` that ``user`` can see.
+
+        Scoped and ordered through the same helpers as ``get_tool_skill_map`` so the
+        two can never disagree about which skill owns a tool. The previous
+        implementation picked one arbitrary Published row with no visibility filter
+        and no ordering, so another user's Private skill on the same tool could mask
+        an accessible one — see security issue #239.
+        """
+        user = user or frappe.session.user
+        candidates = [
+            s
+            for s in self.get_user_accessible_skills(user)
+            if s.get("status") == "Published" and s.get("linked_tool") == tool_name
+        ]
+        if not candidates:
             return None
 
-        skill_doc = frappe.get_doc("FAC Skill", skill_name)
-        if not self._user_can_access_skill(skill_doc):
-            return None
+        # No further access check: get_user_accessible_skills is the authority here,
+        # and _user_can_access_skill reads frappe.session.user, which would give the
+        # wrong answer whenever ``user`` is somebody else.
+        skill_doc = frappe.get_doc("FAC Skill", self._sort_by_precedence(candidates)[0]["name"])
 
         return {
             "name": skill_doc.name,
@@ -188,6 +199,21 @@ class SkillManager:
         except Exception as e:
             frappe.logger("skill_manager").warning(f"Failed to increment usage for {skill_name}: {e}")
 
+    @staticmethod
+    def _sort_by_precedence(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Order skills so that competing entries for the same tool resolve the same
+        way every time: app-shipped ``is_system`` skills first, then the most
+        recently modified, then ``name`` as a final tie-break.
+
+        Implemented as a stable multi-pass sort — lowest-priority key sorted first,
+        highest last.
+        """
+        ordered = sorted(skills, key=lambda s: s.get("name") or "")
+        ordered.sort(key=lambda s: str(s.get("modified") or ""), reverse=True)
+        ordered.sort(key=lambda s: 0 if s.get("is_system") else 1)
+        return ordered
+
     def _user_can_access_skill(self, skill_doc) -> bool:
         """Check if current user can access the skill."""
         user = frappe.session.user
@@ -212,21 +238,31 @@ class SkillManager:
 
         return False
 
-    def get_tool_skill_map(self) -> Dict[str, Dict[str, str]]:
+    def get_tool_skill_map(self, user: str = None) -> Dict[str, Dict[str, str]]:
         """
-        Map of ``tool_name -> {description, skill_id}`` for all Published
-        Tool-Usage skills. Drives token-optimization in replace mode.
+        Map of ``tool_name -> {description, skill_id}`` for Published Tool-Usage
+        skills accessible to ``user``. Drives token-optimization in replace mode.
+
+        Scoped through ``get_user_accessible_skills`` so a Private (or
+        Shared-to-a-role-the-user-lacks) skill can never be substituted into
+        another user's tool description — see security issue #225.
+
+        When multiple accessible skills target the same tool, precedence is
+        deterministic: app-shipped ``is_system`` skills win first, then the
+        most recently modified, then ``name`` as a final tie-break.
         """
-        skills = frappe.get_all(
-            "FAC Skill",
-            filters={
-                "status": "Published",
-                "skill_type": "Tool Usage",
-                "linked_tool": ["is", "set"],
-            },
-            fields=["linked_tool", "description", "skill_id"],
-        )
-        return {s.linked_tool: {"description": s.description, "skill_id": s.skill_id} for s in skills}
+        user = user or frappe.session.user
+        skills = [
+            s
+            for s in self.get_user_accessible_skills(user)
+            if s.get("status") == "Published" and s.get("skill_type") == "Tool Usage" and s.get("linked_tool")
+        ]
+
+        tool_map: Dict[str, Dict[str, str]] = {}
+        for s in self._sort_by_precedence(skills):
+            if s["linked_tool"] not in tool_map:
+                tool_map[s["linked_tool"]] = {"description": s["description"], "skill_id": s["skill_id"]}
+        return tool_map
 
 
 def get_skill_manager() -> SkillManager:
