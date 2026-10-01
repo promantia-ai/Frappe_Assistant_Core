@@ -4,6 +4,7 @@
 from typing import Any, Dict
 
 from frappe_assistant_core.core.base_tool import BaseTool
+from frappe_assistant_core.plugins.developer_tools.guards import assert_system_manager
 
 
 class BenchHelp(BaseTool):
@@ -32,6 +33,7 @@ class BenchHelp(BaseTool):
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        assert_system_manager()
         return {
             "success": True,
             "actions": [

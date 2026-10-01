@@ -21,6 +21,10 @@ PROTECTED_APPS = {
 
 DEV_MODE_REQUIRED_TOOLS = {"bench_execute", "write_file"}
 
+DEV_MODE_REQUIRED_MESSAGE = (
+    "This tool requires developer_mode=1 in site_config.json. " "It is not available on production sites."
+)
+
 _APP_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 ALLOWED_TEXT_EXTENSIONS = {".py", ".js", ".json", ".html", ".css", ".txt", ".md"}
@@ -33,13 +37,7 @@ def assert_developer_mode():
     filesystem or run bench operations (bench_execute, write_file).
     """
     if not frappe.conf.get("developer_mode"):
-        frappe.throw(
-            _(
-                "This tool requires developer_mode=1 in site_config.json. "
-                "It is not available on production sites."
-            ),
-            frappe.PermissionError,
-        )
+        frappe.throw(_(DEV_MODE_REQUIRED_MESSAGE), frappe.PermissionError)
 
 
 def assert_system_manager():

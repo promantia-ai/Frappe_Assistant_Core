@@ -228,6 +228,7 @@ class DescribeApp(BaseTool):
             _("App '{0}' not found on this bench.").format(app_name),
         )
 
+        import_warning = None
         try:
             mod = importlib.import_module(app_name)
             v = getattr(mod, "__version__", "unknown")
@@ -235,8 +236,13 @@ class DescribeApp(BaseTool):
                 version = ".".join(str(x) for x in v)
             else:
                 version = str(v)
-        except Exception:
+        except Exception as e:
             version = "unknown"
+            # An import failure here means the app's scaffold is broken (e.g. a
+            # syntax error or missing dependency) — the same signal create_app's own
+            # CREATE_APP VERIFY RULE checks for separately. Surface it instead of
+            # only reporting "unknown", so this tool doesn't hide it.
+            import_warning = f"Could not import '{app_name}': {e}. The app's scaffold may be broken."
 
         modules = _get_modules(app_root, app_name)
 
@@ -247,7 +253,7 @@ class DescribeApp(BaseTool):
         tree, summary = _build_tree(app_root, max_depth, include_metadata, max_files, offset)
         summary["modules"] = len(modules)
 
-        return {
+        result = {
             "success": True,
             "app_name": app_name,
             "app_title": app_title,
@@ -257,6 +263,9 @@ class DescribeApp(BaseTool):
             "summary": summary,
             "message": f"Directory tree and structural metadata for '{app_name}'.",
         }
+        if import_warning is not None:
+            result["import_warning"] = import_warning
+        return result
 
 
 describe_app = DescribeApp

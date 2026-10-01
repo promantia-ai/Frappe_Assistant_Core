@@ -18,6 +18,7 @@ from frappe_assistant_core.plugins.developer_tools.guards import (
 )
 from frappe_assistant_core.plugins.developer_tools.pagination import (
     coerce_int_in_range,
+    coerce_offset,
     paginate,
 )
 
@@ -37,6 +38,11 @@ class ReadFile(BaseTool):
             "Read any source file from a Frappe app "
             "on the bench. Returns file content with "
             "line numbers, size, and truncation info. "
+            "DISPLAY RULE: Always show the returned "
+            "content verbatim in a code block, exactly "
+            "as returned including line numbers. Never "
+            "summarize or paraphrase file contents "
+            "instead of showing them. "
             "IMPORTANT: Always call describe_app first "
             "to get the exact file path from the tree. "
             "Never guess or construct paths manually. "
@@ -87,9 +93,7 @@ class ReadFile(BaseTool):
             _("max_lines must be between 1 and 2000. Got: {0}"),
         )
 
-        offset = int(arguments.get("offset", 0))
-        if offset < 0:
-            offset = 0
+        offset = coerce_offset(arguments.get("offset", 0))
 
         abs_path = resolve_and_validate_path(file_path)
 
@@ -125,7 +129,8 @@ class ReadFile(BaseTool):
 
         lines_to_return, total_lines, truncated = paginate(all_lines, offset, max_lines)
 
-        content = "\n".join(lines_to_return)
+        numbered_lines = [f"{offset + i + 1:>6}\t{line}" for i, line in enumerate(lines_to_return)]
+        content = "\n".join(numbered_lines)
         if truncated:
             end = offset + len(lines_to_return)
             content += (
