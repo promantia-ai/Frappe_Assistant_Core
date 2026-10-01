@@ -1104,17 +1104,29 @@ class FACOWidget {
 					3
 				);
 			} else {
-				throw new Error(result.message || "Upload failed");
+				throw new Error(this.upload_error_message(result));
 			}
 		} catch (error) {
 			FACOLogger.error("File upload error:", error);
 			frappe.show_alert(
 				{
-					message: __("Failed to upload file: {0}", [error.message || "Unknown error"]),
+					message: __("Failed to upload file: {0}", [
+						frappe.utils.escape_html(error.message || "Unknown error"),
+					]),
 					indicator: "red",
 				},
 				5
 			);
+		}
+	}
+
+	// A frappe.throw comes back as HTTP 417 with no `message` key: the text is in
+	// `_server_messages`, a JSON list of JSON-encoded {message, ...} dicts.
+	upload_error_message(result) {
+		try {
+			return JSON.parse(JSON.parse(result._server_messages)[0]).message || "Upload failed";
+		} catch (e) {
+			return "Upload failed";
 		}
 	}
 

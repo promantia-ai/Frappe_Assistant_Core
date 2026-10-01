@@ -163,6 +163,11 @@ def _extract_file_attachments(message_name: str) -> str:
                     file_contents.append("Content:")
                     file_contents.append(result["content"])
                     file_contents.append("-" * 80)
+                elif not result.get("success"):
+                    frappe.log_error(
+                        title="FACO File Extraction",
+                        message=f"Could not extract file {file_info.file_name}: {result.get('error')}",
+                    )
 
             except Exception as e:
                 frappe.log_error(

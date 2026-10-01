@@ -361,7 +361,7 @@ class ExtractFileContent(BaseTool):
             return "excel"
         elif file_name_lower.endswith(".docx"):
             return "docx"
-        elif file_name_lower.endswith((".txt", ".text")):
+        elif file_name_lower.endswith((".txt", ".text", ".json", ".xml")):
             return "text"
         else:
             # Try to detect from MIME type
@@ -377,7 +377,9 @@ class ExtractFileContent(BaseTool):
                     return "excel"
                 elif "word" in mime_type:
                     return "docx"
-                elif "text" in mime_type:
+                # Exact match: a bare "xml" substring would also catch OOXML
+                # types such as .pptx (application/vnd.openxmlformats-...).
+                elif "text" in mime_type or mime_type in ("application/json", "application/xml"):
                     return "text"
 
             return "unknown"
@@ -816,7 +818,11 @@ class ExtractFileContent(BaseTool):
             import pandas as pd
 
             # Try different encodings
-            for encoding in ["utf-8", "latin-1", "cp1252"]:
+            encodings = ["utf-8", "latin-1", "cp1252"]
+            # BOM-prefixed UTF-16 would otherwise "decode" as latin-1 garbage.
+            if file_content.startswith((b"\xff\xfe", b"\xfe\xff")):
+                encodings.insert(0, "utf-16")
+            for encoding in encodings:
                 try:
                     df = pd.read_csv(io.BytesIO(file_content), encoding=encoding)
                     break
@@ -868,7 +874,8 @@ class ExtractFileContent(BaseTool):
 
                 # Create text representation
                 sheet_content = f"=== Sheet: {sheet_name} ===\n"
-                sheet_content += f"Columns: {', '.join(df.columns.tolist())}\n"
+                # Headers can be numbers or dates (e.g. a "2024" column).
+                sheet_content += f"Columns: {', '.join(str(c) for c in df.columns)}\n"
                 sheet_content += f"Rows: {len(df)}\n\n"
                 sheet_content += df.head(10).to_string()
 
@@ -936,7 +943,11 @@ class ExtractFileContent(BaseTool):
         """Extract content from text file"""
         try:
             # Try different encodings
-            for encoding in ["utf-8", "latin-1", "cp1252", "ascii"]:
+            encodings = ["utf-8", "latin-1", "cp1252", "ascii"]
+            # BOM-prefixed UTF-16 would otherwise "decode" as latin-1 garbage.
+            if file_content.startswith((b"\xff\xfe", b"\xfe\xff")):
+                encodings.insert(0, "utf-16")
+            for encoding in encodings:
                 try:
                     text = file_content.decode(encoding)
                     return {"success": True, "content": text, "encoding": encoding}
