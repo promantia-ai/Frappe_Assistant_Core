@@ -71,6 +71,8 @@ class CorePlugin(BasePlugin):
             "get_pending_approvals",
             # Email
             "send_email",
+            # Data import
+            "start_import_session",
         ]
 
     def validate_environment(self):

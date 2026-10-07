@@ -30,6 +30,16 @@
     "content_file": "get_document.md"
   },
   {
+    "skill_id": "start-import-session-usage",
+    "title": "How to Use start_import_session",
+    "description": "Opening an import session for an uploaded spreadsheet: sheets, columns, row counts, samples, and coming back to it later",
+    "skill_type": "Tool Usage",
+    "linked_tool": "start_import_session",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "start_import_session.md"
+  },
+  {
     "skill_id": "update-document-usage",
     "title": "How to Use update_document",
     "description": "Modifying existing documents — partial updates, child tables, submitted document restrictions",
