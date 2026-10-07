@@ -4,7 +4,7 @@
 
 The `set_column_mapping` tool saves which column of the user's migration file goes to which ERPNext field, on the file's import session. The session keeps it across the conversation, so the mapping is still there on later turns. It is saved in Data Import's own format, so the import later uses it as it stands.
 
-Get the fields from `get_import_schema` first.
+The session comes from `start_import_session`. Get the fields from `get_import_schema` first. Saving moves the session to **Mapped** and adds a "Map Columns" row to its step log.
 
 ## Parameters
 
@@ -25,6 +25,7 @@ In `mapping`:
   "success": true,
   "session": "IMP-2026-00012",
   "doctype": "Item",
+  "status": "Mapped",
   "mapping": [
     {"column": "Code", "position": 0, "field": "item_code", "label": "Item Code"},
     {"column": "Group", "position": 1, "field": "item_group", "label": "Item Group"}

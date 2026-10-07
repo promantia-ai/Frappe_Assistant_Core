@@ -25,8 +25,8 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
-
-from .import_mapping import build_import_schema, check_import_target
+from frappe_assistant_core.plugins.core.import_mapping import build_import_schema
+from frappe_assistant_core.plugins.core.import_session import import_target_problem
 
 
 class GetImportSchema(BaseTool):
@@ -65,9 +65,10 @@ class GetImportSchema(BaseTool):
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         try:
             doctype = arguments.get("doctype")
-            error = check_import_target(doctype)
-            if error:
-                return error
+            # Refuse before any work when the user could never import into it.
+            problem = import_target_problem(doctype)
+            if problem:
+                return {"success": False, "error": problem, "doctype": doctype}
             return {"success": True, **build_import_schema(doctype)}
 
         except Exception as e:

@@ -44,10 +44,10 @@ Use this, not `get_doctype_info`, for imports. `get_doctype_info` returns a DocT
 
 ## When it fails
 
-It fails up front, with the reason, when the import can't happen. Tell the user and stop:
-- the user lacks **Create** or **Import** permission on the DocType (`error_type: "permission_error"`)
-- the DocType is a child table (the error names the parent to import instead), a settings DocType, or has imports turned off
-- the DocType doesn't exist (`suggestions` lists close names, e.g. "Custmer" → "Customer")
+It fails up front, with the reason in `error`, when the import can't happen. It uses the same check as `start_import_session`. Tell the user and stop:
+- the user lacks **Create** or **Import** permission on the DocType
+- the DocType is a child table (import it through its parent), a single settings record, or has Allow Import turned off
+- the DocType doesn't exist
 
 ## Best Practices
 

@@ -15,17 +15,18 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-Shared logic for the data migration mapping tools (#33989): which fields of a DocType can
-be imported, whether this user may import it, and the column mapping kept on an import
-session.
+Helpers for get_import_schema and set_column_mapping (#33989): which fields of a DocType
+can be imported, and the column mapping kept on a FAC Import Session.
 
 The mapping uses Data Import's own shape, ``template_options.column_to_field_map``:
 ``{"<0-based column position>": "<fieldname>" | "<table fieldname>.<fieldname>" | "Don't Import"}``,
 so the import itself (#33993) can copy it straight onto a Data Import.
+
+Whether the user may import into a DocType is import_session.import_target_problem, the
+check start_import_session uses.
 """
 
 import difflib
-import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
@@ -33,86 +34,7 @@ from frappe.model import display_fieldtypes, no_value_fields
 
 DONT_IMPORT = "Don't Import"
 MAX_SELECT_OPTIONS = 25
-
-# FAC Import Session comes from #33988. Its field names are kept here only, so following
-# that doctype is a change in one place.
 SESSION_DOCTYPE = "FAC Import Session"
-SESSION_FIELDS = {
-    "file": "source_file",
-    "sheet": "sheet",
-    "sheets": "sheets",
-    "target": "target_doctype",
-    "mapping": "template_options",
-}
-
-
-class SessionsUnavailable(Exception):
-    """The FAC Import Session doctype is not installed on this site."""
-
-
-# --- Import target -------------------------------------------------------------------
-
-
-def check_import_target(doctype: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Return an error result when this user can't import into `doctype`, else None.
-
-    It runs before any other work, so FACO can say so straight away.
-    """
-    from frappe.core.doctype.data_import.data_import import BLOCKED_DOCTYPES
-
-    from frappe_assistant_core.core.base_tool import permission_error_result
-
-    if not doctype or not frappe.db.exists("DocType", doctype):
-        result = {"success": False, "error": f"DocType '{doctype}' not found"}
-        names = frappe.get_all("DocType", filters={"istable": 0, "issingle": 0}, pluck="name")
-        suggestions = difflib.get_close_matches(doctype or "", names, n=3, cutoff=0.6)
-        if suggestions:
-            result["suggestions"] = suggestions
-        return result
-
-    meta = frappe.get_meta(doctype)
-    if meta.istable:
-        parents = sorted(
-            set(
-                frappe.get_all("DocField", filters={"fieldtype": "Table", "options": doctype}, pluck="parent")
-            )
-        )
-        return {
-            "success": False,
-            "error": (
-                f"{doctype} is a child table, so it can't be imported on its own. Import its parent "
-                f"({', '.join(parents) or 'the DocType that contains it'}) and map these columns as "
-                "'<table fieldname>.<fieldname>'."
-            ),
-        }
-    if meta.issingle:
-        return {
-            "success": False,
-            "error": f"{doctype} is a settings DocType with a single record, so it can't be imported.",
-        }
-    if doctype in BLOCKED_DOCTYPES:
-        return {"success": False, "error": f"Importing {doctype} is not allowed."}
-    if not meta.allow_import:
-        return {
-            "success": False,
-            "error": (
-                f"Data Import is not allowed for {doctype}. A System Manager can turn on "
-                "'Allow Import' for it in Customize Form."
-            ),
-        }
-
-    missing = []
-    if not (frappe.has_permission(doctype, "create") or frappe.has_permission(doctype, "write")):
-        missing.append("Create")
-    if not frappe.has_permission(doctype, "import"):
-        missing.append("Import")
-    if missing:
-        return permission_error_result(
-            doctype,
-            f"You don't have permission to import {doctype} records "
-            f"(needs {' and '.join(missing)} permission on {doctype}).",
-        )
-    return None
 
 
 # --- Schema --------------------------------------------------------------------------
@@ -375,80 +297,35 @@ def _table_title(table: Dict[str, Any]) -> str:
     return f"{table['label']} ({table['fieldname']})"
 
 
-# --- Import session (FAC Import Session, #33988) -----------------------------------------
+# --- Import session --------------------------------------------------------------------
 
 
 def load_session(name: str):
-    """The session document, if this user may change it.
-
-    Raises SessionsUnavailable, frappe.DoesNotExistError or frappe.PermissionError.
-    """
-    if not frappe.db.exists("DocType", SESSION_DOCTYPE):
-        raise SessionsUnavailable
+    """The session, if this user may change it. Raises DoesNotExistError or PermissionError."""
     doc = frappe.get_doc(SESSION_DOCTYPE, name)
     if not frappe.has_permission(SESSION_DOCTYPE, "write", doc=doc):
         raise frappe.PermissionError(f"You can't change import session {name}.")
     return doc
 
 
-def save_session(doc, target_doctype: str, column_to_field_map: Dict[str, str]) -> None:
-    options = _as_dict(doc.get(SESSION_FIELDS["mapping"]))
-    options["column_to_field_map"] = column_to_field_map
-    doc.set(SESSION_FIELDS["target"], target_doctype)
-    doc.set(SESSION_FIELDS["mapping"], json.dumps(options))
-    doc.save()
-
-
-def session_target(doc) -> Optional[str]:
-    return doc.get(SESSION_FIELDS["target"]) or None
+def session_headers(doc) -> List[str]:
+    """The chosen sheet's column headers, as start_import_session stored them."""
+    sheets = frappe.parse_json(doc.sheets or "[]") or []
+    chosen = [s for s in sheets if s.get("name") == doc.sheet] or sheets[:1]
+    return [str(column) for column in (chosen[0].get("columns") if chosen else None) or []]
 
 
 def session_mapping(doc) -> Dict[str, str]:
-    return dict(_as_dict(doc.get(SESSION_FIELDS["mapping"])).get("column_to_field_map") or {})
+    options = frappe.parse_json(doc.template_options or "{}") or {}
+    return dict(options.get("column_to_field_map") or {})
 
 
-def session_headers(doc) -> Optional[List[str]]:
-    """The chosen sheet's column headers, from the session or else from its file."""
-    sheet = doc.get(SESSION_FIELDS["sheet"])
-    sheets = _as_json(doc.get(SESSION_FIELDS["sheets"]))
-    entry = None
-    if isinstance(sheets, dict):
-        entry = sheets.get(sheet) if sheet else (next(iter(sheets.values())) if len(sheets) == 1 else None)
-    elif isinstance(sheets, list):
-        named = [s for s in sheets if isinstance(s, dict) and s.get("name") == sheet]
-        entry = named[0] if named else (sheets[0] if len(sheets) == 1 else None)
-    if isinstance(entry, dict) and (entry.get("headers") or entry.get("columns")):
-        return [str(h) for h in entry.get("headers") or entry.get("columns")]
-    return _headers_from_file(doc.get(SESSION_FIELDS["file"]), sheet)
-
-
-def _headers_from_file(file_ref: Optional[str], sheet: Optional[str]) -> Optional[List[str]]:
-    if not file_ref:
-        return None
-    from frappe_assistant_core.plugins.data_science.tools.extract_file_content import ExtractFileContent
-
-    file_url = file_ref if file_ref.startswith("/") else frappe.db.get_value("File", file_ref, "file_url")
-    if not file_url:
-        return None
-    result = ExtractFileContent().execute({"file_url": file_url, "operation": "parse_data"})
-    data = result.get("structured_data") if result.get("success") else None
-    if not isinstance(data, dict):
-        return None
-    if "columns" in data:  # CSV
-        return [str(c) for c in data["columns"]]
-    part = data.get(sheet) if sheet else (next(iter(data.values())) if len(data) == 1 else None)
-    return [str(c) for c in part["columns"]] if part else None
-
-
-def _as_json(value: Any) -> Any:
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except ValueError:
-            return None
-    return value
-
-
-def _as_dict(value: Any) -> Dict[str, Any]:
-    parsed = _as_json(value)
-    return dict(parsed) if isinstance(parsed, dict) else {}
+def save_mapping(doc, target_doctype: str, column_to_field_map: Dict[str, str], summary: str) -> None:
+    """Store the mapping, move the session to Mapped and log the step."""
+    options = frappe.parse_json(doc.template_options or "{}") or {}
+    options["column_to_field_map"] = column_to_field_map
+    doc.target_doctype = target_doctype
+    doc.template_options = frappe.as_json(options)
+    doc.status = "Mapped"
+    doc.log_step("Map Columns", "Success", summary)
+    doc.save()

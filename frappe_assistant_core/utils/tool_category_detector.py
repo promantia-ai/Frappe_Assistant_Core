@@ -88,6 +88,8 @@ READ_ONLY_TOOLS = {
     # Writes only the import session and its working copy, never business data.
     # As a write tool it would put an approval card on starting every import.
     "start_import_session",
+    # Writes only the session's mapping; as a write tool every correction would raise a card.
+    "set_column_mapping",
 }
 
 # Tools that are always categorized as write (hardcoded list)
@@ -95,8 +97,6 @@ WRITE_TOOLS = {
     # Document tools
     "create_document",
     "update_document",
-    # Data migration (saves the column mapping on an import session)
-    "set_column_mapping",
     # Document generation (saves a private Frappe File — a create side effect)
     "generate_document",  # Markdown -> PDF saved as a File record; NOT read-only
     # Workflow tools

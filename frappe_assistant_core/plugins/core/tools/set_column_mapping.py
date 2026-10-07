@@ -25,17 +25,19 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-
-from . import import_mapping
-from .import_mapping import (
+from frappe_assistant_core.plugins.core.import_mapping import (
+    DONT_IMPORT,
     SESSION_DOCTYPE,
-    SessionsUnavailable,
     build_import_schema,
-    check_import_target,
     describe_mapping,
     duplicate_targets,
+    load_session,
     resolve_mapping,
+    save_mapping,
+    session_headers,
+    session_mapping,
 )
+from frappe_assistant_core.plugins.core.import_session import import_target_problem
 
 
 class SetColumnMapping(BaseTool):
@@ -69,7 +71,7 @@ class SetColumnMapping(BaseTool):
                     "description": (
                         "Column → field. A column is its header exactly as in the file, or its "
                         "0-based position. A field is a fieldname, '<table fieldname>.<fieldname>' "
-                        f'for a child table, or "{import_mapping.DONT_IMPORT}" to skip the column.'
+                        f'for a child table, or "{DONT_IMPORT}" to skip the column.'
                     ),
                 },
                 "doctype": {
@@ -88,18 +90,13 @@ class SetColumnMapping(BaseTool):
                 return {"success": False, "error": "mapping must be an object of column → field."}
 
             try:
-                doc = import_mapping.load_session(session_name)
-            except SessionsUnavailable:
-                return {
-                    "success": False,
-                    "error": "Import sessions aren't available on this site yet (FAC Import Session is missing).",
-                }
+                doc = load_session(session_name)
             except frappe.DoesNotExistError:
                 return {"success": False, "error": f"Import session '{session_name}' not found."}
             except frappe.PermissionError as e:
                 return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
-            current_target = import_mapping.session_target(doc)
+            current_target = doc.target_doctype or None
             target = arguments.get("doctype") or current_target
             if not target:
                 return {
@@ -108,16 +105,16 @@ class SetColumnMapping(BaseTool):
                 }
 
             # Before any work: the user must be able to import into the target.
-            error = check_import_target(target)
-            if error:
-                return error
+            problem = import_target_problem(target)
+            if problem:
+                return {"success": False, "error": problem, "doctype": target}
 
-            headers = import_mapping.session_headers(doc)
+            headers = session_headers(doc)
             if not headers:
-                return {"success": False, "error": "Couldn't read the column headers of the session's file."}
+                return {"success": False, "error": "The session has no column headers for its sheet."}
 
             schema = build_import_schema(target)
-            existing = import_mapping.session_mapping(doc) if target == current_target else {}
+            existing = session_mapping(doc) if target == current_target else {}
             resolved, problems = resolve_mapping(target, schema, headers, mapping)
             merged = {**existing, **resolved}
             problems += duplicate_targets(merged, headers)
@@ -129,12 +126,14 @@ class SetColumnMapping(BaseTool):
                     "columns": headers,
                 }
 
-            import_mapping.save_session(doc, target, merged)
+            described = describe_mapping(schema, headers, merged)
+            save_mapping(doc, target, merged, described["summary"])
             return {
                 "success": True,
                 "session": session_name,
                 "doctype": target,
-                **describe_mapping(schema, headers, merged),
+                "status": doc.status,
+                **described,
             }
 
         except Exception as e:
