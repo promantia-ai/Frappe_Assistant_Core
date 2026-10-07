@@ -18,12 +18,26 @@ import zipfile
 
 import frappe
 from frappe import _
+from frappe.core.api.file import get_max_file_size
 from werkzeug.utils import secure_filename
 
 from .._rate_limits import (
     rate_limit,
     session_user_or_ip,
 )
+
+# Chat attachments never exceed this, even on a site that allows larger uploads.
+CHAT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _chat_upload_limit() -> int:
+    """
+    The largest chat attachment this site accepts. Frappe's File rejects anything over
+    System Settings → Max File Size (25 MB unless an administrator changed it), so
+    checking against that here lets us say how to raise it instead of failing in save.
+    """
+    return min(CHAT_UPLOAD_MAX_BYTES, get_max_file_size())
+
 
 # --- FACO-H11: upload validation allowlists ------------------------------------
 # Explicit extension / MIME whitelist for `upload_message_file`. Any file whose
@@ -191,8 +205,16 @@ def upload_message_file(
 
         file_size = len(content)
 
-        max_size = 50 * 1024 * 1024  # 50MB
+        max_size = _chat_upload_limit()
         if file_size > max_size:
+            if max_size < CHAT_UPLOAD_MAX_BYTES:
+                frappe.throw(
+                    _(
+                        "File is larger than this site's {0} MB upload limit. An administrator "
+                        "can raise it in System Settings → Max File Size (up to 50 MB)."
+                    ).format(f"{max_size / 1048576:g}"),
+                    frappe.ValidationError,
+                )
             frappe.throw(_("File size exceeds 50MB limit"), frappe.ValidationError)
 
         # --- FACO-H11: filename, extension, MIME, and magic-byte validation -----

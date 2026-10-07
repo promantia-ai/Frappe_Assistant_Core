@@ -1049,12 +1049,13 @@ class FACOWidget {
 	}
 
 	async handle_file_upload(file) {
-		// Validate file size (50MB max)
-		const maxSize = 50 * 1024 * 1024;
+		// Same limit the server applies: the site's Max File Size, never above 50MB
+		const chatMaxSize = 50 * 1024 * 1024;
+		const maxSize = Math.min(chatMaxSize, frappe.boot.max_file_size || chatMaxSize);
 		if (file.size > maxSize) {
 			frappe.show_alert(
 				{
-					message: __("File size exceeds 50MB limit"),
+					message: __("File size exceeds {0} MB limit", [maxSize / 1048576]),
 					indicator: "red",
 				},
 				5
