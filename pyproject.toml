@@ -36,6 +36,7 @@ dependencies = [
     "scipy>=1.7.0",
     "openpyxl>=3.0.0",  # Excel support for pandas
     "xlrd>=2.0.1",  # Legacy .xls support for pandas
+    "lxml>=4.9.0",  # XML data exports (e.g. Tally)
     # Additional analysis libraries
     "scikit-learn>=1.0.0",
     "bokeh>=2.4.0",

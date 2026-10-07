@@ -6,6 +6,8 @@
 """JSON and XML pass the upload allowlist, so they have to reach FACO too.
 They used to fall through _detect_file_type as "unknown": dropped from the
 prompt, and — now that failed extractions are logged — an Error Log per send.
+XML is a data export (Tally writes XML), so like a spreadsheet only its summary
+goes into the prompt; the full file stays on the server.
 """
 
 import base64
@@ -19,7 +21,9 @@ from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
 
 class TestJsonXmlAttachments(BaseAssistantTest):
-    def _assert_reaches_faco(self, file_name: str, content_type: str, text: str, message_name: str):
+    def _assert_reaches_faco(
+        self, file_name: str, content_type: str, text: str, message_name: str, expected: tuple = ()
+    ) -> str:
         with patch(
             "frappe_assistant_core.chat.api.settings.access.can_use_faco",
             return_value={"can_use": True},
@@ -36,7 +40,9 @@ class TestJsonXmlAttachments(BaseAssistantTest):
 
         self.assertEqual(frappe.db.count("Error Log"), logs_before)
         self.assertIn(f"File: {file_name}", extracted)
-        self.assertIn(text, extracted)
+        for snippet in expected or (text,):
+            self.assertIn(snippet, extracted)
+        return extracted
 
     def test_json_attachment_reaches_faco(self):
         # Unique per run: Frappe content-addresses uploads.
@@ -48,11 +54,17 @@ class TestJsonXmlAttachments(BaseAssistantTest):
             "FACMSG-TEST-JSON",
         )
 
-    def test_xml_attachment_reaches_faco(self):
+    def test_xml_attachment_reaches_faco_as_a_summary(self):
         tag = frappe.generate_hash(length=8)
-        self._assert_reaches_faco(
+        customers = "".join(
+            f'<customer territory="India"><name>Acme {tag} {i}</name></customer>' for i in range(12)
+        )
+        extracted = self._assert_reaches_faco(
             "customers.xml",
             "text/xml",
-            f'<customers><customer territory="India">Acme {tag}</customer></customers>',
+            f"<customers>{customers}</customers>",
             "FACMSG-TEST-XML",
+            expected=("=== Records: customer ===", "Columns: territory, name", "Rows: 12", f"Acme {tag} 9"),
         )
+        self.assertNotIn(f"Acme {tag} 10", extracted)
+        self.assertNotIn("<customer", extracted)

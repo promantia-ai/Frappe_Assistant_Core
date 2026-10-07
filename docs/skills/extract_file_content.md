@@ -21,7 +21,7 @@ The `extract_file_content` tool extracts text and data from files stored in Frap
 |-----------|---------|---------|
 | `extract` | Get text content | PDF, DOCX, TXT |
 | `ocr` | Extract text from images | JPG, PNG (uses PaddleOCR) |
-| `parse_data` | Structured data extraction | CSV, Excel (XLSX) |
+| `parse_data` | Structured data extraction | CSV, Excel (XLSX, XLS), XML data exports (e.g. Tally) |
 | `extract_tables` | Table extraction from PDFs | PDF |
 
 ## Best Practices
@@ -29,6 +29,9 @@ The `extract_file_content` tool extracts text and data from files stored in Frap
 1. **Provide either `file_url` OR `file_name`** — not both. `file_url` is the path like `"/files/doc.pdf"` or `"/private/files/doc.pdf"`.
 2. **Use `ocr` for images** — supports invoices, forms, receipts, screenshots.
 3. **Use `parse_data` for spreadsheets** — returns structured data ready for analysis.
+   Spreadsheets and XML exports come back as a summary, not the whole file: each sheet (or,
+   for XML, each record type such as a Tally `LEDGER` or `VOUCHER`) with its columns, row
+   count and first 10 rows.
 4. **Use `extract_tables` for PDF tables** — better than plain `extract` when PDFs contain tabular data.
 5. **Set `output_format: "json"`** — for structured output suitable for further processing.
 6. **Use `language` for non-English** — common codes: `"fr"`, `"de"`, `"es"`, `"ch"` (Chinese).
