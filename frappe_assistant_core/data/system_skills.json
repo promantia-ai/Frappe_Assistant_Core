@@ -80,6 +80,26 @@
     "content_file": "get_doctype_info.md"
   },
   {
+    "skill_id": "get-import-schema-usage",
+    "title": "How to Use get_import_schema",
+    "description": "Listing the fields a data import can fill on a DocType, with child tables, for mapping a migration file",
+    "skill_type": "Tool Usage",
+    "linked_tool": "get_import_schema",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "get_import_schema.md"
+  },
+  {
+    "skill_id": "set-column-mapping-usage",
+    "title": "How to Use set_column_mapping",
+    "description": "Saving and correcting a migration file's column-to-field mapping on its import session",
+    "skill_type": "Tool Usage",
+    "linked_tool": "set_column_mapping",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "set_column_mapping.md"
+  },
+  {
     "skill_id": "run-database-query-usage",
     "title": "How to Use run_database_query",
     "description": "SQL queries with analysis_type, validation, table naming conventions, JOINs, and aggregations",

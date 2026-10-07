@@ -59,6 +59,9 @@ class CorePlugin(BasePlugin):
             "chatgpt_fetch",
             # Metadata tools
             "get_doctype_info",
+            # Data migration tools
+            "get_import_schema",
+            "set_column_mapping",
             # Report tools (individual classes)
             "generate_report",
             "report_list",

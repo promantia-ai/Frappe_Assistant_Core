@@ -62,6 +62,7 @@ READ_ONLY_TOOLS = {
     # Metadata tools
     "get_doctype_info",
     "metadata_doctype",
+    "get_import_schema",  # Reads metadata; its create/import checks only decide what to report
     # Report tools
     "report_execute",
     "report_list",
@@ -91,6 +92,8 @@ WRITE_TOOLS = {
     # Document tools
     "create_document",
     "update_document",
+    # Data migration (saves the column mapping on an import session)
+    "set_column_mapping",
     # Document generation (saves a private Frappe File — a create side effect)
     "generate_document",  # Markdown -> PDF saved as a File record; NOT read-only
     # Workflow tools
