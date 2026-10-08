@@ -110,6 +110,16 @@
     "content_file": "set_column_mapping.md"
   },
   {
+    "skill_id": "dry-run-import-usage",
+    "title": "How to Use dry_run_import",
+    "description": "Checking every row of a migration file before importing: the grouped failures, large files in the background, and checking again after fixes",
+    "skill_type": "Tool Usage",
+    "linked_tool": "dry_run_import",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "dry_run_import.md"
+  },
+  {
     "skill_id": "run-database-query-usage",
     "title": "How to Use run_database_query",
     "description": "SQL queries with analysis_type, validation, table naming conventions, JOINs, and aggregations",

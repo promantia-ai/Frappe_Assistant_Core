@@ -52,6 +52,7 @@ Supported files: `.csv`, `.xlsx`, `.xls`. **Row 1 must hold the column headers.*
 1. Work out the target DocType from the columns (unless the user already said), and tell the user which one and why.
 2. `get_import_schema(doctype)` for the fields the columns can map to.
 3. `set_column_mapping(session, mapping, doctype)` to save the mapping, then show the user the table it returns.
+4. `dry_run_import(session)` to check every row before anything is imported.
 
 ## Coming back later
 

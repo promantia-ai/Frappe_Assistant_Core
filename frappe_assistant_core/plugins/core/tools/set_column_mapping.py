@@ -58,7 +58,8 @@ class SetColumnMapping(BaseTool):
             "any is wrong: the result says what to fix. Pass doctype the first time, or to change "
             "the target (that clears the old mapping). The result is the full mapping to show the "
             "user: parent fields and each child table apart, with unmapped columns and required "
-            "fields that have no column."
+            "fields that have no column. Next, once the user agrees the mapping: dry_run_import to "
+            "check every row."
         )
         self.requires_permission = None  # Checked on the session and the target DocType
 
