@@ -10,9 +10,9 @@
 Helpers for start_import_session: checking file access, checking that the user
 may import into a target DocType, and reading a spreadsheet.
 
-Cells are read as text, the way Data Import will see them. Only the headers,
-the row counts and a few sample rows are kept and returned to the assistant; no
-copy of the file is saved.
+Cells are read as text, the way Data Import will see them. The assistant gets the
+headers, row counts and a few sample rows; the session stores only the headers and
+row counts. No row of the file is saved.
 """
 
 import datetime
@@ -38,12 +38,8 @@ class SheetSummary:
     sample_rows: List[List[str]] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "columns": self.columns,
-            "row_count": self.row_count,
-            "sample_rows": self.sample_rows,
-        }
+        """What the session stores: no sample rows, so no data from the file."""
+        return {"name": self.name, "columns": self.columns, "row_count": self.row_count}
 
 
 @dataclass

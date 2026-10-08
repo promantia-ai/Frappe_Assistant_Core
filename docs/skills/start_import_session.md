@@ -4,7 +4,7 @@
 
 The `start_import_session` tool starts a data import for a spreadsheet the user wants to import. It opens an **import session**: a record on the site that keeps the file's details, the decisions made along the way (mapping, fixes, validation results) and a log of every step. The user can carry on in a later message. **Keep the `session_id`.**
 
-**No copy of the file is saved.** The file stays where the user attached it. The session holds only its details: name, sheet, columns, row count and up to 10 sample rows.
+**No copy of the file is saved.** The file stays where the user attached it, and every later step reads it from there. The session is the audit record: it holds only the file's name, sheet, columns and row count, never its rows.
 
 Call it when the user asks to **import** a file, not just to look at one.
 
@@ -15,7 +15,7 @@ Give the file in one of two ways:
 | Parameter | Type | When |
 |-----------|------|------|
 | `file_url` | string | The file is **on this site**, e.g. a FAC Chat attachment such as `/private/files/customers.xlsx`. The tool reads its sheets itself. |
-| `file_name` + `columns` + `row_count` (+ `sheet`, `sample_rows`) | string, array, integer | The file is **attached in this chat** (Claude, ChatGPT) and not on the site. Read the file yourself and pass its name, the sheet you used, the column headers, the number of data rows (not counting the header) and **up to 10** sample rows as lists in column order. **Never pass more than 10 rows.** |
+| `file_name` + `columns` + `row_count` (+ `sheet`) | string, array, integer | The file is **attached in this chat** (Claude, ChatGPT) and not on the site. Read the file yourself and pass its name, the sheet you used, the column headers and the number of data rows (not counting the header). **Never pass its rows.** |
 
 Other parameters:
 
@@ -44,8 +44,14 @@ Supported files: `.csv`, `.xlsx`, `.xls`. **Row 1 must hold the column headers.*
 }
 ```
 
-- For `file_url`, `sample_rows` hold text the way Data Import will read it: dates as `YYYY-MM-DD`, whole numbers without `.0`. `row_count` skips blank rows.
+- `sample_rows` (up to 10) come back only for `file_url`, so you can show the user what was read. They are text the way Data Import will read it: dates as `YYYY-MM-DD`, whole numbers without `.0`. They are **not stored** on the session. `row_count` skips blank rows.
 - `note` appears when other sheets of a workbook also have rows. Only one sheet is used per session.
+
+## Next
+
+1. Work out the target DocType from the columns (unless the user already said), and tell the user which one and why.
+2. `get_import_schema(doctype)` for the fields the columns can map to.
+3. `set_column_mapping(session, mapping, doctype)` to save the mapping, then show the user the table it returns.
 
 ## Coming back later
 
@@ -61,7 +67,7 @@ Its `status`, `template_options` (mapping), `transformation_rules`, `validation_
 
 1. **Tell the user what you recorded:** sheet, columns and row count, plus any `note`.
 2. **Pass `target_doctype` when the user has already said what the file is,** so a user who cannot import into it is told straight away.
-3. **Never invent rows,** and never pass the file's full contents.
+3. **Never invent rows,** and never pass the file's rows.
 
 ## Edge Cases
 

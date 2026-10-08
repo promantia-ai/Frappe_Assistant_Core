@@ -22,7 +22,6 @@ from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
 from frappe_assistant_core.plugins.core.import_session import (
-    SAMPLE_SIZE,
     FileProblem,
     SheetSummary,
     get_readable_file,
@@ -43,9 +42,11 @@ class StartImportSession(BaseTool):
             "the mapping, fixes and validation results between messages. For a file on this site "
             "(a FAC Chat attachment) pass file_url and the tool reads its sheets. For a file "
             "attached in this chat that is not on the site, read it yourself and pass file_name, "
-            "sheet, columns, row_count and up to 10 sample_rows; never pass more rows. No copy of "
-            "the file is saved. Keep the returned session_id; read the session later with "
-            "get_document (doctype 'FAC Import Session'). Writes no business data."
+            "sheet, columns and row_count; never pass its rows. The session stores no row of the "
+            "file. Keep the returned session_id; read the session later with get_document (doctype "
+            "'FAC Import Session'). Next: work out the target DocType from the columns and tell the "
+            "user why, call get_import_schema for its fields, then save the mapping with "
+            "set_column_mapping. Writes no business data."
         )
         self.requires_permission = None  # file access and target permission are checked per call
 
@@ -73,11 +74,6 @@ class StartImportSession(BaseTool):
                 "row_count": {
                     "type": "integer",
                     "description": "With file_name: the number of data rows, not counting the header.",
-                },
-                "sample_rows": {
-                    "type": "array",
-                    "items": {"type": "array"},
-                    "description": f"With file_name: up to {SAMPLE_SIZE} rows, as lists in column order.",
                 },
                 "target_doctype": {
                     "type": "string",
@@ -135,11 +131,13 @@ class StartImportSession(BaseTool):
             "sheet": chosen.name,
             "columns": chosen.columns,
             "row_count": chosen.row_count,
-            "sample_rows": chosen.sample_rows,
-            "sheets": [{"name": s.name, "columns": s.columns, "row_count": s.row_count} for s in sheets],
+            "sheets": [s.as_dict() for s in sheets],
             "target_doctype": target_doctype,
             "status": session.status,
         }
+        if file_doc:
+            # Read from the site file for the assistant to show; never stored.
+            result["sample_rows"] = chosen.sample_rows
         ignored = [s.name for s in sheets if s is not chosen and s.row_count]
         if ignored:
             result["note"] = _(
@@ -185,17 +183,10 @@ def _summary_from_chat(arguments: Dict[str, Any]) -> SheetSummary:
     if row_count is None:
         raise FileProblem(_("Give the row_count of the file attached in the chat."))
 
-    width = len(columns)
-    samples = []
-    for row in (arguments.get("sample_rows") or [])[:SAMPLE_SIZE]:
-        values = ["" if v is None else str(v) for v in (row if isinstance(row, list) else [row])]
-        samples.append((values + [""] * width)[:width])
-
     return SheetSummary(
         name=arguments.get("sheet") or None,
         columns=[str(c) for c in columns],
         row_count=int(row_count),
-        sample_rows=samples,
     )
 
 

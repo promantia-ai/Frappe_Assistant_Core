@@ -8,6 +8,7 @@
  "field_order": [
   "source_section",
   "file_name",
+  "started_on",
   "source_file",
   "file_source",
   "sheet",
@@ -54,6 +55,15 @@
    "label": "File Name",
    "read_only": 1,
    "description": "Name of the file the user attached."
+  },
+  {
+   "default": "Now",
+   "description": "When the session was started.",
+   "fieldname": "started_on",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Started On",
+   "read_only": 1
   },
   {
    "description": "The file on this site, when the file was uploaded here (FAC Chat). Empty when the file stays in the chat.",
@@ -170,7 +180,7 @@
    "label": "File Summary"
   },
   {
-   "description": "Each sheet's name, headers, row count and up to 10 sample rows. The file itself is not stored.",
+   "description": "Each sheet's name, headers and row count. No row of the file is stored.",
    "fieldname": "sheets",
    "fieldtype": "JSON",
    "label": "Sheets",
@@ -281,7 +291,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-07 00:00:00.000000",
+ "modified": "2026-10-07 23:00:00.000000",
  "modified_by": "Administrator",
  "module": "Assistant Core",
  "name": "FAC Import Session",
