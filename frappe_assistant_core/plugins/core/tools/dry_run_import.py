@@ -21,6 +21,7 @@ from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+from frappe_assistant_core.plugins.core import import_fixes
 from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
 from frappe_assistant_core.plugins.core.import_session import FileProblem
 
@@ -40,8 +41,14 @@ class DryRunImport(BaseTool):
             f"more than {dry_run.BACKGROUND_ROWS} rows are checked in the background: say so, and "
             "read the session with get_document later (progress, then validation_summary). The "
             "file must be on this site: if the session's file is only in the chat, ask the user "
-            "to attach it in FAC Chat and pass its file_url. Next: explain each group and agree "
-            "fixes with the user."
+            "to attach it in FAC Chat and pass its file_url. Each group comes with a plain "
+            "explanation and the fixes that fit it: explain it and offer only those fixes. Then "
+            "call again with the user's choices in fixes: they are saved on the session and every "
+            "row is checked again. Per group: 'map' a value to an existing one ('to': one of the "
+            "group's 'closest' names, or one the user gives; never invent one), or 'leave_out' "
+            "its rows (with a reason; the import skips and lists them). To create a missing "
+            "record, use create_document, then call again without fixes. Nothing is saved if any "
+            "fix is wrong. Group ids change with every check: use the latest."
         )
         self.requires_permission = None  # checked on the session and the target DocType
 
@@ -54,12 +61,37 @@ class DryRunImport(BaseTool):
                     "description": "Only when the session's file is just in the chat: the same file "
                     "on this site, e.g. a FAC Chat attachment. Its columns must match.",
                 },
+                "fixes": {
+                    "type": "array",
+                    "description": "The user's fixes for the last check's groups, one per group, "
+                    "applied together before checking again.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "group": {"type": "string", "description": "Group id, e.g. 'G1'"},
+                            "action": {"type": "string", "enum": list(import_fixes.ACTIONS)},
+                            "to": {
+                                "type": "string",
+                                "description": "For 'map': the existing value to use instead.",
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "For 'leave_out': why, in the user's words.",
+                            },
+                        },
+                        "required": ["group", "action"],
+                    },
+                },
             },
             "required": ["session"],
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         session_name = arguments.get("session")
+        # Clients fill optional inputs in, so an empty list means no fixes, as a missing one does.
+        fixes = arguments.get("fixes") or None
+        if fixes is not None and (not isinstance(fixes, list) or not all(isinstance(f, dict) for f in fixes)):
+            return {"success": False, "error": "fixes must be a list of {group, action, ...}."}
         try:
             session = load_session(session_name)
         except frappe.DoesNotExistError:
@@ -69,42 +101,47 @@ class DryRunImport(BaseTool):
 
         try:
             if dry_run.is_running(session):
+                if fixes:
+                    raise dry_run.DryRunProblem(
+                        _("The file is still being checked. Apply the fixes once the check has finished.")
+                    )
                 return self._running(session)
             if arguments.get("file_url"):
                 dry_run.link_site_file(session, arguments["file_url"])
+            if fixes and session.status not in ("Dry Run Failed", "Ready to Import"):
+                raise dry_run.DryRunProblem(
+                    _("Check the file first, without fixes; fixes apply to the groups it finds.")
+                )
             dry_run.check_can_run(session)
+
+            applied = None
+            if fixes:
+                applied = import_fixes.apply_fixes(session, import_fixes.last_groups(session), fixes)
+                session.save()
 
             if dry_run.row_count(session) > dry_run.BACKGROUND_ROWS:
                 dry_run.enqueue(session)
-                return self._running(session)
+                return self._running(session, applied)
 
             summary = dry_run.run(session.name)
-        except (dry_run.DryRunProblem, FileProblem) as e:
+        except import_fixes.FixProblems as e:
+            return {"success": False, "error": str(e), "problems": e.problems, "session": session_name}
+        except (import_fixes.FixProblem, dry_run.DryRunProblem, FileProblem) as e:
             return {"success": False, "error": str(e), "session": session_name}
         except Exception as e:
             frappe.log_error(title=_("Dry Run Import Error"), message=frappe.get_traceback())
             return {"success": False, "error": str(e), "session": session_name}
 
         session.reload()
-        examples = dry_run.examples(session, summary["groups"])
-        groups = []
-        for group in summary["groups"]:
-            shown = {k: v for k, v in group.items() if k != "example_rows"}
-            shown["examples"] = examples.get(group["id"], [])
-            groups.append(shown)
-        return {
-            "success": True,
-            "session": session.name,
-            "status": session.status,
-            "message": dry_run.headline(summary) + " " + _("Nothing was written."),
-            **{k: v for k, v in summary.items() if k != "groups"},
-            "groups": groups,
-        }
+        result = {"success": True, **import_fixes.report(session, summary)}
+        if applied:
+            result["applied"] = applied
+        return result
 
     @staticmethod
-    def _running(session) -> Dict[str, Any]:
+    def _running(session, applied=None) -> Dict[str, Any]:
         progress = frappe.parse_json(session.progress or "{}") or {}
-        return {
+        result = {
             "success": True,
             "session": session.name,
             "state": "running",
@@ -115,6 +152,9 @@ class DryRunImport(BaseTool):
                 "progress; the result will be in validation_summary."
             ),
         }
+        if applied:
+            result["applied"] = applied
+        return result
 
 
 # Make sure class name matches file name for discovery

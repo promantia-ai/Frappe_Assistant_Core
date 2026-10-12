@@ -206,9 +206,11 @@ def _progress(state: str, done: int, total: int) -> str:
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """Check every row of the session's file. Stores the result on the session and
     returns the summary, with up to three example rows per group for the model."""
+    from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
+
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
     file_doc = frappe.get_doc("File", session.source_file)
-    rows = read_sheet_rows(file_doc, session.sheet or None)
+    rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
     import_file = _parse(session, file_doc, rows)
     payloads = import_file.get_payloads_for_import()
 

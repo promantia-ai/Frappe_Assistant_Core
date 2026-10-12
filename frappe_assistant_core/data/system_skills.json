@@ -112,7 +112,7 @@
   {
     "skill_id": "dry-run-import-usage",
     "title": "How to Use dry_run_import",
-    "description": "Checking every row of a migration file before importing: the grouped failures, large files in the background, and checking again after fixes",
+    "description": "Checking every row of a migration file before importing: the grouped failures explained in plain words, fixing them with the user, large files in the background",
     "skill_type": "Tool Usage",
     "linked_tool": "dry_run_import",
     "status": "Published",
