@@ -79,6 +79,7 @@
 						:messages="messages"
 						:is-loading="isLoading"
 						:is-streaming="isStreaming"
+						:is-resuming="chatStore.isSubmittingInterrupts"
 						@registration-complete="handleRegistrationComplete"
 						@user-connected="handleUserConnected"
 						@feature-tour-complete="handleFeatureTourComplete"
@@ -134,6 +135,8 @@
 				<ContextRail
 					:artifacts="activeArtifacts"
 					:live="activeTurnIsLive"
+					:stopped="activeTurnStopped"
+					:paused="activeTurnPaused"
 					collapsible
 					@review-approval="handleRailReviewApproval"
 					@collapse="collapseRailDock"
@@ -165,6 +168,8 @@
 					<ContextRail
 						:artifacts="activeArtifacts"
 						:live="activeTurnIsLive"
+						:stopped="activeTurnStopped"
+						:paused="activeTurnPaused"
 						@review-approval="handleRailReviewApproval"
 					/>
 				</aside>
@@ -195,6 +200,8 @@
 						<ContextRail
 						:artifacts="activeArtifacts"
 						:live="activeTurnIsLive"
+						:stopped="activeTurnStopped"
+						:paused="activeTurnPaused"
 						@review-approval="handleRailReviewApproval"
 					/>
 					</div>
@@ -259,6 +266,7 @@ import { useRobotMoodWiring } from "@/composables/useRobotMoodWiring";
 import { useContextRail } from "@/composables/useContextRail";
 import { useSheetDismiss } from "@/composables/useSheetDismiss";
 import { deriveArtifacts } from "@/utils/contextArtifacts";
+import { isPausedTurn, isStoppedTurn } from "@/utils/turnState";
 import ContextRail from "@/components/chat/ContextRail.vue";
 import { logger } from "@/utils/logger";
 import { usePreferences } from "@/composables/usePreferences";
@@ -344,7 +352,7 @@ usePromptFromRoute({
 });
 
 // File pre-upload flow (matches widget — upload on select, attach on send)
-const { handleFileUpload, consumeUploadedFiles } = useMessageFileUpload();
+const { handleFileUpload, consumeUploadedFiles, discardUploads } = useMessageFileUpload();
 
 // True during onboarding screens (registration, user setup, feature tour) — hides sidebar & topbar
 const isOnboarding = computed(() => {
@@ -394,6 +402,12 @@ const activeArtifacts = computed(() => deriveArtifacts(activeAssistantMessage.va
 // Drives whether the rail still presents work as in flight. A hydrated message
 // carries no isStreaming flag, so a reloaded conversation reads as finished.
 const activeTurnIsLive = computed(() => Boolean(activeAssistantMessage.value?.isStreaming));
+const activeTurnStopped = computed(() => isStoppedTurn(activeAssistantMessage.value));
+// Waiting on a card, or on the resume an answered card started (the card is
+// already resolved, but the message streams again only once the resume lands).
+const activeTurnPaused = computed(
+	() => isPausedTurn(activeAssistantMessage.value?.blocks) || chatStore.isSubmittingInterrupts
+);
 
 const railHasArtifacts = computed(() => activeArtifacts.value.hasArtifacts);
 const {
@@ -576,7 +590,7 @@ const composerBindings = computed(() => ({
 	onBrowseTemplates: openTemplateBrowser,
 }));
 
-async function handleSendMessage({ message }) {
+async function handleSendMessage({ message, files = [] }) {
 	pendingPrompt.value = "";
 	const route = resolveComposerRoute({
 		isStreaming: isStreaming.value,
@@ -586,8 +600,8 @@ async function handleSendMessage({ message }) {
 		// The resume wire format has no attachment slot — staged files can't
 		// ride along with a card answer, so drop them and say so rather than
 		// silently losing what the user just uploaded.
-		const staged = consumeUploadedFiles();
-		if (staged.length) {
+		discardUploads(files);
+		if (files.length) {
 			showError("Attachments can't be sent with a card answer — they were removed.");
 		}
 		await chatStore.answerPendingQuestion(message);
@@ -597,11 +611,11 @@ async function handleSendMessage({ message }) {
 		await chatStore.abortPendingInteraction();
 	}
 	const modelId = modelStore.currentModelId;
-	const files = consumeUploadedFiles();
+	const uploaded = await consumeUploadedFiles(files);
 	// Abandoning a card means "send this now" — isStreaming can still read true
 	// at this point (see chatStore.sendMessage), so route the same signal that
 	// picked this branch straight through rather than letting it get queued.
-	await chatStore.sendMessage(message, files, currentContext.value, modelId, null, {
+	await chatStore.sendMessage(message, uploaded, currentContext.value, modelId, null, {
 		skipQueue: route === "abort-then-send",
 	});
 }
