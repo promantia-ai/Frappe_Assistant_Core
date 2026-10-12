@@ -329,6 +329,123 @@ class TestImportFixes(BaseAssistantTest):
         summary = json.loads(self._doc(session).validation_summary)
         self.assertEqual((summary["ready"], summary["failed"]), (3, 2))
 
+    def test_a_background_check_leaves_the_same_explained_reply_for_the_model(self):
+        session, result = self._session()
+
+        with patch.object(import_dry_run, "BACKGROUND_ROWS", 2), patch("frappe.enqueue"):
+            started = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual(started["state"], "running")
+        import_dry_run.run_job(session, "Administrator")  # what the queued job runs
+
+        # FACO reads it with get_document: the explanations and fixes are there, as they are
+        # in a reply that came back at once.
+        summary = json.loads(self._doc(session).validation_summary)
+        link = self._group(summary, "Missing link")
+        self.assertEqual(
+            link["explanation"], f"2 rows: there is no Customer Group called '{self.missing}' in ERPNext."
+        )
+        self.assertEqual(link["fixes"][0]["closest"][0], self.existing_group)
+        self.assertEqual(summary["message"], result["message"])
+
+    def test_a_background_check_with_nothing_failing_says_the_file_is_ready(self):
+        session, _result = self._session([[f"Clean {self.tag}", self.existing_group, "Company", ""]])
+
+        with patch.object(import_dry_run, "BACKGROUND_ROWS", 0), patch("frappe.enqueue"):
+            self._run("dry_run_import", {"session": session})
+        import_dry_run.run_job(session, "Administrator")
+
+        summary = json.loads(self._doc(session).validation_summary)
+        self.assertIn("The file is ready: 1 row will be imported.", summary["message"])
+
+    def test_a_group_keeps_its_id_so_a_fix_from_an_earlier_reply_hits_the_same_rows(self):
+        session, first = self._session()
+        link = self._group(first, "Missing link")
+        option = self._group(first, "Not an allowed option")
+        self._fix(session, {"group": link["id"], "action": "map", "to": self.existing_group})
+
+        # The user's next answer, acted on with the id from the first reply.
+        self._fix(session, {"group": option["id"], "action": "leave_out", "reason": "Robots"})
+
+        self.assertEqual(json.loads(self._doc(session).excluded_rows), [5])
+
+    def test_the_id_of_a_group_already_fixed_is_refused(self):
+        session, first = self._session()
+        link = self._group(first, "Missing link")
+        self._fix(session, {"group": link["id"], "action": "map", "to": self.existing_group})
+
+        response = self._fix_fails(session, {"group": link["id"], "action": "leave_out"})
+
+        self.assertIn(f"no group {link['id']}", response["problems"][0]["error"])
+        self.assertFalse(self._doc(session).excluded_rows)
+
+    def test_a_different_file_puts_the_rows_left_out_back_to_be_checked(self):
+        session, result = self._session()
+        link = self._group(result, "Missing link")
+        self._fix(session, {"group": link["id"], "action": "leave_out", "reason": "Old shop"})
+        # The corrected export: same columns, but other rows are at rows 3 and 4 now.
+        lines = ["Customer Name,Customer Group,Customer Type,Notes"]
+        lines += [",".join(row) for row in reversed(self._rows())]
+        corrected = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "customers-corrected.csv",
+                "content": ("\n".join(lines) + "\n").encode(),
+                "is_private": 1,
+            }
+        ).insert()
+
+        response = self._run("dry_run_import", {"session": session, "file_url": corrected.file_url})
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(response["result"]["excluded"], 0)
+        self.assertIn("2 rows left out before are checked again", response["result"]["notice"])
+        doc = self._doc(session)
+        self.assertFalse(doc.excluded_rows)
+        self.assertNotIn("left_out", json.loads(doc.transformation_rules or "{}"))
+
+    def test_the_same_file_linked_again_keeps_the_rows_left_out(self):
+        session, result = self._session()
+        link = self._group(result, "Missing link")
+        self._fix(session, {"group": link["id"], "action": "leave_out", "reason": "Old shop"})
+        same = frappe.db.get_value("File", self._doc(session).source_file, "file_url")
+
+        response = self._run("dry_run_import", {"session": session, "file_url": same})
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(response["result"]["excluded"], 2)
+        self.assertEqual(json.loads(self._doc(session).excluded_rows), [3, 4])
+
+    def test_a_new_file_and_fixes_in_one_call_are_refused(self):
+        session, result = self._session()
+        link = self._group(result, "Missing link")
+        other = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "customers-other.csv",
+                "content": f"Customer Name,Customer Group,Customer Type,Notes\nZeta {self.tag},x,Company,\n".encode(),
+                "is_private": 1,
+            }
+        ).insert()
+
+        response = self._run(
+            "dry_run_import",
+            {
+                "session": session,
+                "file_url": other.file_url,
+                "fixes": [{"group": link["id"], "action": "leave_out"}],
+            },
+        )
+
+        self.assertFalse(response["success"], response)
+        doc = self._doc(session)
+        self.assertFalse(doc.excluded_rows)
+        self.assertNotEqual(frappe.db.get_value("File", doc.source_file, "file_url"), other.file_url)
+
+    def test_closest_names_are_empty_for_a_doctype_the_user_cannot_read(self):
+        frappe.set_user(self.make_throwaway_user("noread", roles=("Blogger",)))
+
+        self.assertEqual(import_fixes.closest_names("Customer Group", self.missing), [])
+
     def test_an_empty_fixes_list_is_a_plain_check(self):
         session, _result = self._session()
 
@@ -354,6 +471,49 @@ class TestImportFixes(BaseAssistantTest):
         self.assertEqual([f["action"] for f in duplicate["fixes"]], ["leave_out"])
         response = self._fix_fails(session, {"group": duplicate["id"], "action": "map", "to": "x"})
         self.assertIn("Only a missing link", response["problems"][0]["error"])
+
+    def test_a_child_table_value_is_mapped_on_the_child_table_not_the_parent(self):
+        # Sales Invoice has project on the invoice and on each item line (items.project).
+        company = next(iter(frappe.get_all("Company", pluck="name", limit=1)), None)
+        if not company:
+            self.skipTest("needs a Company for the Project")
+        project = frappe.get_doc(
+            {"doctype": "Project", "project_name": f"Site {self.tag}", "company": company}
+        ).insert()
+        ghost = f"Ghost {self.tag}"
+        lines = ["Customer,Project,Item Code,Quantity,Item Project"]
+        lines += [
+            f"Cust {self.tag},{project.name},Item {self.tag},1,{ghost}",
+            f"Cust {self.tag},{project.name},Item {self.tag},1,{ghost}",
+        ]
+        file_doc = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "invoices.csv",
+                "content": ("\n".join(lines) + "\n").encode(),
+                "is_private": 1,
+            }
+        ).insert()
+        session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
+        mapping = {
+            "Customer": "customer",
+            "Project": "project",
+            "Item Code": "items.item_code",
+            "Quantity": "items.qty",
+            "Item Project": "items.project",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Sales Invoice"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        item_project = next(g for g in checked["groups"] if g.get("value") == ghost)
+
+        fixed = self._fix(session, {"group": item_project["id"], "action": "map", "to": project.name})
+
+        self.assertNotIn(ghost, [g.get("value") for g in fixed["groups"]])
+        rule = json.loads(self._doc(session).transformation_rules)["value_maps"][0]
+        self.assertEqual((rule["parent"], rule["field"]), ("Sales Invoice Item", "project"))
 
     def test_another_users_session_is_refused(self):
         session, result = self._session()

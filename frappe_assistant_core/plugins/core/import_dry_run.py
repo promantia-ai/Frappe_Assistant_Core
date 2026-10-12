@@ -180,9 +180,11 @@ def enqueue(session) -> None:
 
 def run_job(session_name: str, user: str) -> None:
     """Background job: the dry run as the user who asked for it."""
+    from frappe_assistant_core.plugins.core.import_fixes import check
+
     frappe.set_user(user)
     try:
-        run(session_name, commit_progress=True)
+        check(session_name, commit_progress=True)  # the run, explained for the model to read later
         frappe.db.commit()
     except Exception as e:
         frappe.db.rollback()
@@ -328,6 +330,7 @@ class _Checker:
             message = strip_html(cstr(warning.get("message")))
         info = {
             "cause": cause,
+            "parent": field.parent,  # the DocType the field is on: a child table's, for its columns
             "field": field.fieldname,
             "label": _(field.label),
             "value": value,
@@ -393,7 +396,7 @@ class _Checker:
     def _group(self, key: Tuple, info: Dict, payload) -> str:
         group = self.groups.get(key)
         if not group:
-            group = {"id": f"G{len(self.groups) + 1}", **info, "count": 0, "rows": []}
+            group = {"id": self._group_id(key), **info, "count": 0, "rows": []}
             if info["cause"] in (CAUSE_DUPLICATE_IN_FILE, CAUSE_ALREADY_EXISTS):
                 group["message"] = {
                     CAUSE_DUPLICATE_IN_FILE: _("{0} appears more than once in the file."),
@@ -404,6 +407,16 @@ class _Checker:
             group["count"] += 1
             group["rows"].append(row.row_number)
         return group["id"]
+
+    def _group_id(self, key: Tuple) -> str:
+        """The same failure gets the same id in every check, so a fix picked from an earlier
+        reply still finds its rows, and is refused once they no longer fail."""
+        digest = hashlib.sha256(json.dumps(key, default=str).encode()).hexdigest()
+        taken = {group["id"] for group in self.groups.values()}
+        size = 6
+        while f"G{digest[:size]}" in taken:
+            size += 2
+        return f"G{digest[:size]}"
 
 
 def _key_field(session, header):

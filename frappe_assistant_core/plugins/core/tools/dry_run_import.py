@@ -39,16 +39,18 @@ class DryRunImport(BaseTool):
             "Returns '<n> rows ready, <m> would fail' and the failures grouped by cause, each with "
             "a count and up to 3 example rows; show the user that, not row-by-row lists. Files of "
             f"more than {dry_run.BACKGROUND_ROWS} rows are checked in the background: say so, and "
-            "read the session with get_document later (progress, then validation_summary). The "
-            "file must be on this site: if the session's file is only in the chat, ask the user "
-            "to attach it in FAC Chat and pass its file_url. Each group comes with a plain "
+            "read the session with get_document later (progress, then validation_summary, which "
+            "holds this same reply). The file must be on this site: if the session's file is only "
+            "in the chat, ask the user to attach it in FAC Chat and pass its file_url. A different "
+            "file passed as file_url puts back the rows left out before. Each group comes with a plain "
             "explanation and the fixes that fit it: explain it and offer only those fixes. Then "
             "call again with the user's choices in fixes: they are saved on the session and every "
             "row is checked again. Per group: 'map' a value to an existing one ('to': one of the "
             "group's 'closest' names, or one the user gives; never invent one), or 'leave_out' "
             "its rows (with a reason; the import skips and lists them). To create a missing "
             "record, use create_document, then call again without fixes. Nothing is saved if any "
-            "fix is wrong. Group ids change with every check: use the latest."
+            "fix is wrong. A group keeps its id from check to check; once its rows pass, the id is "
+            "gone."
         )
         self.requires_permission = None  # checked on the session and the target DocType
 
@@ -68,7 +70,7 @@ class DryRunImport(BaseTool):
                     "items": {
                         "type": "object",
                         "properties": {
-                            "group": {"type": "string", "description": "Group id, e.g. 'G1'"},
+                            "group": {"type": "string", "description": "Group id, e.g. 'G3fa2c1'"},
                             "action": {"type": "string", "enum": list(import_fixes.ACTIONS)},
                             "to": {
                                 "type": "string",
@@ -106,8 +108,16 @@ class DryRunImport(BaseTool):
                         _("The file is still being checked. Apply the fixes once the check has finished.")
                     )
                 return self._running(session)
+            notice = None
             if arguments.get("file_url"):
+                if fixes:
+                    raise dry_run.DryRunProblem(
+                        _("Check the new file first, without fixes; fixes apply to the groups it finds.")
+                    )
+                before = session.source_file
                 dry_run.link_site_file(session, arguments["file_url"])
+                if before and not _same_content(before, session.source_file):
+                    notice = import_fixes.forget_left_out(session)
             if fixes and session.status not in ("Dry Run Failed", "Ready to Import"):
                 raise dry_run.DryRunProblem(
                     _("Check the file first, without fixes; fixes apply to the groups it finds.")
@@ -121,9 +131,9 @@ class DryRunImport(BaseTool):
 
             if dry_run.row_count(session) > dry_run.BACKGROUND_ROWS:
                 dry_run.enqueue(session)
-                return self._running(session, applied)
+                return self._running(session, applied, notice)
 
-            summary = dry_run.run(session.name)
+            reply = import_fixes.check(session.name)
         except import_fixes.FixProblems as e:
             return {"success": False, "error": str(e), "problems": e.problems, "session": session_name}
         except (import_fixes.FixProblem, dry_run.DryRunProblem, FileProblem) as e:
@@ -132,14 +142,15 @@ class DryRunImport(BaseTool):
             frappe.log_error(title=_("Dry Run Import Error"), message=frappe.get_traceback())
             return {"success": False, "error": str(e), "session": session_name}
 
-        session.reload()
-        result = {"success": True, **import_fixes.report(session, summary)}
+        result = {"success": True, **reply}
         if applied:
             result["applied"] = applied
+        if notice:
+            result["notice"] = notice
         return result
 
     @staticmethod
-    def _running(session, applied=None) -> Dict[str, Any]:
+    def _running(session, applied=None, notice=None) -> Dict[str, Any]:
         progress = frappe.parse_json(session.progress or "{}") or {}
         result = {
             "success": True,
@@ -154,7 +165,17 @@ class DryRunImport(BaseTool):
         }
         if applied:
             result["applied"] = applied
+        if notice:
+            result["notice"] = notice
         return result
+
+
+def _same_content(file_a: str, file_b: str) -> bool:
+    """Whether two File records hold the same bytes, so the same rows."""
+    if file_a == file_b:
+        return True
+    hashes = [frappe.db.get_value("File", name, "content_hash") for name in (file_a, file_b)]
+    return bool(hashes[0]) and hashes[0] == hashes[1]
 
 
 # Make sure class name matches file name for discovery

@@ -13,8 +13,8 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `session` | string | **Yes** | The import session id |
-| `file_url` | string | No | Only when the session's file is just in the chat (Claude, ChatGPT): the same file on this site, e.g. a FAC Chat attachment. Its columns must match the session's. The mapping is kept. |
-| `fixes` | array | No | The user's fixes for the last check's groups: `{group, action, to?, values?, reason?}`. See **Fixing the groups**. |
+| `file_url` | string | No | Only when the session's file is just in the chat (Claude, ChatGPT): the same file on this site, e.g. a FAC Chat attachment. Its columns must match the session's. The mapping is kept. A **different** file puts back the rows left out before (`notice` says so). Never send it with `fixes`. |
+| `fixes` | array | No | The user's fixes for the last check's groups: `{group, action, to?, reason?}`. See **Fixing the groups**. |
 
 ## Response Format
 
@@ -31,8 +31,9 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
   "duplicate_key": "customer_name",
   "groups": [
     {
-      "id": "G1",
+      "id": "G3fa2c1",
       "cause": "Missing link",
+      "parent": "Customer",
       "field": "customer_group",
       "label": "Customer Group",
       "value": "Retial",
@@ -47,7 +48,7 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
       ]
     },
     {
-      "id": "G2",
+      "id": "G8b01d4",
       "cause": "Rejected by ERPNext",
       "error": "ValidationError",
       "message": "Cannot select a Group type Customer Group. Please select a non-group Customer Group.",
@@ -66,13 +67,14 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 - **`cause`** is one of: `Missing link`, `Not an allowed option`, `Wrong date format`, `Invalid value`, `Duplicate in the file`, `Already in ERPNext`, `Rejected by ERPNext` (the DocType's own rules; `error` is the exception type).
 - **`previous`** appears on a second check: how many rows failed last time, and how many of those now pass.
 - **`status`** becomes `Ready to Import` when nothing fails, else `Dry Run Failed`. Then `message` also says the file is ready, with the final count.
+- **`id`** stays the same from check to check while the group's rows still fail. **`parent`** is the DocType the field is on: a child table's for its columns, e.g. `Sales Invoice Item`.
 - **`explanation`** is the group's cause in plain words, and **`fixes`** the fixes that fit it (see **Fixing the groups**). `fix_in_file` means the rows must be corrected in the file.
 
 The full per-row list is attached to the session (`validation_results`). You get only the groups and up to 3 examples each.
 
 ## Large files
 
-A file of more than 500 rows is checked in the background. The reply has `"state": "running"`. Tell the user, then read the session later with `get_document` (doctype `FAC Import Session`): `progress` shows how far it got, and `validation_summary` holds the result once `status` changes. Calling the tool again while it runs only reports progress.
+A file of more than 500 rows is checked in the background. The reply has `"state": "running"`. Tell the user, then read the session later with `get_document` (doctype `FAC Import Session`): `progress` shows how far it got, and `validation_summary` holds the result once `status` changes: the same reply as above, with each group's `explanation` and `fixes`, and the ready message. Examples are given as row numbers (`example_rows`), since the session keeps no values from the file. Calling the tool again while it runs only reports progress.
 
 ## Best Practices
 
@@ -105,7 +107,7 @@ Each fix:
 
 | Key | Description |
 |-----|-------------|
-| `group` | The group id from the **latest** check, e.g. `G1`. Ids change with every check. |
+| `group` | The group's id, e.g. `G3fa2c1`. A group keeps its id from check to check; once its rows pass, the id is gone. |
 | `action` | `map` or `leave_out` |
 | `to` | For `map`: the existing value to use |
 | `reason` | For `leave_out`: why, in the user's words. It appears in the import report. |
@@ -123,7 +125,7 @@ FACO: "412 rows use Customer Group *Retail*, which doesn't exist. Use *Retail Cu
 ```json
 {
   "session": "IMP-2026-00012",
-  "fixes": [{"group": "G1", "action": "map", "to": "Retail Customers"}]
+  "fixes": [{"group": "G3fa2c1", "action": "map", "to": "Retail Customers"}]
 }
 ```
 
@@ -141,7 +143,8 @@ The fixes are all or nothing. If any is wrong, none is saved and `problems` says
 
 - **`to` doesn't exist** or isn't an allowed option: the error lists the closest names or the choices.
 - **`create` sent in `fixes`**: refused. Use `create_document` instead.
-- **A group id from an older check**: use the ids from the latest result.
+- **A group id that isn't in the latest check**: its rows already pass. Use the ids from the latest result.
+- **`fixes` with a new `file_url`**: refused. Check the new file first, then fix its groups.
 - **No check yet**, or the mapping changed since: call without `fixes` first.
 
 To change a mapping, map the same value again: the new choice replaces the earlier one.

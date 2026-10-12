@@ -154,8 +154,12 @@ def _with_target(session, group: Dict[str, Any]) -> Dict[str, Any]:
     links to, both worked out from the session's mapping."""
     if not group.get("field"):
         return group
-    parents = [parent for parent, field in _column_targets(session).values() if field == group["field"]]
-    parent = session.target_doctype if session.target_doctype in parents else next(iter(parents), None)
+    # The dry run says which DocType the field is on; only a duplicate's key field, always
+    # on the target DocType, comes without it.
+    parent = group.get("parent")
+    if not parent:
+        parents = [p for p, field in _column_targets(session).values() if field == group["field"]]
+        parent = session.target_doctype if session.target_doctype in parents else next(iter(parents), None)
     out = {**group, "parent": parent or session.target_doctype}
     if group.get("cause") == dry_run.CAUSE_MISSING_LINK:
         df = frappe.get_meta(out["parent"]).get_field(group["field"])
@@ -171,6 +175,8 @@ def closest_names(doctype: str, value: str, limit: int = CLOSEST_LIMIT) -> List[
 
     Disabled records and the group nodes of a tree are left out: a link to them fails.
     """
+    if not frappe.has_permission(doctype, "read"):
+        return []
     meta = frappe.get_meta(doctype)
     filters = {}
     if meta.has_field("disabled"):
@@ -333,6 +339,24 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
     return done
 
 
+def forget_left_out(session) -> str:
+    """Put back every row left out, for a different file: its rows aren't the ones that were
+    left out. Value maps stay, as they follow values, not rows. Returns what to tell the user."""
+    rows = dry_run._excluded_rows(session)
+    if not rows:
+        return ""
+    rules = _rules(session)
+    rules.pop("left_out", None)
+    session.transformation_rules = frappe.as_json(rules) if rules else None
+    session.excluded_rows = None
+    note = _("This is a different file, so the {0} left out before are checked again.").format(
+        _rows(len(rows))
+    )
+    session.log_step("Fix Errors", "Success", note)
+    session.save()
+    return note
+
+
 def _map(session, group, fix, maps):
     if group["cause"] not in (dry_run.CAUSE_MISSING_LINK, dry_run.CAUSE_BAD_OPTION):
         raise FixProblem(
@@ -375,6 +399,24 @@ def _map(session, group, fix, maps):
 
 
 # -- the reply ------------------------------------------------------------------------
+
+
+def check(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
+    """The dry run, explained. The reply is also kept in validation_summary, so a check run
+    in the background reads the same as one that came back at once. The session keeps no row
+    of the file, so it keeps the example rows' numbers, not their values."""
+    summary = dry_run.run(session_name, commit_progress=commit_progress)
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    reply = report(session, summary)
+    kept = [
+        {
+            **{k: v for k, v in group.items() if k != "examples"},
+            "example_rows": [e["row"] for e in group["examples"]],
+        }
+        for group in reply["groups"]
+    ]
+    session.db_set("validation_summary", frappe.as_json({**reply, "groups": kept}), update_modified=False)
+    return reply
 
 
 def last_groups(session) -> Dict[str, Dict[str, Any]]:
