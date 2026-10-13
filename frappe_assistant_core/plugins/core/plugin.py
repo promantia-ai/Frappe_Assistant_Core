@@ -73,6 +73,7 @@ class CorePlugin(BasePlugin):
             "get_import_schema",
             "set_column_mapping",
             "dry_run_import",
+            "start_import",
         ]
 
     def validate_environment(self):

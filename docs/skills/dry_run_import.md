@@ -136,7 +136,7 @@ The reply is a new check, plus **`applied`**: one sentence per fix, e.g. "Custom
 
 ### When nothing fails any more
 
-`status` is `Ready to Import`, `groups` is empty, and `message` says so with the final count, e.g. "The file is ready: 4,812 rows will be imported. 6 rows left out; the import report will list them." Tell the user exactly that.
+`status` is `Ready to Import`, `groups` is empty, and `message` says so with the final count, e.g. "The file is ready: 4,812 rows will be imported. 6 rows left out; the import report will list them." Tell the user exactly that, and ask whether to import it: when they say so, use `start_import` with this check's `doctype`, `ready` and `import_type`.
 
 ### When no fix is saved
 
