@@ -724,7 +724,14 @@ def last_groups(session) -> Dict[str, Dict[str, Any]]:
 
 def ready_message(summary: Dict[str, Any]) -> str:
     """What FACO says once nothing fails: the file is ready, with the final count."""
+    if summary.get("imported") and not summary["ready"]:
+        text = _("Nothing is left to import: {0} already imported").format(_rows(summary["imported"]))
+        if summary.get("excluded"):
+            text += _(", {0} left out").format(_rows(summary["excluded"]))
+        return text + "."
     text = _("The file is ready: {0} will be imported.").format(_rows(summary["ready"]))
+    if summary.get("imported"):
+        text += " " + _("{0} already imported are skipped.").format(_rows(summary["imported"]))
     if summary.get("excluded"):
         text += " " + _("{0} left out; the import report will list them.").format(_rows(summary["excluded"]))
     return text

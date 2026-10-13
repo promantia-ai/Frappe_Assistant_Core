@@ -13,8 +13,9 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `session` | string | **Yes** | The import session id |
-| `file_url` | string | No | Only when the session's file is just in the chat (Claude, ChatGPT): the same file on this site, e.g. a FAC Chat attachment. Its columns must match the session's. The mapping is kept. A **different** file puts back the rows left out before (`notice` says so). Never send it with `fixes`. |
+| `file_url` | string | No | When the session's file is just in the chat (Claude, ChatGPT): the same file on this site, e.g. a FAC Chat attachment. Or the user's **corrected file** of failed rows (see **After an import**). Its columns must match the session's. The mapping is kept. A **different** file puts back the rows left out before (`notice` says so). Never send it with `fixes`. |
 | `fixes` | array | No | The user's fixes for the last check's groups: `{group, action, to?, reason?}`. See **Fixing the groups**. |
+| `failed_rows_file` | boolean | No | `true` to get the rows still not imported (failed, or left out), with the reason for each, as a CSV to download. Nothing is checked. Send it on its own. |
 
 ## Response Format
 
@@ -90,7 +91,7 @@ A file of more than 500 rows is checked in the background. The reply has `"state
 - **File only in the chat:** the rows can't be read on the site. Ask the user to attach the file in FAC Chat, then call again with its `file_url`.
 - **No permission** to create or import the target DocType: tell the user and stop.
 - **DocTypes whose side effects can't be held back** (DocType, Custom Field, Payment Request, or any the site lists): the check is refused, with the reason.
-- **Already importing or imported:** a finished session isn't checked again.
+- **Importing:** a session being imported isn't checked until the import ends. After an import (**Partially Completed**, **Failed** or **Completed**), it checks only what is left: see **After an import**.
 
 ## Fixing the groups
 
@@ -149,3 +150,40 @@ The fixes are all or nothing. If any is wrong, none is saved and `problems` says
 - **No check yet**, or the mapping changed since: call without `fixes` first.
 
 To change a mapping, map the same value again: the new choice replaces the earlier one.
+
+## After an import
+
+An import can still have rows ERPNext refused (something changed since the check, say). `start_import`'s result groups and explains them, with `next`. Never import the whole file again; deal with just those rows.
+
+### "Try those again"
+
+1. **Fix the cause in chat**, with the user: for example create the missing record (`create_document`), or correct one (`update_document`), as the explanation suggests.
+2. **Call `dry_run_import`** (no `fixes`). It checks **only the rows not imported yet**: `imported` counts the rows already in, which are skipped, and `ready` / `failed` count the rest. Fix what still fails the usual way (see **Fixing the groups**).
+3. **When it's ready, call `start_import`** with this check's `ready`. A **new Data Import** imports just those rows, with every fix made since; the records already imported are never touched. The session keeps every Data Import, and the report adds them up.
+
+If the rest is all left out, `message` says "Nothing is left to import" and the session is **Completed**.
+
+### Rows to correct in the file
+
+When some rows can't be fixed in chat, or the user would rather fix them in Excel, call with `failed_rows_file: true`:
+
+```json
+{"session": "IMP-2026-00012", "failed_rows_file": true}
+```
+
+```json
+{
+  "success": true,
+  "session": "IMP-2026-00012",
+  "rows": 3,
+  "file_url": "/private/files/IMP-2026-00012-failed-rows.csv",
+  "download_url": "https://erp.example.com/private/files/IMP-2026-00012-failed-rows.csv",
+  "message": "3 rows, with the user's columns, then 'FACO Original Row' ... and 'FACO Failure Reason'. ..."
+}
+```
+
+Give the user the `download_url`. The file has the user's own columns (with the fixes made in chat), then **FACO Original Row** (the row's number in their file) and **FACO Failure Reason**. Rows left out say "Left out: <reason>", so a **Completed** import's left-out rows can be corrected and imported too. It works before an import as well: then it holds the rows the last check failed.
+
+### The corrected file
+
+When the user uploads the corrected file, pass it as `file_url`. It must keep the same columns; the two added ones may stay, and are not imported. It becomes the session's file and is **checked like any file**, so nothing goes in unchecked: a row already imported that came back in it fails as **Already in ERPNext**, so it can't be imported twice. Then `start_import` imports it as another Data Import of the same session.

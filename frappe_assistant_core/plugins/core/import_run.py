@@ -15,13 +15,16 @@ others' numbers, so its log names the user's own rows. A Data Import is made fro
 started the way Desk's Start Import does, so it shows in Desk with its file and log like any
 other. Data Import commits each record and rolls back only a failed one, so a partial success
 is normal; a re-run skips the rows already imported, which is how an interrupted import
-continues without duplicates. That is why a session keeps its one Data Import and never makes
-another file for it.
+continues without duplicates.
+
+Rows that failed are tried again from a new file (#33994): once the user has fixed their causes
+and the dry run has checked what is left, a new Data Import is made with the rows already
+imported blanked too, so the fixes are in it and no record is imported twice. Every Data
+Import stays on the session, which reports them all.
 """
 
 import csv
 import io
-import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,12 +36,12 @@ from frappe.utils.background_jobs import enqueue, is_job_enqueued
 from frappe.utils.scheduler import is_scheduler_inactive
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_fixes
+from frappe_assistant_core.plugins.core import import_failures, import_fixes
 from frappe_assistant_core.plugins.core.import_session import import_target_problem, read_sheet_rows
 
 READY = "Ready to Import"
 IMPORTING = "Importing"
-UNFINISHED = (IMPORTING, "Partially Completed", "Failed")  # continued, or tried again
+TRY_AGAIN = import_failures.AFTER_IMPORT  # some rows not in: checked again, then imported
 FAILED_GROUPS_SHOWN = 5
 START_SAVEPOINT = "fac_start_import"
 
@@ -98,7 +101,15 @@ def _int(value) -> Optional[int]:
 
 
 def start(session) -> str:
-    """Import a session that passed the dry run: the cleaned file, a Data Import, started."""
+    """Import a session that passed the dry run: the cleaned file, a Data Import, started. A
+    session imported before gets only its rows not imported yet, in a new Data Import."""
+    if session.status in TRY_AGAIN:
+        raise ImportProblem(
+            _(
+                "Some rows weren't imported. Once their causes are fixed, check them with "
+                "dry_run_import (it checks only the rows not imported yet), then import those."
+            )
+        )
     if session.status != READY or not import_fixes.checked_as_is(session):
         raise ImportProblem(
             _(
@@ -106,18 +117,12 @@ def start(session) -> str:
                 "dry_run_import first: only a file that passed is imported."
             )
         )
-    for link in session.data_imports:
-        # A remap and a new check can make an imported session ready again; importing it again
-        # would duplicate every record that went in.
-        if frappe.db.exists("Data Import Log", {"data_import": link.data_import, "success": 1}):
-            raise ImportProblem(
-                _("This file was already imported, in Data Import {0}.").format(link.data_import)
-            )
+    earlier = import_failures.imports_of_this_file(session)
 
     frappe.db.savepoint(START_SAVEPOINT)
     file_doc = None
     try:
-        file_doc = _cleaned_file(session)
+        file_doc = _cleaned_file(session, earlier)
         # Saving it attaches the file to it, as Frappe does for an Attach field.
         data_import = frappe.get_doc(
             {
@@ -132,7 +137,7 @@ def start(session) -> str:
                 "submit_after_import": session.submit_after_import,
             }
         ).insert()
-        _record_start(session, data_import.name, "Import")
+        _record_start(session, data_import.name, "Retry" if earlier else "Import", session.source_file)
     except Exception:
         # Nothing half made stays behind: no Data Import without its session's record of it.
         frappe.db.rollback(save_point=START_SAVEPOINT)
@@ -158,18 +163,23 @@ def resume(session) -> Tuple[str, str]:
         # Run to its end from Desk, or its result never recorded: record it, don't run again.
         record_result(session.name, name)
         return name, "finished"
-    _record_start(session, name, "Retry")
+    _record_start(session, name, "Continue", session.data_imports[-1].source_file)
     _launch(session, name)
     return name, "continued"
 
 
-def _record_start(session, data_import: str, purpose: str) -> None:
-    session.append("data_imports", {"data_import": data_import, "purpose": purpose, "status": "Pending"})
+def _record_start(session, data_import: str, purpose: str, source_file: Optional[str]) -> None:
+    session.append(
+        "data_imports",
+        {"data_import": data_import, "purpose": purpose, "status": "Pending", "source_file": source_file},
+    )
     session.status = IMPORTING
     session.progress = frappe.as_json({"step": "Import", "state": "running", "data_import": data_import})
-    message = (
-        _("Started Data Import {0}.") if purpose == "Import" else _("Continued Data Import {0}.")
-    ).format(data_import)
+    message = {
+        "Import": _("Started Data Import {0}."),
+        "Retry": _("Started Data Import {0}, for the rows not imported yet."),
+        "Continue": _("Continued Data Import {0}."),
+    }[purpose].format(data_import)
     session.log_step("Import", "Success", message)
     session.save()
 
@@ -220,18 +230,29 @@ def _remove_from_disk(file_doc) -> None:
 # -- the cleaned file -----------------------------------------------------------------------
 
 
-def _cleaned_file(session):
-    """The session's sheet as a private CSV: value maps applied, records left out blanked (every
-    row of them, so no child row is left to join another record). It is saved unattached, for
-    the Data Import made from it to take."""
+def _cleaned_file(session, earlier: List[str]):
+    """The session's sheet as a private CSV: value maps applied, records left out or already
+    imported blanked (every row of them, so no child row is left to join another record). It
+    is saved unattached, for the Data Import made from it to take."""
     source = frappe.get_doc("File", session.source_file)
     rows = import_fixes.apply_value_maps(session, read_sheet_rows(source, session.sheet or None))
     excluded = dry_run._excluded_rows(session)
+    imported = import_failures.imported_rows(session)
     left_out = set()
-    for payload in dry_run._parse(session, source, rows).get_payloads_for_import():
+    payloads = dry_run._parse(session, source, rows).get_payloads_for_import()
+    for payload in payloads:
         numbers = {row.row_number for row in payload.rows}
-        if numbers & excluded:
+        if numbers & (excluded | imported):
             left_out |= numbers
+    if all({row.row_number for row in payload.rows} <= left_out for payload in payloads):
+        # Every row is in or left out (a Desk retry since the check, say): never import again.
+        raise ImportProblem(
+            _("Every row of this file is already imported or left out, in Data Import {0}.").format(
+                ", ".join(earlier)
+            )
+            if earlier
+            else _("Every row of this file is left out, so there is nothing to import.")
+        )
     width = len(rows[0])
     cleaned = [rows[0]] + [
         [""] * width if number in left_out else row for number, row in enumerate(rows[1:], start=2)
@@ -299,11 +320,11 @@ def result_of(session, data_import: str) -> Dict[str, Any]:
     logs = frappe.get_all(
         "Data Import Log",
         filters={"data_import": data_import},
-        fields=["success", "row_indexes", "messages"],
+        fields=["success", "row_indexes", "messages", "exception"],
         order_by="log_index",
     )
     created = sum(1 for log in logs if log.success)
-    failed = _failed_by_reason([log for log in logs if not log.success])
+    failed = import_failures.failure_groups(session, [log for log in logs if not log.success])
     failed_count = sum(group["count"] for group in failed)
     left_out = import_fixes.left_out_report(session)
     skipped = sum(group["count"] for group in left_out)
@@ -351,8 +372,13 @@ def result_of(session, data_import: str) -> Dict[str, Any]:
             ),
         )
     message += " " + _("Data Import {0}.").format(data_import)
+    all_runs = import_failures.runs(session)
+    if len(all_runs) > 1:
+        message += " " + _("In all, {0} records imported over {1} Data Imports.").format(
+            sum(run["created"] for run in all_runs), len(all_runs)
+        )
 
-    return {
+    result = {
         "state": state,
         "session_status": session_status,
         "data_import": data_import,
@@ -366,34 +392,12 @@ def result_of(session, data_import: str) -> Dict[str, Any]:
         "left_out": left_out,
         "message": message,
     }
-
-
-def _failed_by_reason(logs) -> List[Dict[str, Any]]:
-    """The failed records by reason: ``count`` records (as ``created`` counts them), and the
-    rows they were on."""
-    by_reason: Dict[str, Dict[str, Any]] = {}
-    for log in logs:
-        group = by_reason.setdefault(_reason(log.messages), {"count": 0, "rows": []})
-        group["count"] += 1
-        group["rows"].extend(json.loads(log.row_indexes or "[]"))
-    return [
-        {"reason": reason, **group}
-        for reason, group in sorted(by_reason.items(), key=lambda pair: -pair[1]["count"])
-    ]
-
-
-def _reason(messages: Optional[str]) -> str:
-    """The last message ERPNext showed for a failed record, as plain text."""
-    texts = []
-    for entry in json.loads(messages or "[]") or []:
-        if isinstance(entry, str):
-            try:
-                entry = json.loads(entry)
-            except ValueError:
-                entry = {"message": entry}
-        if isinstance(entry, dict) and entry.get("message"):
-            texts.append(" ".join(strip_html(cstr(entry["message"])).split()))
-    return texts[-1] if texts else _("ERPNext refused it")
+    if len(all_runs) > 1:
+        result["runs"] = all_runs
+        result["created_in_all"] = sum(run["created"] for run in all_runs)
+    if failed and state == "finished":
+        result["next"] = import_failures.next_steps()
+    return result
 
 
 def _rows_text(rows: List[int]) -> str:

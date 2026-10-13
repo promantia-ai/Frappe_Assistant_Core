@@ -39,8 +39,12 @@ class StartImport(BaseTool):
             "imported) against the reply's total. It has ended only when the session's status "
             "(get_document) is no longer Importing: then its last step gives created, failed and "
             "left-out counts with row numbers. If it stopped (Data Import status Timed Out, or no "
-            "progress for minutes), or failed, call again with the same values to continue or "
-            "retry: records already imported are skipped, never duplicated."
+            "progress for minutes), call again with the same values to continue: records already "
+            "imported are skipped, never duplicated. If rows failed, the reply groups and explains "
+            "them, with what to do next: once the user has fixed the causes and asks to try those "
+            "again, check them with dry_run_import (it checks only the rows not imported yet), "
+            "then call this with its counts: a new Data Import imports just those rows, with the "
+            "fixes, and the session reports every run."
         )
         self.requires_permission = None  # checked on the session, the DocType and Data Import
 
@@ -81,7 +85,7 @@ class StartImport(BaseTool):
                         session.data_imports[-1].data_import
                     )
                 )
-            if session.status in import_run.UNFINISHED:
+            if session.status == import_run.IMPORTING:
                 data_import, state = import_run.resume(session)
             else:
                 data_import, state = import_run.start(session), "started"
@@ -101,7 +105,13 @@ class StartImport(BaseTool):
             result["message"] = _(
                 "Importing {0} {1} records in the background ({2} done so far). Follow it with "
                 "get_document on Data Import {3}."
-            ).format(result["total"], _(session.target_doctype), result["created"], data_import)
+            ).format(
+                # A queued Data Import hasn't counted its records yet: the check has.
+                result["total"] or arguments.get("rows"),
+                _(session.target_doctype),
+                result["created"],
+                data_import,
+            )
         return {"success": True, "session": session.name, **result}
 
 

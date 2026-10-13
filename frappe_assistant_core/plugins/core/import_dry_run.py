@@ -49,7 +49,16 @@ PROGRESS_EVERY = 100
 EXAMPLES_PER_GROUP = 3
 STALE_AFTER_SECONDS = 2 * 60 * 60  # a run this old without finishing is taken as dead
 SAVEPOINT = "fac_dry_run_row"
-RUNNABLE_STATUSES = ("Mapped", "Dry Run Failed", "Ready to Import")
+# After an import, what it didn't get in is checked again on its own (#33994): rows that failed,
+# or a corrected file of them, or of the rows left out of a completed one.
+RUNNABLE_STATUSES = (
+    "Mapped",
+    "Dry Run Failed",
+    "Ready to Import",
+    "Partially Completed",
+    "Failed",
+    "Completed",
+)
 
 #: DocTypes whose insert can't be held back or rolled back. Sites add more with the
 #: ``fac_dry_run_unsafe_doctypes`` site config key (a list of DocType names).
@@ -75,12 +84,17 @@ class DryRunProblem(Exception):
 # -- can it run ------------------------------------------------------------------------
 
 
-def check_can_run(session) -> None:
-    """Raise DryRunProblem when ``session`` can't be checked yet, saying what to do."""
+def check_status(session) -> None:
+    """Raise DryRunProblem when ``session``'s status lets nothing be checked, or a file linked."""
     if session.status == "File Read":
         raise DryRunProblem(_("Map the columns first, with set_column_mapping."))
     if session.status not in RUNNABLE_STATUSES:
         raise DryRunProblem(_("This session is {0}, so it can't be checked again.").format(_(session.status)))
+
+
+def check_can_run(session) -> None:
+    """Raise DryRunProblem when ``session`` can't be checked yet, saying what to do."""
+    check_status(session)
     if not column_to_field_map(session):
         raise DryRunProblem(_("Map the columns first, with set_column_mapping."))
     problem = import_target_problem(session.target_doctype)
@@ -112,18 +126,40 @@ def unsafe_reason(doctype: str) -> Optional[str]:
 
 
 def link_site_file(session, file_url: str) -> None:
-    """Give a session whose file stayed in the chat the same file, uploaded to the site."""
+    """Give a session whose file stayed in the chat the same file, uploaded to the site; or a
+    corrected one, as the failed-rows file came back (#33994): the same columns, perhaps with
+    the ones that file added after them, which are not imported."""
+    from frappe_assistant_core.plugins.core.import_failures import own_columns
+
     file_doc = get_readable_file(file_url)
-    read = read_spreadsheet(file_doc, session.sheet or None)
+    try:
+        read = read_spreadsheet(file_doc, session.sheet or None)
+    except FileProblem:
+        # A corrected file saved from the CSV FACO gave has its own sheet name: its columns decide.
+        read = read_spreadsheet(file_doc)
     expected = _session_columns(session)
-    if expected and read.chosen.columns != expected:
+    columns = read.chosen.columns
+    if expected and own_columns(columns) != own_columns(expected):
         raise FileProblem(
             _("This file's columns don't match the session's. Expected: {0}. Found: {1}.").format(
-                ", ".join(expected), ", ".join(read.chosen.columns)
+                ", ".join(own_columns(expected)), ", ".join(columns)
             )
         )
+    if expected:
+        options = frappe.parse_json(session.template_options or "{}") or {}
+        mapping = {
+            k: v for k, v in (options.get("column_to_field_map") or {}).items() if int(k) < len(columns)
+        }
+        for position in range(len(own_columns(columns)), len(columns)):
+            mapping[str(position)] = "Don't Import"
+        options["column_to_field_map"] = mapping
+        session.template_options = frappe.as_json(options)
+    for link in session.data_imports:
+        # A Data Import recorded before source_file was kept is of the file the session had.
+        link.source_file = link.source_file or session.source_file
     session.source_file = file_doc.name
     session.file_source = "Site File"
+    session.sheet = read.chosen.name  # a workbook saved as CSV, say, has no sheet names
     session.sheets = frappe.as_json([s.as_dict() for s in read.sheets])
     session.log_step(
         "Link File", "Success", _("Linked {0} from this site for checking.").format(file_doc.file_name)
@@ -208,6 +244,7 @@ def _progress(state: str, done: int, total: int) -> str:
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """Check every row of the session's file. Stores the result on the session and
     returns the summary, with up to three example rows per group for the model."""
+    from frappe_assistant_core.plugins.core.import_failures import imported_rows
     from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
 
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
@@ -218,9 +255,10 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
 
     checker = _Checker(session, import_file.header)
     excluded = _excluded_rows(session)
+    imported = imported_rows(session)
     total = len(payloads)
     for done, payload in enumerate(payloads, start=1):
-        checker.check(payload, excluded)
+        checker.check(payload, excluded, imported)
         if commit_progress and done % PROGRESS_EVERY == 0:
             frappe.db.set_value(
                 SESSION_DOCTYPE,
@@ -281,8 +319,11 @@ class _Checker:
         self.groups: Dict[Tuple, Dict[str, Any]] = {}
         self.rows: List[Dict[str, Any]] = []
 
-    def check(self, payload, excluded: set) -> None:
+    def check(self, payload, excluded: set, imported: set = frozenset()) -> None:
         row_numbers = [row.row_number for row in payload.rows]
+        if imported.intersection(row_numbers):  # already in ERPNext, from an earlier import
+            self.rows += [{"row": n, "status": "imported"} for n in row_numbers]
+            return
         if excluded.intersection(row_numbers):
             self.rows += [{"row": n, "status": "excluded"} for n in row_numbers]
             return
@@ -499,7 +540,7 @@ def held_back():
 
 def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) -> Dict[str, Any]:
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
-    counts = {"ready": 0, "failed": 0, "excluded": 0}
+    counts = {"ready": 0, "failed": 0, "excluded": 0, "imported": 0}
     for row in checker.rows:
         counts[row["status"]] += 1
     failed_rows = {row["row"] for row in checker.rows if row["status"] == "failed"}
@@ -526,6 +567,8 @@ def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) 
     session.validation_summary = frappe.as_json(summary)
     session.validated_fingerprint = fingerprint(session, file_doc)
     session.status = "Dry Run Failed" if counts["failed"] else "Ready to Import"
+    if counts["imported"] and not counts["ready"] and not counts["failed"]:
+        session.status = "Completed"  # the rest is left out: everything to import is in
     session.progress = frappe.as_json(
         {"step": "Dry Run", "state": "done", "done": total_payloads, "total": total_payloads}
     )
@@ -550,6 +593,8 @@ def headline(summary: Dict[str, Any]) -> str:
     text = _("{0} rows ready, {1} would fail").format(summary["ready"], summary["failed"])
     if summary.get("excluded"):
         text += _(", {0} left out").format(summary["excluded"])
+    if summary.get("imported"):
+        text += _(", {0} already imported").format(summary["imported"])
     return text + "."
 
 
@@ -610,6 +655,11 @@ def fingerprint(session, file_doc) -> str:
         json.dumps(frappe.parse_json(session.transformation_rules or "null"), sort_keys=True),
         json.dumps(sorted(_excluded_rows(session))),
     ]
+    from frappe_assistant_core.plugins.core.import_failures import imported_rows
+
+    imported = imported_rows(session)
+    if imported:  # an import since the check makes it stale: other rows are left to import
+        parts.append(json.dumps(sorted(imported)))
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 

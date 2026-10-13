@@ -21,13 +21,15 @@ The approval card shows `doctype`, `rows` and `import_type`, so the user sees wh
 
 1. **Say what will happen:** "Import 250 Customer rows as new records? 2 rows are left out." Then call the tool; the user approves the card.
 2. **Follow it.** The reply has `data_import` and `state`:
-   - `started` (or `continued`): running in the background. Check it every minute or so with `list_documents` on **Data Import Log** with filters `{"data_import": "<name>", "success": 1}`: its `total_count` is how many are in, out of the reply's `total`. Tell the user "120 of 250 imported…".
+   - `started` (or `continued`): running in the background. On a site that imports in the background, the reply's `total` is the rows passed, until the Data Import has counted them. Check it every minute or so with `list_documents` on **Data Import Log** with filters `{"data_import": "<name>", "success": 1}`: its `total_count` is how many are in, out of the reply's `total`. Tell the user "120 of 250 imported…".
    - `finished`: done (on sites that import at once, the reply is the result).
 3. **Report the end** once the session has left **Importing**: read it with `get_document` (doctype `FAC Import Session`). The Data Import's own `status` is no guide: it says *Partial Success* from the first record on. The session's `status` is Completed, Partially Completed or Failed, and its last step's message has the counts, for example:
 
    "Imported 245 Customer records into ERPNext. 3 failed (rows 17, 40, 88: Email is invalid). 2 rows left out (Closed shop: rows 5-6). Data Import DI-0042."
 
    Tell the user that, with the link `/app/data-import/<name>`. A partial success is normal: each record is saved on its own, and only the failed ones are not.
+
+4. **If rows failed**, explain each group of `failed_rows` with its `explanation` (one line per reason, never every row), then offer what `next` says: fix the cause and try those rows again, or download them as a file. See **When rows failed**.
 
 ## Response
 
@@ -42,11 +44,22 @@ The approval card shows `doctype`, `rows` and `import_type`, so the user sees wh
   "created": 245,
   "failed": 3,
   "skipped": 2,
-  "failed_rows": [{"reason": "Email is invalid", "count": 3, "rows": [17, 40, 88]}],
+  "failed_rows": [
+    {
+      "reason": "Email is invalid",
+      "error": "InvalidEmailAddressError",
+      "count": 3,
+      "rows": [17, 40, 88],
+      "explanation": "3 rows rejected by ERPNext: Email is invalid"
+    }
+  ],
   "left_out": [{"reason": "Closed shop", "count": 2, "rows": "5-6"}],
+  "next": "Explain each reason and fix what can be fixed in chat ...",
   "message": "Imported 245 Customer records into ERPNext. 3 failed (...). 2 rows left out (...). Data Import DI-0042."
 }
 ```
+
+When the session has more than one Data Import (rows tried again, or a corrected file), the reply also has `runs` (each Data Import with its `created` and `failed`) and `created_in_all`, and `message` ends "In all, 248 records imported over 2 Data Imports."
 
 Row numbers are the user's own spreadsheet rows (row 1 is the header).
 
@@ -54,9 +67,16 @@ Row numbers are the user's own spreadsheet rows (row 1 is the header).
 
 If the import was interrupted (the Data Import's status is **Timed Out**, or its count stops moving for minutes after a restart), the session stays **Importing**. When the user asks to continue, call `start_import` again **with the same values**. The same Data Import runs again and skips every record already imported, so nothing is duplicated. `state` is `continued` (or `running` if it was in fact still running: then just keep following it; or `finished` if it had ended, with its result).
 
-The same call **tries the failed records again** for a session that is Partially Completed or Failed (after the user fixed what failed, say): the records imported are skipped.
-
 If ERPNext now refuses some rows (`state` `refused`, a record they link to deleted since the check, say), the message says which. Nothing more is imported until that is fixed; then continue.
+
+## When rows failed
+
+A session that is **Partially Completed** or **Failed** isn't imported again as it is. When the user has fixed the causes and asks to try those rows again:
+
+1. Call `dry_run_import`: it checks **only the rows not imported yet** (`imported` counts the rest).
+2. Call `start_import` with that check's `ready`. A **new Data Import** gets just those rows, with every fix made since, and the session's report covers every run. The records already in are never touched.
+
+Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with `failed_rows_file`), and their corrected file comes back through `dry_run_import` as `file_url`, checked before it is imported.
 
 ## When it can't start
 
@@ -65,10 +85,12 @@ If ERPNext now refuses some rows (`state` `refused`, a record they link to delet
 - **The values passed don't match the last check:** pass the check's own.
 - **The user can't use Data Import** (System Managers only, unless given the permission), or can't import that DocType: say so and stop.
 - **The scheduler is off:** imports run in the background, so a System Manager must turn it on.
-- **Already imported:** a session is imported once; its Data Import is named in the error.
+- **Rows failed and weren't checked again:** call `dry_run_import` first (see **When rows failed**).
+- **Already imported:** every row of the file is imported (or left out); its Data Imports are named in the error.
 
 ## Anti-patterns
 
 - Calling `create_document` per row instead of importing.
 - Importing without the user asking, or before the dry run said the file is ready.
-- Starting a new session to finish an interrupted import: that would import the done rows again. Continue it instead.
+- Starting a new session to finish an interrupted import, or to try failed rows again: that would import the done rows again. Continue it, or check and import what is left, in the same session.
+- Re-importing the whole file after a partial success.

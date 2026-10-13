@@ -29,7 +29,7 @@ from frappe.core.doctype.data_import.importer import Importer
 from rq.timeouts import JobTimeoutException
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_run
+from frappe_assistant_core.plugins.core import import_failures, import_run
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
 MAPPING = {
@@ -44,8 +44,9 @@ class WorkerStopped(BaseException):
     """A worker killed mid-import: not an Exception, so the importer can't catch it as a row's."""
 
 
-@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
-class TestImportRun(BaseAssistantTest):
+class ImportRunCase(BaseAssistantTest):
+    """A Customer Group and a session ready to import, for the import's tests and #33994's."""
+
     def setUp(self):
         super().setUp()
         frappe.set_user("Administrator")
@@ -77,8 +78,9 @@ class TestImportRun(BaseAssistantTest):
         t = self.tag
         return {"alpha": f"Alpha {t}", "beta": f"Beta {t}", "gamma": f"Gamma {t}", "delta": f"Delta {t}"}
 
-    def _ready_session(self, file_doc=None, sheet=None):
-        """A session whose file passed the dry run: a value mapped and a row left out."""
+    def _ready_session(self, file_doc=None, sheet=None, map_to=None):
+        """A session whose file passed the dry run: a value mapped (to ``map_to``, else the
+        group) and a row left out."""
         n = self._names()
         if not file_doc:
             lines = [",".join(MAPPING)]
@@ -101,7 +103,7 @@ class TestImportRun(BaseAssistantTest):
         groups = {g["value"]: g["id"] for g in checked["groups"] if g.get("value")}
         fixes = []
         if f"Retial {self.tag}" in groups:
-            fixes.append({"group": groups[f"Retial {self.tag}"], "action": "map", "to": self.group})
+            fixes.append({"group": groups[f"Retial {self.tag}"], "action": "map", "to": map_to or self.group})
         if f"Nowhere {self.tag}" in groups:
             fixes.append(
                 {"group": groups[f"Nowhere {self.tag}"], "action": "leave_out", "reason": "Closed shop"}
@@ -157,6 +159,9 @@ class TestImportRun(BaseAssistantTest):
         ):
             yield
 
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestImportRun(ImportRunCase):
     # -- registration ------------------------------------------------------------------
 
     def test_importing_is_a_write_tool_so_it_asks_for_approval(self):
@@ -371,8 +376,11 @@ class TestImportRun(BaseAssistantTest):
         self.assertEqual(frappe.db.count("Customer", {"customer_name": n["alpha"]}), 1)
         doc = self._doc(session)
         self.assertEqual(doc.status, "Completed")
-        self.assertEqual([d.purpose for d in doc.data_imports], ["Import", "Retry"])
+        self.assertEqual([d.purpose for d in doc.data_imports], ["Import", "Continue"])
         self.assertEqual(len({d.data_import for d in doc.data_imports}), 1)  # the same Data Import
+        # One Data Import continued is one run: its records aren't counted twice.
+        self.assertNotIn("runs", second["result"])
+        self.assertNotIn("In all", second["result"]["message"])
 
     def test_a_timed_out_import_says_to_continue(self):
         session, checked = self._ready_session()
@@ -424,14 +432,18 @@ class TestImportRun(BaseAssistantTest):
         self.assertEqual((first["created"], first["failed"]), (0, 3))
         self.assertEqual(self._doc(session).status, "Failed")
 
+        rechecked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual((rechecked["ready"], rechecked["imported"]), (3, 0), rechecked)
         with self._each_row_commits(), patch.object(
             Importer, "process_doc", autospec=True, side_effect=real_process
         ):
-            again = self._import(session, checked)
+            again = self._import(session, rechecked)
 
         self.assertTrue(again["success"], again)
         self.assertEqual(self._imported(), {n["alpha"], n["gamma"], n["delta"]})
-        self.assertEqual(self._doc(session).status, "Completed")
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Completed")
+        self.assertEqual([d.purpose for d in doc.data_imports], ["Import", "Retry"])
 
     def test_a_retry_queued_in_the_background_is_not_reported_as_the_old_result(self):
         session, checked = self._ready_session()
@@ -448,15 +460,17 @@ class TestImportRun(BaseAssistantTest):
         ):
             self._import(session, checked)
         self.assertEqual(self._doc(session).status, "Partially Completed")
+        rechecked = self._run("dry_run_import", {"session": session})["result"]
 
         with patch.object(import_run, "_runs_now", autospec=True, return_value=False), patch.object(
             import_run, "is_scheduler_inactive", autospec=True, return_value=False
         ), patch.object(import_run, "enqueue", autospec=True):
-            response = self._import(session, checked)
+            response = self._import(session, rechecked)
 
         self.assertTrue(response["success"], response)
-        self.assertEqual(response["result"]["state"], "continued")
-        self.assertIn("in the background", response["result"]["message"])
+        self.assertEqual(response["result"]["state"], "started")
+        # Its count is the rows left (from the check), not the old Data Import's, nor 0.
+        self.assertIn("Importing 1 Customer records in the background", response["result"]["message"])
 
     def test_a_continue_that_erpnext_refuses_says_why_instead_of_asking_again(self):
         session, checked = self._ready_session()
@@ -532,27 +546,20 @@ class TestImportRun(BaseAssistantTest):
         self.assertFalse(frappe.get_doc("Customer", {"customer_name": n["delta"]}).sales_team)
 
     def test_failed_counts_are_records_like_created(self):
+        session, _checked = self._ready_session()
+        trace = "Traceback (most recent call last):\n  ...\nfrappe.exceptions.ValidationError: On hold"
         logs = [
-            frappe._dict(row_indexes="[2, 3]", messages='[{"message": "On hold"}]'),
-            frappe._dict(row_indexes="[4, 5]", messages='[{"message": "On hold"}]'),
+            frappe._dict(row_indexes="[2, 3]", messages='[{"message": "On hold"}]', exception=trace),
+            frappe._dict(row_indexes="[4, 5]", messages='[{"message": "On hold"}]', exception=trace),
         ]
 
-        groups = import_run._failed_by_reason(logs)
+        groups = import_failures.failure_groups(self._doc(session), logs)
 
-        self.assertEqual(groups, [{"reason": "On hold", "count": 2, "rows": [2, 3, 4, 5]}])
-
-    def test_an_imported_session_made_ready_again_is_not_imported_twice(self):
-        session, checked = self._ready_session()
-        self._import(session, checked)
-        # A remap and a new check can bring an imported session back to Ready to Import.
-        self._doc(session).db_set("status", "Ready to Import")
-
-        response = self._import(session, checked)
-
-        self.assertFalse(response["success"], response)
-        self.assertIn("already imported", response["result"]["error"])
-        self.assertEqual(len(self._doc(session).data_imports), 1)
-        self.assertEqual(frappe.db.count("Customer", {"customer_name": self._names()["alpha"]}), 1)
+        self.assertEqual(
+            [(g["reason"], g["error"], g["count"], g["rows"]) for g in groups],
+            [("On hold", "ValidationError", 2, [2, 3, 4, 5])],
+        )
+        self.assertEqual(groups[0]["explanation"], "4 rows rejected by ERPNext: On hold")
 
     def test_a_start_that_fails_half_way_leaves_no_data_import_behind(self):
         session, checked = self._ready_session()

@@ -21,7 +21,7 @@ from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_fixes
+from frappe_assistant_core.plugins.core import import_failures, import_fixes
 from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
 from frappe_assistant_core.plugins.core.import_session import FileProblem, get_readable_file
 
@@ -50,7 +50,12 @@ class DryRunImport(BaseTool):
             "its rows (with a reason; the import skips and lists them). To create a missing "
             "record, use create_document, then call again without fixes. Nothing is saved if any "
             "fix is wrong. A group keeps its id from check to check; once its rows pass, the id is "
-            "gone."
+            "gone. After an import that didn't get every row in, call it again once the causes are "
+            "fixed: it checks only the rows not imported yet ('imported' counts the rest), and "
+            "start_import then imports just those. failed_rows_file: true checks nothing; it gives "
+            "the rows still not imported (failed, or left out) as a CSV with the reason for each, "
+            "for the user to correct and upload: show its download_url. The corrected file comes "
+            "back as file_url, and is checked like any other."
         )
         self.requires_permission = None  # checked on the session and the target DocType
 
@@ -60,8 +65,14 @@ class DryRunImport(BaseTool):
                 "session": {"type": "string", "description": "The import session id"},
                 "file_url": {
                     "type": "string",
-                    "description": "Only when the session's file is just in the chat: the same file "
-                    "on this site, e.g. a FAC Chat attachment. Its columns must match.",
+                    "description": "When the session's file is just in the chat: the same file on "
+                    "this site, e.g. a FAC Chat attachment. Or the user's corrected file of failed "
+                    "rows. Its columns must match.",
+                },
+                "failed_rows_file": {
+                    "type": "boolean",
+                    "description": "True to get the rows still not imported, with the reason for "
+                    "each, as a file to download. Nothing is checked.",
                 },
                 "fixes": {
                     "type": "array",
@@ -101,6 +112,20 @@ class DryRunImport(BaseTool):
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
+        if arguments.get("failed_rows_file"):
+            if fixes or arguments.get("file_url"):
+                return {
+                    "success": False,
+                    "error": "failed_rows_file is asked on its own, without fixes or file_url.",
+                }
+            try:
+                return {"success": True, **import_failures.failed_rows_file(session)}
+            except import_failures.FailuresProblem as e:
+                return {"success": False, "error": str(e), "session": session_name}
+            except Exception as e:
+                frappe.log_error(title=_("Failed Rows File Error"), message=frappe.get_traceback())
+                return {"success": False, "error": str(e), "session": session_name}
+
         try:
             if dry_run.is_running(session):
                 if fixes:
@@ -118,11 +143,12 @@ class DryRunImport(BaseTool):
                             "apply to the groups its check finds."
                         )
                     )
+                dry_run.check_status(session)  # a session that can't be checked keeps its file
                 before = session.source_file
                 dry_run.link_site_file(session, arguments["file_url"])
                 if before and not _same_content(before, session.source_file):
                     notice = import_fixes.forget_left_out(session)
-            if fixes and session.status not in ("Dry Run Failed", "Ready to Import"):
+            if fixes and session.status not in import_failures.AFTER_CHECK:
                 raise dry_run.DryRunProblem(
                     _("Check the file first, without fixes; fixes apply to the groups it finds.")
                 )
