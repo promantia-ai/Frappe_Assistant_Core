@@ -91,7 +91,7 @@ class TestImportSession(BaseAssistantTest):
         self.assertIn("start_import_session", CorePlugin().get_tools())
 
     def test_tool_is_classified_read_only(self):
-        # It writes only the session and its working copy, never business data,
+        # It writes only the session, never business data,
         # so it must not raise an approval card.
         from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
 
@@ -113,6 +113,25 @@ class TestImportSession(BaseAssistantTest):
         self.assertEqual(doc.source_file, file_doc.name)
         self.assertEqual(doc.user, self.user)
         self.assertEqual(doc.status, "File Read")
+
+    def test_session_records_the_file_name_and_when_it_started(self):
+        before = frappe.utils.now_datetime().replace(microsecond=0)
+
+        result = self._start(file_name="customers.csv", columns=["Name"], row_count=3)
+
+        doc = frappe.get_doc("FAC Import Session", result["session_id"])
+        self.assertEqual(doc.file_name, "customers.csv")
+        self.assertGreaterEqual(frappe.utils.get_datetime(doc.started_on), before)
+        list_fields = [f.fieldname for f in frappe.get_meta("FAC Import Session").fields if f.in_list_view]
+        self.assertIn("file_name", list_fields)
+        self.assertIn("started_on", list_fields)
+
+    def test_description_names_the_next_tools(self):
+        # Claude and ChatGPT may never read the skill; every client gets the description.
+        description = self.registry.get_tool("start_import_session").description
+
+        self.assertIn("get_import_schema", description)
+        self.assertIn("set_column_mapping", description)
 
     def test_session_name_follows_the_imp_year_series(self):
         file_doc = self._upload("customers.csv", CSV_CONTENT)
@@ -198,6 +217,21 @@ class TestImportSession(BaseAssistantTest):
         self.assertEqual(doc.source_file, file_doc.name)
         self.assertEqual(doc.file_source, "Site File")
 
+    def test_no_row_of_the_file_is_stored_on_the_session(self):
+        # The session is the audit record; the rows stay in the file. Samples go to the
+        # assistant in the reply only.
+        file_doc = self._upload("customers.csv", CSV_CONTENT)
+
+        result = self._start(file_url=file_doc.file_url)
+
+        self.assertIn(["Customer 1", "Retail", "India"], result["sample_rows"])
+        stored = frappe.db.get_value("FAC Import Session", result["session_id"], "sheets")
+        self.assertEqual(
+            frappe.parse_json(stored),
+            [{"name": None, "columns": ["Customer Name", "Customer Group", "Territory"], "row_count": 25}],
+        )
+        self.assertNotIn("Customer 1", stored)
+
     # -- a file that stays in the chat (Claude, ChatGPT) -----------------------------------
 
     def test_details_of_a_chat_attachment_are_recorded_without_a_file(self):
@@ -207,7 +241,6 @@ class TestImportSession(BaseAssistantTest):
             sheet="Customers",
             columns=["Customer Name", "Customer Group"],
             row_count=15,
-            sample_rows=[["Grant Plastics", "Commercial"], ["Kaveri Textiles", "Retial"]],
         )
 
         self.assertEqual(self._new_files(), set())
@@ -217,14 +250,7 @@ class TestImportSession(BaseAssistantTest):
         self.assertEqual((doc.file_name, doc.sheet), ("customers.xlsx", "Customers"))
         self.assertEqual(
             frappe.parse_json(doc.sheets),
-            [
-                {
-                    "name": "Customers",
-                    "columns": ["Customer Name", "Customer Group"],
-                    "row_count": 15,
-                    "sample_rows": [["Grant Plastics", "Commercial"], ["Kaveri Textiles", "Retial"]],
-                }
-            ],
+            [{"name": "Customers", "columns": ["Customer Name", "Customer Group"], "row_count": 15}],
         )
         self.assertEqual([(s.step, s.outcome) for s in doc.steps], [("Read File", "Success")])
         self.assertIn("15 rows", doc.steps[0].message)
@@ -235,13 +261,15 @@ class TestImportSession(BaseAssistantTest):
 
         self.assertEqual(self._new_sessions(), 0)
 
-    def test_at_most_ten_sample_rows_are_kept_from_the_chat(self):
-        rows = [[f"Customer {i}"] for i in range(1, 16)]
+    def test_rows_sent_from_the_chat_are_not_stored(self):
+        # An assistant may still send rows; they are neither stored nor echoed back.
+        result = self._start(
+            file_name="customers.csv", columns=["Name"], row_count=15, sample_rows=[["Grant Plastics"]]
+        )
 
-        result = self._start(file_name="customers.csv", columns=["Name"], row_count=15, sample_rows=rows)
-
-        stored = frappe.parse_json(frappe.db.get_value("FAC Import Session", result["session_id"], "sheets"))
-        self.assertEqual(len(stored[0]["sample_rows"]), 10)
+        stored = frappe.db.get_value("FAC Import Session", result["session_id"], "sheets")
+        self.assertNotIn("Grant Plastics", stored)
+        self.assertNotIn("Grant Plastics", frappe.as_json(result))
 
     def test_chat_attachment_target_permission_is_checked_first(self):
         self._start_fails(

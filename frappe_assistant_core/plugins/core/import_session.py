@@ -10,9 +10,9 @@
 Helpers for start_import_session: checking file access, checking that the user
 may import into a target DocType, and reading a spreadsheet.
 
-Cells are read as text, the way Data Import will see them. Only the headers,
-the row counts and a few sample rows are kept and returned to the assistant; no
-copy of the file is saved.
+Cells are read as text, the way Data Import will see them. The assistant gets the
+headers, row counts and a few sample rows; the session stores only the headers and
+row counts. No row of the file is saved.
 """
 
 import datetime
@@ -38,12 +38,8 @@ class SheetSummary:
     sample_rows: List[List[str]] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "columns": self.columns,
-            "row_count": self.row_count,
-            "sample_rows": self.sample_rows,
-        }
+        """What the session stores: no sample rows, so no data from the file."""
+        return {"name": self.name, "columns": self.columns, "row_count": self.row_count}
 
 
 @dataclass
@@ -98,6 +94,45 @@ def read_spreadsheet(file_doc, sheet: Optional[str] = None) -> SpreadsheetRead:
         raise FileProblem(_("Could not read the file: {0}").format(_describe_read_error(e)))
 
     return SpreadsheetRead(sheets=sheets, chosen=chosen)
+
+
+def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
+    """Every row of one sheet as text, header first, for the engine (never the model).
+
+    Blank rows stay in place as empty rows, so a row's position is its line in the
+    spreadsheet, the number Data Import reports and the user sees.
+    """
+    extension = (file_doc.get_extension()[1] or "").lstrip(".").lower()
+    if extension not in SUPPORTED_EXTENSIONS:
+        raise FileProblem(_("Only .csv, .xlsx or .xls files can be imported."))
+    try:
+        content = file_doc.get_content()
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        names = []
+        for name, rows in _iter_sheets(content, extension):
+            names.append(name)
+            if extension == "csv" or not sheet or name == sheet:
+                return _all_text_rows(rows)
+    except FileProblem:
+        raise
+    except Exception as e:
+        raise FileProblem(_("Could not read the file: {0}").format(_describe_read_error(e)))
+    raise FileProblem(
+        _("Sheet '{0}' not found. Sheets in this file: {1}.").format(sheet, ", ".join(map(str, names)))
+    )
+
+
+def _all_text_rows(rows: Iterable) -> List[List[str]]:
+    width = None
+    out = []
+    for raw in rows:
+        values = [_as_text(v) for v in raw]
+        if width is None:
+            width = max((i + 1 for i, v in enumerate(values) if v), default=0)
+        row = values[:width]
+        out.append(row + [""] * (width - len(row)))
+    return out
 
 
 def _choose(sheets: List[SheetSummary], sheet: Optional[str]) -> SheetSummary:

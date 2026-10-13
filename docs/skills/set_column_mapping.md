@@ -51,3 +51,7 @@ If anything is wrong, **nothing is saved**. `problems` says what to fix, for exa
 3. **Corrections are one call.** When the user says "that's the billing city, not the shipping city", send just that column with its new field. The other columns keep their mapping. Confirm the change in a sentence.
 4. **A required field with no column** needs a decision: map a column to it, rely on its default if it has one, or the user adds the column to the file.
 5. **Changing the target DocType** clears the mapping, because the fields differ. Say so before you do it.
+
+## Next
+
+Once the user agrees the mapping, call `dry_run_import(session)` to check every row before anything is imported.

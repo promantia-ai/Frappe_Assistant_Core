@@ -85,11 +85,13 @@ READ_ONLY_TOOLS = {
     "browser_capture_diagnostics",  # Reads console/network buffers + captures the page
     "browser_wait_for_page",  # Waits for load; no-op on data
     "browser_navigate_to",  # Changes the viewed page only, not data
-    # Writes only the import session and its working copy, never business data.
+    # Writes only the import session, never business data.
     # As a write tool it would put an approval card on starting every import.
     "start_import_session",
     # Writes only the session's mapping; as a write tool every correction would raise a card.
     "set_column_mapping",
+    # Every row it inserts is rolled back; it writes only the session and its result file.
+    "dry_run_import",
 }
 
 # Tools that are always categorized as write (hardcoded list)
