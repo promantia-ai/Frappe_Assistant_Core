@@ -31,7 +31,7 @@ from frappe.utils import cstr, get_url, strip_html
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 from frappe_assistant_core.plugins.core import import_fixes
-from frappe_assistant_core.plugins.core.import_session import read_sheet_rows
+from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
 
 #: The columns the failed-rows file adds after the user's own. A file sent back with them is
 #: the same file: they are not imported.
@@ -178,7 +178,7 @@ def failed_rows_file(session) -> Dict[str, Any]:
             _("No row of this file is failing or left out, so there is nothing to download.")
         )
 
-    source = frappe.get_doc("File", session.source_file)
+    source = readable_session_file(session)
     rows = import_fixes.apply_value_maps(session, read_sheet_rows(source, session.sheet or None))
     width = len(own_columns(rows[0]))
     out = [rows[0][:width] + list(ADDED_COLUMNS)]

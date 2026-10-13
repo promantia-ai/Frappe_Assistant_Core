@@ -41,6 +41,7 @@ from frappe_assistant_core.plugins.core.import_session import (
     import_target_problem,
     read_sheet_rows,
     read_spreadsheet,
+    readable_session_file,
 )
 
 SESSION_DOCTYPE = "FAC Import Session"
@@ -248,7 +249,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
 
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
-    file_doc = frappe.get_doc("File", session.source_file)
+    file_doc = readable_session_file(session)
     rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
     import_file = _parse(session, file_doc, rows)
     payloads = import_file.get_payloads_for_import()
@@ -672,7 +673,7 @@ def examples(session, groups: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, 
     wanted = {row for group in groups for row in group["example_rows"]}
     if not wanted:
         return {}
-    file_doc = frappe.get_doc("File", session.source_file)
+    file_doc = readable_session_file(session)
     rows = read_sheet_rows(file_doc, session.sheet or None)
     header, mapped = rows[0], column_to_field_map(session)
     shown = [i for i in range(len(header)) if mapped.get(str(i)) not in (None, "Don't Import")]

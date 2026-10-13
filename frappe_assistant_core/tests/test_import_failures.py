@@ -275,6 +275,43 @@ class TestImportFailures(ImportRunCase):
 
         self.assertEqual([row[3] for row in rows[1:]], ["3"])  # beta, left out; not gamma
 
+    def test_the_file_never_holds_rows_of_a_file_the_user_cannot_read(self):
+        secret = self._file(
+            "salaries.csv", b"Customer Name,Customer Group,Customer Type\nCEO pay,99,Company\n"
+        )
+        user = self.make_throwaway_user("clerk", roles=("Sales Manager", "Desk User"))
+        frappe.set_user(user)
+        own = self._file("mine.csv", f"{','.join(MAPPING)}\nOwn {self.tag},{self.group},Company\n".encode())
+        session = self._run("start_import_session", {"file_url": own.file_url})["result"]["session_id"]
+        # What a PUT on /api/resource can do: read-only fields are only read-only in the form.
+        doc = self._doc(session)
+        doc.update({"source_file": secret.name, "status": "Completed", "excluded_rows": "[2]"})
+        doc.save()
+
+        response = self._run("dry_run_import", {"session": session, "failed_rows_file": True})
+
+        self.assertFalse(response["success"], response)
+        self.assertNotIn("CEO pay", frappe.as_json(response))
+        frappe.set_user("Administrator")
+        self.assertFalse(
+            frappe.get_all("File", {"attached_to_name": session, "file_name": ["like", "%failed-rows%"]})
+        )
+
+    def test_a_session_pointed_at_a_file_the_user_cannot_read_is_not_checked(self):
+        secret = self._file("salaries.csv", f"{','.join(MAPPING)}\nCEO pay,{self.group},Company\n".encode())
+        frappe.set_user(self.make_throwaway_user("clerk", roles=("Sales Master Manager", "Desk User")))
+        own = self._file("mine.csv", f"{','.join(MAPPING)}\nOwn {self.tag},{self.group},Company\n".encode())
+        session, _checked = self._ready_session(own)
+        doc = self._doc(session)
+        doc.source_file = secret.name  # over the REST API
+        doc.save()
+
+        check = self._run("dry_run_import", {"session": session})
+
+        self.assertFalse(check["success"], check)
+        self.assertIn("don't have access", check["result"]["error"])
+        self.assertNotIn("CEO pay", frappe.as_json(check))
+
     def test_with_every_row_in_there_is_nothing_to_download(self):
         n = self._names()
         file_doc = self._file("one.csv", f"{','.join(MAPPING)}\n{n['alpha']},{self.group},Company\n".encode())

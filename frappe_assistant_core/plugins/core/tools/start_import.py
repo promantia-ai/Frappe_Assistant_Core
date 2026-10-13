@@ -21,6 +21,7 @@ from frappe import _
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.plugins.core import import_run
 from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.plugins.core.import_session import FileProblem
 
 
 class StartImport(BaseTool):
@@ -89,7 +90,7 @@ class StartImport(BaseTool):
                 data_import, state = import_run.resume(session)
             else:
                 data_import, state = import_run.start(session), "started"
-        except import_run.ImportProblem as e:
+        except (import_run.ImportProblem, FileProblem) as e:
             return {"success": False, "error": str(e), "session": session_name}
         except Exception as e:
             frappe.log_error(title=_("Start Import Error"), message=frappe.get_traceback())

@@ -37,7 +37,11 @@ from frappe.utils.scheduler import is_scheduler_inactive
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 from frappe_assistant_core.plugins.core import import_failures, import_fixes
-from frappe_assistant_core.plugins.core.import_session import import_target_problem, read_sheet_rows
+from frappe_assistant_core.plugins.core.import_session import (
+    import_target_problem,
+    read_sheet_rows,
+    readable_session_file,
+)
 
 READY = "Ready to Import"
 IMPORTING = "Importing"
@@ -234,7 +238,7 @@ def _cleaned_file(session, earlier: List[str]):
     """The session's sheet as a private CSV: value maps applied, records left out or already
     imported blanked (every row of them, so no child row is left to join another record). It
     is saved unattached, for the Data Import made from it to take."""
-    source = frappe.get_doc("File", session.source_file)
+    source = readable_session_file(session)
     rows = import_fixes.apply_value_maps(session, read_sheet_rows(source, session.sheet or None))
     excluded = dry_run._excluded_rows(session)
     imported = import_failures.imported_rows(session)

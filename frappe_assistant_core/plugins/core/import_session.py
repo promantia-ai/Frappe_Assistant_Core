@@ -70,6 +70,16 @@ def get_readable_file(file_url: str):
     raise FileProblem(_("File not found, or you don't have access to it."))
 
 
+def readable_session_file(session):
+    """The session's file, when the current user may read it. A session's fields can be written
+    over the REST API, read-only or not, so its source_file is checked each time it is read."""
+    if session.source_file and frappe.db.exists("File", session.source_file):
+        file_doc = frappe.get_doc("File", session.source_file)
+        if frappe.has_permission("File", "read", doc=file_doc):
+            return file_doc
+    raise FileProblem(_("File not found, or you don't have access to it."))
+
+
 def read_spreadsheet(file_doc, sheet: Optional[str] = None) -> SpreadsheetRead:
     """Summarise every sheet of ``file_doc`` and choose the one to work on.
 

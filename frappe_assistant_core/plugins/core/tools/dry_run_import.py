@@ -120,7 +120,7 @@ class DryRunImport(BaseTool):
                 }
             try:
                 return {"success": True, **import_failures.failed_rows_file(session)}
-            except import_failures.FailuresProblem as e:
+            except (import_failures.FailuresProblem, FileProblem) as e:
                 return {"success": False, "error": str(e), "session": session_name}
             except Exception as e:
                 frappe.log_error(title=_("Failed Rows File Error"), message=frappe.get_traceback())
