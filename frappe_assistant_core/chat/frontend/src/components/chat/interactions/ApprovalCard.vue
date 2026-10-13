@@ -21,6 +21,23 @@
 
 		<p v-if="toolDescription" class="approval-description">{{ toolDescription }}</p>
 
+		<!-- Several records in one call: each one, so the user sees what they approve -->
+		<div v-if="records.length" class="approval-records">
+			<div class="records-heading">
+				{{ records.length }} {{ records.length === 1 ? "record" : "records" }}
+			</div>
+			<ol class="records-list">
+				<li v-for="(line, index) in visibleRecords" :key="index">{{ line }}</li>
+			</ol>
+			<button
+				v-if="records.length > RECORDS_SHOWN"
+				class="field-toggle"
+				@click="showAllRecords = !showAllRecords"
+			>
+				{{ showAllRecords ? "Show fewer ‹" : `Show all ${records.length} ›` }}
+			</button>
+		</div>
+
 		<!-- Scannable 2-col key/value table -->
 		<div v-if="hasDetails" class="approval-table">
 			<template v-for="[key, value] in visibleRows" :key="key">
@@ -61,6 +78,7 @@
 <script setup>
 import { computed, ref } from "vue";
 import {
+	documentLines,
 	flattenInput,
 	formatToolName,
 	formatKey,
@@ -103,6 +121,14 @@ const hasDetails = computed(
 
 const showAllFields = ref(false);
 
+// Several records in one call (create_document / update_document `documents`).
+const RECORDS_SHOWN = 10;
+const showAllRecords = ref(false);
+const records = computed(() => documentLines(props.block.input));
+const visibleRecords = computed(() =>
+	showAllRecords.value ? records.value : records.value.slice(0, RECORDS_SHOWN),
+);
+
 const fieldSplit = computed(() => {
 	if (!props.block.input) return { primary: [], overflow: [], overflowCount: 0 };
 	return splitDetailFields(flattenInput(props.block.input), 4);
@@ -134,6 +160,14 @@ function documentActionConsequence(input) {
 const consequence = computed(() => {
 	if (props.block.tool_name === "document_action") {
 		return documentActionConsequence(props.block.input);
+	}
+	const count = records.value.length;
+	if (count > 1) {
+		const many = {
+			create_document: `This will write ${count} new records to your ERP, all or none`,
+			update_document: `This will modify ${count} existing records in your ERP, all or none`,
+		};
+		if (many[props.block.tool_name]) return many[props.block.tool_name];
 	}
 	const map = {
 		create_document: "This will write a new record to your ERP",
@@ -297,6 +331,25 @@ function handleReject() {
 
 .field-toggle:hover {
 	color: var(--ql-accent-hover);
+}
+
+/* Several records: one line each */
+.approval-records {
+	padding: 10px 14px 0;
+	font-size: 11.5px;
+}
+
+.records-heading {
+	color: var(--ql-text-muted);
+	margin-bottom: 4px;
+}
+
+.records-list {
+	margin: 0 0 6px;
+	padding-left: 18px;
+	color: var(--ql-text);
+	line-height: 1.5;
+	word-break: break-word;
 }
 
 /* Decided banner (post-click, pre-resume) */

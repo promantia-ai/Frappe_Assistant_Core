@@ -51,13 +51,54 @@ export function flattenInput(input) {
 		}
 	}
 
-	const skipKeys = new Set(["validate_only", "ignore_permissions", "ignore_mandatory"]);
+	// "documents" (several records in one call) is listed record by record, by documentLines.
+	const skipKeys = new Set(["validate_only", "ignore_permissions", "ignore_mandatory", "documents"]);
 	for (const [key, value] of Object.entries(input)) {
 		if (key in result || nestedKeys.includes(key) || skipKeys.has(key)) continue;
 		if (!isPlainObject(value)) result[key] = value;
 	}
 
 	return result;
+}
+
+const NAME_KEY_RE = /(^name$|^title$|_name$|^__newname$)/;
+const FIELDS_PER_LINE = 3;
+
+function shortValue(value) {
+	return formatValue(isPlainObject(value) || Array.isArray(value) ? value : String(value));
+}
+
+/**
+ * One line per record when a tool writes several in one call (`documents`, as
+ * create_document and update_document take it), so the user sees each record they are
+ * approving, not "3 items". An update line names the record and the fields it changes;
+ * a create line names the new record, the group it goes under, and its other fields.
+ * Returns [] when the input has no such list.
+ */
+export function documentLines(input) {
+	const documents = input && Array.isArray(input.documents) ? input.documents : [];
+	return documents.map((entry) => {
+		const doc = isPlainObject(entry) ? entry : {};
+		const data = isPlainObject(doc.data) ? doc.data : {};
+		const doctype = doc.doctype ? String(doc.doctype) : "Record";
+		const fields = Object.entries(data).filter(([k]) => !k.startsWith("_") || k === "__newname");
+		if (doc.name) {
+			const changes = fields.slice(0, FIELDS_PER_LINE).map(([k, v]) => `${formatKey(k)}: ${shortValue(v)}`);
+			const more = fields.length > FIELDS_PER_LINE ? `, +${fields.length - FIELDS_PER_LINE} more` : "";
+			return `${doctype} · ${doc.name}${changes.length ? ` — ${changes.join(", ")}${more}` : ""}`;
+		}
+		const parentField = fields.find(([k, v]) => k.startsWith("parent_") && v);
+		// The record's name field, else its first text field (a Market Segment's market_segment).
+		const nameField =
+			fields.find(([k, v]) => NAME_KEY_RE.test(k) && v != null && v !== "") ||
+			fields.find((f) => f !== parentField && typeof f[1] === "string" && f[1] !== "");
+		const rest = fields.filter((f) => f !== nameField && f !== parentField);
+		const label = nameField ? shortValue(nameField[1]) : "new";
+		const under = parentField ? ` (under ${shortValue(parentField[1])})` : "";
+		const shown = rest.slice(0, FIELDS_PER_LINE).map(([k, v]) => `${formatKey(k)}: ${shortValue(v)}`);
+		const more = rest.length > FIELDS_PER_LINE ? `, +${rest.length - FIELDS_PER_LINE} more` : "";
+		return `${doctype} · ${label}${under}${shown.length ? ` — ${shown.join(", ")}${more}` : ""}`;
+	});
 }
 
 export function formatToolName(name) {

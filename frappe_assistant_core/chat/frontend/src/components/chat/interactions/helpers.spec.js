@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+	documentLines,
 	flattenInput,
 	isMoneyKey,
 	isDateValue,
@@ -78,5 +79,46 @@ describe("splitDetailFields", () => {
 	it("handles empty/undefined input without throwing", () => {
 		expect(splitDetailFields(undefined).primary).toEqual([]);
 		expect(splitDetailFields({}).overflowCount).toBe(0);
+	});
+});
+
+describe("documentLines", () => {
+	it("names each new record, the group it goes under and its other fields", () => {
+		const lines = documentLines({
+			documents: [
+				{ doctype: "Customer Group", data: { customer_group_name: "Hospitals", parent_customer_group: "All Customer Groups" } },
+				{ doctype: "Market Segment", data: { market_segment: "Healthcare" } },
+				{ doctype: "ToDo", data: { description: "Call the bank", priority: "High" } },
+			],
+		});
+		expect(lines).toEqual([
+			"Customer Group · Hospitals (under All Customer Groups)",
+			"Market Segment · Healthcare",
+			"ToDo · Call the bank — Priority: High",
+		]);
+	});
+
+	it("names each updated record and the fields it changes", () => {
+		const lines = documentLines({
+			documents: [{ doctype: "Customer", name: "CUST-0001", data: { territory: "Karnataka" } }],
+		});
+		expect(lines).toEqual(["Customer · CUST-0001 — Territory: Karnataka"]);
+	});
+
+	it("keeps a line short when a record has many fields", () => {
+		const [line] = documentLines({
+			documents: [{ doctype: "Customer", name: "C-1", data: { a: 1, b: 2, c: 3, d: 4, e: 5 } }],
+		});
+		expect(line).toBe("Customer · C-1 — A: 1, B: 2, C: 3, +2 more");
+	});
+
+	it("is empty for a single-record call, which keeps its field table", () => {
+		expect(documentLines({ doctype: "ToDo", data: { description: "x" } })).toEqual([]);
+		expect(documentLines(undefined)).toEqual([]);
+	});
+
+	it("keeps documents out of the field table, where it was only 'N items'", () => {
+		const flat = flattenInput({ documents: [{ doctype: "ToDo", data: {} }], import_session: "IMP-1" });
+		expect(flat).toEqual({ import_session: "IMP-1" });
 	});
 });
