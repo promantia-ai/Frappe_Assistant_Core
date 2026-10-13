@@ -15,8 +15,9 @@ Each failure group from the dry run gets a plain explanation and the fixes that 
 - **map** a value to one that exists (a link's record, or a select option). The engine
   ranks the existing names; the model only presents them.
 - **create** the missing record, when a master that simple can be: the dry run plans every
-  one (``masters_plan``) and create_missing_masters creates them all in one call, so with
-  one approval. The records then exist, so the next check passes the rows that need them.
+  one (``masters_plan``) and create_document creates them all in one call (its documents list,
+  with import_session), so with one approval. The records then exist, so the next check
+  passes the rows that need them.
 - **leave out** the rows, with a reason. The import skips them and reports them.
 
 Map and leave out are stored on the session, never in the file: the value maps and the
@@ -32,7 +33,6 @@ import frappe
 from frappe import _
 from frappe.model import no_value_fields, table_fields
 from frappe.utils import cstr
-from frappe.utils.global_search import update_global_search
 from frappe.utils.nestedset import get_root_of
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
@@ -40,7 +40,7 @@ from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 MAP = "map"
 CREATE = "create"
 LEAVE_OUT = "leave_out"
-ACTIONS = (MAP, LEAVE_OUT)  # applied by dry_run_import; create is done with create_missing_masters
+ACTIONS = (MAP, LEAVE_OUT)  # applied by dry_run_import; create is done with create_document
 
 CLOSEST_LIMIT = 5
 MIN_SCORE = 0.5
@@ -52,8 +52,6 @@ WORD_MATCHES = 200  # else only records sharing a word with the value, this many
 NEVER_CREATE = {
     "Company": "creating one also creates a chart of accounts, warehouses and taxes",
 }
-MASTERS_SAVEPOINT = "fac_create_masters"
-_UNSET = object()
 
 
 class FixProblem(Exception):
@@ -263,7 +261,7 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
             fixes.append(
                 {
                     "action": CREATE,
-                    "use": "create_missing_masters",
+                    "use": "create_document",
                     "doctype": doctype,
                     "name": value,
                     "parent": default_parent(doctype),
@@ -344,8 +342,8 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
             elif action == CREATE:
                 raise FixProblem(
                     _(
-                        "Create missing records with create_missing_masters, then call "
-                        "dry_run_import again without fixes to check the rows."
+                        "Create missing records with create_document (documents from masters_plan, "
+                        "with import_session), then call dry_run_import again without fixes."
                     )
                 )
             else:
@@ -517,70 +515,71 @@ def _holds_records(doctype: str, name: str) -> bool:
 
 def masters_plan(session, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Every missing master the rows need that can be created: what FACO shows the user, as
-    one table, before create_missing_masters. One entry per record, with the rows it fixes."""
+    one table, before create_document creates them (documents, with import_session). One entry
+    per record, with the rows it fixes and its ``data`` as create_document takes it."""
     plan: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for group in groups:
         group = _with_target(session, group)
         doctype = group.get("link_doctype")
         if group.get("cause") != dry_run.CAUSE_MISSING_LINK or not doctype or cannot_create(doctype, session):
             continue
+        parent = default_parent(doctype)
+        meta = frappe.get_meta(doctype)
+        data = {_name_field(meta): group["value"]}
+        if parent:
+            data[_parent_field(meta)] = parent
         entry = plan.setdefault(
             (doctype, group["value"]),
             {
                 "group": group["id"],
                 "doctype": doctype,
                 "name": group["value"],
-                "parent": default_parent(doctype),
+                "parent": parent,
                 "rows": 0,
+                "data": data,  # as create_document takes it in documents
             },
         )
         entry["rows"] += group.get("count") or 0
     return list(plan.values())
 
 
-def create_masters(session, groups: Dict[str, Dict[str, Any]], records: List[Dict[str, Any]]) -> List[Dict]:
-    """Check every record against the last dry run, then create them all, or none.
-
-    ``groups`` are the last dry run's groups by id. Each record names its group, and the
-    group says what is missing, so nothing is created that the rows don't need. Each record
-    is created by the create_document tool, so with the same permission and field checks,
-    and is then listed on the session, which is saved.
-    """
+def check_masters(session, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """``documents`` sent to create_document with ``import_session``: each must be one of the
+    session's missing masters, as the latest check planned it (masters_plan), so nothing is
+    created that the rows don't need. Returns them as they will be created, with each tree
+    record's parent filled in. Raises FixProblem, or FixProblems listing every wrong one."""
+    if dry_run.is_running(session):
+        raise FixProblem(
+            _("The file is still being checked. Create the masters once the check has finished.")
+        )
+    if session.status not in ("Dry Run Failed", "Ready to Import") or not checked_as_is(session):
+        raise FixProblem(
+            _(
+                "The file or its mapping changed since the last check, or it hasn't been checked. "
+                "Check it with dry_run_import first: the masters come from that check."
+            )
+        )
+    plan = {(m["doctype"], m["name"]): m for m in masters_plan(session, list(last_groups(session).values()))}
     planned, problems, seen = [], [], set()
-    for record in records:
+    for number, entry in enumerate(documents, start=1):
         try:
-            item = _planned_master(session, groups, record)
+            item = _planned_master(session, plan, entry)
         except FixProblem as e:
-            problems.append({"group": record.get("group"), "error": str(e)})
+            problems.append({"document": number, "doctype": entry.get("doctype"), "error": str(e)})
             continue
-        if (item["doctype"], item["name"]) not in seen:
-            seen.add((item["doctype"], item["name"]))
+        key = (item["doctype"], _planned_name(item))
+        if key not in seen:
+            seen.add(key)
             planned.append(item)
     if problems:
         raise FixProblems(problems, _("Nothing was created. Correct these and call again."))
-    return _insert_all(session, planned)
+    return planned
 
 
-def _planned_master(session, groups, record) -> Dict[str, Any]:
-    group = groups.get(cstr(record.get("group")))
-    if not group:
-        raise FixProblem(
-            _("There is no group {0} in the last check. Groups: {1}.").format(
-                record.get("group"), ", ".join(groups)
-            )
-        )
-    group = _with_target(session, group)
-    doctype, name = group.get("link_doctype"), cstr(group.get("value"))
-    if group.get("cause") != dry_run.CAUSE_MISSING_LINK or not doctype:
-        raise FixProblem(
-            _("Group {0} isn't a missing record, so there is nothing to create.").format(group["id"])
-        )
-    if (cstr(record.get("doctype")).strip(), cstr(record.get("name")).strip()) != (doctype, name):
-        raise FixProblem(
-            _("Group {0} is the missing {1} '{2}', not {3} '{4}'.").format(
-                group["id"], _(doctype), name, record.get("doctype"), record.get("name")
-            )
-        )
+def _planned_master(session, plan, entry) -> Dict[str, Any]:
+    doctype = cstr(entry.get("doctype")).strip()
+    if not frappe.db.exists("DocType", doctype):
+        raise FixProblem(_("There is no DocType {0}.").format(doctype))
     reason = cannot_create(doctype, session)
     if reason:
         raise FixProblem(
@@ -588,17 +587,78 @@ def _planned_master(session, groups, record) -> Dict[str, Any]:
                 _(doctype), reason
             )
         )
+    meta = frappe.get_meta(doctype)
+    name_field, parent_field = _name_field(meta), _parent_field(meta)
+    data = entry.get("data") or {}
+    others = sorted(set(data) - {name_field, parent_field})
+    if others:
+        fields = " and ".join(f for f in (name_field, parent_field) if f)
+        raise FixProblem(
+            _("A missing {0} takes {1} only (as masters_plan's data has them), not {2}.").format(
+                _(doctype), fields, ", ".join(others)
+            )
+        )
+    name = cstr(data.get(name_field)).strip()
+    if (doctype, name) not in plan:
+        missing = ", ".join(f"{_(d)} '{n}'" for d, n in plan) or _("none")
+        raise FixProblem(
+            _("{0} '{1}' isn't one of the masters the last check found missing ({2}).").format(
+                _(doctype), name, missing
+            )
+        )
     if frappe.db.exists(doctype, name):
         raise FixProblem(
             _("{0} '{1}' already exists. Check the file again with dry_run_import.").format(_(doctype), name)
         )
-    return {
-        "group": group["id"],
-        "doctype": doctype,
-        "name": name,
-        "parent": _parent(doctype, cstr(record.get("parent")).strip()),
-        "rows": group.get("count") or 0,
-    }
+    planned = {name_field: name}
+    parent = _parent(doctype, cstr(data.get(parent_field)).strip() if parent_field else "")
+    if parent:
+        planned[parent_field] = parent
+    return {"doctype": doctype, "data": planned}
+
+
+def _planned_name(entry: Dict[str, Any]) -> str:
+    return entry["data"][_name_field(frappe.get_meta(entry["doctype"]))]
+
+
+def kept_its_name(entry: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """create_document's result for a missing master, refused if ERPNext named the record
+    otherwise: the rows link to the name the file uses."""
+    if result.get("name") != _planned_name(entry):
+        return {
+            "success": False,
+            "error": _("ERPNext would name it '{0}', not '{1}' as the file has it").format(
+                result.get("name"), _planned_name(entry)
+            ),
+        }
+    return result
+
+
+def link_created(session, results: List[Dict[str, Any]]) -> None:
+    """List the masters create_document made on the session (Created Records), so the session
+    can undo them, and log the step. Runs inside create_document's batch, so a failure here
+    undoes the records too."""
+    for result in results:
+        parent_field = _parent_field(frappe.get_meta(result["doctype"]))
+        session.append(
+            "created_records",
+            {
+                "record_doctype": result["doctype"],
+                "record_name": result["name"],
+                "parent_record": frappe.db.get_value(result["doctype"], result["name"], parent_field)
+                if parent_field
+                else None,
+            },
+        )
+    # A lookup earlier in this request (a dry run in the same workflow) may have cached these
+    # records as missing; a commit would clear that cache, and nothing has committed.
+    frappe.db.value_cache.clear()
+    session.log_step(
+        "Create Masters",
+        "Success",
+        _("Created {0}.").format(", ".join(f"{_(r['doctype'])} '{r['name']}'" for r in results)),
+    )
+    session.save()
 
 
 def _parent(doctype: str, parent: str) -> Optional[str]:
@@ -624,119 +684,6 @@ def _parent(doctype: str, parent: str) -> Optional[str]:
     return parent
 
 
-def _insert_all(session, planned: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Create every planned record and list it on the session, or, if anything fails, none.
-
-    The inserts and the session's save share a savepoint that is rolled back on the first
-    failure; a controller that commits can't end it early. What an insert sends out of the
-    database is held until all have succeeded: its global search entry, and the commit
-    callbacks and queued realtime and webhook events it adds, which are dropped with the rows
-    they were for.
-    """
-    from frappe_assistant_core.plugins.core.tools.create_document import DocumentCreate
-
-    creator = DocumentCreate()
-    callbacks = _commit_callbacks()
-    queues = _commit_queues()
-    conf = frappe.local.conf
-    search_setting = conf.get("disable_global_search", _UNSET)
-    conf["disable_global_search"] = True
-    frappe.db.commit = _no_commit
-    frappe.db.savepoint(MASTERS_SAVEPOINT)
-    created = []
-    try:
-        for item in planned:
-            data = {_name_field(frappe.get_meta(item["doctype"])): item["name"]}
-            if item["parent"]:
-                data[_parent_field(frappe.get_meta(item["doctype"]))] = item["parent"]
-            result = creator.execute({"doctype": item["doctype"], "data": data})
-            label = f"{_(item['doctype'])} '{item['name']}'"
-            if not result.get("success"):
-                raise FixProblem(
-                    _("{0} couldn't be created: {1}. Nothing was created.").format(
-                        label, cstr(result.get("error")).rstrip(".")
-                    )
-                )
-            if result.get("name") != item["name"]:
-                raise FixProblem(
-                    _(
-                        "ERPNext would name {0} '{1}', not the name the file uses. Nothing was created."
-                    ).format(label, result.get("name"))
-                )
-            created.append(item)
-            session.append(
-                "created_records",
-                {
-                    "record_doctype": item["doctype"],
-                    "record_name": item["name"],
-                    "parent_record": item["parent"],
-                },
-            )
-        # A lookup earlier in this request (a dry run in the same workflow) may have cached
-        # these records as missing; a commit would clear that cache, and nothing has committed.
-        frappe.db.value_cache.clear()
-        session.log_step(
-            "Create Masters",
-            "Success",
-            _("Created {0}.").format(", ".join(f"{_(i['doctype'])} '{i['name']}'" for i in created)),
-        )
-        session.save()
-    except Exception:
-        frappe.db.rollback(save_point=MASTERS_SAVEPOINT)
-        _restore_commit_callbacks(callbacks)
-        _restore_commit_queues(queues)
-        raise
-    finally:
-        del frappe.db.commit
-        if search_setting is _UNSET:
-            conf.pop("disable_global_search", None)
-        else:
-            conf["disable_global_search"] = search_setting
-
-    for item in created:
-        update_global_search(frappe.get_doc(item["doctype"], item["name"]))
-    return created
-
-
-def _commit_callbacks() -> Dict[str, list]:
-    return {
-        name: list(getattr(frappe.db, name)._functions)
-        for name in ("before_commit", "after_commit", "before_rollback", "after_rollback")
-    }
-
-
-def _restore_commit_callbacks(callbacks: Dict[str, list]) -> None:
-    for name, functions in callbacks.items():
-        manager = getattr(frappe.db, name)
-        manager._functions.clear()
-        manager._functions.extend(functions)
-
-
-# Realtime events and webhooks wait in these lists for the commit, which flushes them through
-# a callback added with the list. A list that outlives its callback would never be sent again.
-_QUEUES = ("_realtime_log", "_webhook_queue")
-
-
-def _commit_queues() -> Dict[str, Any]:
-    return {
-        name: list(getattr(frappe.local, name)) if hasattr(frappe.local, name) else _UNSET for name in _QUEUES
-    }
-
-
-def _restore_commit_queues(queues: Dict[str, Any]) -> None:
-    for name, items in queues.items():
-        if items is _UNSET:
-            if hasattr(frappe.local, name):
-                delattr(frappe.local, name)
-        else:
-            setattr(frappe.local, name, items)
-
-
-def _no_commit(*args, **kwargs):
-    """Stands in for frappe.db.commit while the masters are created, as in the dry run."""
-    return None
-
-
 # -- the reply ------------------------------------------------------------------------
 
 
@@ -756,6 +703,14 @@ def check(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     ]
     session.db_set("validation_summary", frappe.as_json({**reply, "groups": kept}), update_modified=False)
     return reply
+
+
+def checked_as_is(session) -> bool:
+    """Whether the last check was of the session as it is now: same file, mapping and fixes."""
+    if not session.source_file or not session.validated_fingerprint:
+        return False
+    file_doc = frappe.get_doc("File", session.source_file)
+    return dry_run.fingerprint(session, file_doc) == session.validated_fingerprint
 
 
 def last_groups(session) -> Dict[str, Dict[str, Any]]:

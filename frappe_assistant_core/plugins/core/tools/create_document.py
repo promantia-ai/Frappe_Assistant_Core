@@ -25,6 +25,7 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
+from frappe_assistant_core.plugins.core import document_batch
 
 
 def _default_todo_allocation(doc: Any) -> None:
@@ -59,7 +60,7 @@ class DocumentCreate(BaseTool):
     def __init__(self):
         super().__init__()
         self.name = "create_document"
-        self.description = "Create new Frappe documents with proper validation and child table support. Supports all DocTypes including those with child tables. WORKFLOW: First use get_doctype_info to understand the DocType structure, identify required fields and child tables, then create the document with proper field values. Child tables must be provided as arrays of objects. Referenced records (customers, items, warehouses, etc.) must already exist in the system. Use exact field names as shown in DocType metadata. Error responses include specific guidance for resolution. Common use cases: creating Sales Orders with line items, Purchase Orders with items and taxes, customer records, inventory transactions."
+        self.description = "Create new Frappe documents with proper validation and child table support. Supports all DocTypes including those with child tables. WORKFLOW: First use get_doctype_info to understand the DocType structure, identify required fields and child tables, then create the document with proper field values. Child tables must be provided as arrays of objects. Referenced records (customers, items, warehouses, etc.) must already exist in the system. Use exact field names as shown in DocType metadata. Error responses include specific guidance for resolution. Common use cases: creating Sales Orders with line items, Purchase Orders with items and taxes, customer records, inventory transactions. SEVERAL RECORDS AT ONCE: instead of doctype and data, pass documents, a list of {doctype, data} (up to 100, any DocTypes): one approval for all, and all are created or none. Show the user the records as a table first: the approval card shows only how many. A failure names the record and why."
         self.requires_permission = None  # Permission checked dynamically per DocType
 
         self.inputSchema = {
@@ -83,14 +84,45 @@ class DocumentCreate(BaseTool):
                     "default": False,
                     "description": "Only validate the document without saving it. Use this to test data format and required fields before actual creation.",
                 },
+                "documents": {
+                    "type": "array",
+                    "description": "Several records in one call, instead of doctype and data: each {doctype, data}, created in order (a parent before its children). All are created or none. Not with submit.",
+                    "items": {
+                        "type": "object",
+                        "properties": {"doctype": {"type": "string"}, "data": {"type": "object"}},
+                        "required": ["doctype", "data"],
+                    },
+                },
+                "import_session": {
+                    "type": "string",
+                    "description": "With documents: the import session whose missing masters these are (dry_run_import's masters_plan). They are checked against it and listed on it.",
+                },
             },
-            "required": ["doctype", "data"],
+            "required": [],
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new document"""
+        """Create a new document, or, with ``documents``, several in one call"""
+        if document_batch.given(arguments.get("import_session")) and not document_batch.given(
+            arguments.get("documents")
+        ):
+            # One missing master of an import: checked and linked like a list of one.
+            arguments = {
+                **arguments,
+                "documents": [{"doctype": arguments.get("doctype"), "data": arguments.get("data")}],
+                "doctype": None,
+                "data": None,
+            }
+        if document_batch.given(arguments.get("documents")):
+            return self._execute_many(arguments)
+
         doctype = arguments.get("doctype")
         data = arguments.get("data", {})
+        if not doctype or "data" not in arguments:
+            return {
+                "success": False,
+                "error": "Pass doctype and data for one record, or documents for several.",
+            }
         submit = arguments.get("submit", False)
         validate_only = arguments.get("validate_only", False)
 
@@ -401,6 +433,95 @@ class DocumentCreate(BaseTool):
 
             # Log failed creation
             return result
+
+    # -- several documents in one call ------------------------------------------------------
+
+    def _execute_many(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Create ``documents`` in one call: checked first, then all created or none. With
+        ``import_session`` they must be that session's missing masters, and are listed on it."""
+        from frappe_assistant_core.plugins.core import import_fixes
+        from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
+
+        session_name = arguments.get("import_session")
+        session = None
+        try:
+            documents = document_batch.read_documents(arguments, ("doctype", "data"), with_name=False)
+            if arguments.get("submit"):
+                raise document_batch.BatchProblem(
+                    _("submit is for one document at a time. Create the list as drafts, then submit each.")
+                )
+            if document_batch.given(session_name):
+                session = load_session(session_name)
+                documents = import_fixes.check_masters(session, documents)
+            document_batch.check_access(documents, "create")
+            if arguments.get("validate_only"):
+                return self._validate_many(documents)
+
+            def create_one(entry):
+                result = self.execute({"doctype": entry["doctype"], "data": dict(entry["data"])})
+                if session and result.get("success"):
+                    return import_fixes.kept_its_name(entry, result)
+                return result
+
+            after = (lambda results: import_fixes.link_created(session, results)) if session else None
+            results = document_batch.write_all(documents, create_one, _("created"), after)
+        except import_fixes.FixProblems as e:
+            return {"success": False, "error": str(e), "problems": e.problems}
+        except import_fixes.FixProblem as e:
+            return {"success": False, "error": str(e)}
+        except document_batch.BatchProblem as e:
+            if e.written:
+                # The batch was undone, with the Error Log the failed record wrote: keep one.
+                frappe.log_error(title=_("Document Creation Error"), message=str(e))
+            return {"success": False, "error": str(e), "problems": e.problems}
+        except frappe.DoesNotExistError as e:
+            if session is None and document_batch.given(session_name):
+                return {"success": False, "error": f"Import session '{session_name}' not found."}
+            return {"success": False, "error": exception_message(e)}
+        except frappe.PermissionError as e:
+            if session is None and document_batch.given(session_name):
+                return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
+            return permission_error_result("", exception_message(e))
+        except Exception as e:
+            frappe.log_error(title=_("Document Creation Error"), message=frappe.get_traceback())
+            return {"success": False, "error": exception_message(e)}
+
+        created = [{"doctype": r["doctype"], "name": r["name"]} for r in results]
+        message = _("Created {0}.").format(
+            _("1 record") if len(created) == 1 else _("{0} records").format(len(created))
+        )
+        if session:
+            message += " " + _(
+                "Linked to import session {0}. Check the file again with dry_run_import."
+            ).format(session.name)
+        return {"success": True, "created": created, "message": message}
+
+    def _validate_many(self, documents) -> Dict[str, Any]:
+        """validate_only for a list: each record validated on its own, none created. A record
+        that needs another one in the list (a child under a new parent) is only valid once that
+        one exists."""
+        checked, failed = [], 0
+        for number, entry in enumerate(documents, start=1):
+            result = self.execute(
+                {"doctype": entry["doctype"], "data": dict(entry["data"]), "validate_only": True}
+            )
+            row = {
+                "document": number,
+                "doctype": entry["doctype"],
+                "validation_passed": bool(result.get("success")),
+            }
+            if not result.get("success"):
+                failed += 1
+                row["error"] = result.get("error")
+            checked.append(row)
+        return {
+            "success": not failed,
+            "validation_passed": not failed,
+            "documents": checked,
+            "message": _("{0} of {1} documents pass validation. Nothing was created.").format(
+                len(documents) - failed, len(documents)
+            ),
+        }
 
 
 # Make sure class name matches file name for discovery

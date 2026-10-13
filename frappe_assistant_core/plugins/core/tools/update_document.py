@@ -25,6 +25,7 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
+from frappe_assistant_core.plugins.core import document_batch
 
 
 def _restricted_fields_for_doctype(doctype: str, user_role: str) -> Set[str]:
@@ -188,7 +189,10 @@ class DocumentUpdate(BaseTool):
             "IMPORTANT: do NOT call this tool with a child-table doctype (e.g. 'Sales Order Item', "
             "'Purchase Order Item') directly — that bypasses the parent's recalculation and leaves "
             "totals stale. Always call it on the parent doctype (e.g. 'Sales Order') and pass the "
-            "child row updates under the table fieldname (e.g. 'items')."
+            "child row updates under the table fieldname (e.g. 'items'). "
+            "SEVERAL RECORDS AT ONCE: instead of doctype, name and data, pass documents, a list of "
+            "{doctype, name, data} (up to 100): one approval for all, and all are updated or none. "
+            "Show the user the changes as a table first: the approval card shows only how many."
         )
         self.requires_permission = None  # Permission checked dynamically per DocType
 
@@ -216,15 +220,36 @@ class DocumentUpdate(BaseTool):
                         "{'item_code': 'NEW', 'qty': 1}, {'name': 'old-1', '_delete': true}]}."
                     ),
                 },
+                "documents": {
+                    "type": "array",
+                    "description": "Several records in one call, instead of doctype, name and data: each {doctype, name, data}, updated in order. All are updated or none.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "doctype": {"type": "string"},
+                            "name": {"type": "string"},
+                            "data": {"type": "object"},
+                        },
+                        "required": ["doctype", "name", "data"],
+                    },
+                },
             },
-            "required": ["doctype", "name", "data"],
+            "required": [],
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Update an existing document"""
+        """Update an existing document, or, with ``documents``, several in one call"""
+        if document_batch.given(arguments.get("documents")):
+            return self._execute_many(arguments)
+
         doctype = arguments.get("doctype")
         name = arguments.get("name")
         data = arguments.get("data", {})
+        if not doctype or not name or "data" not in arguments:
+            return {
+                "success": False,
+                "error": "Pass doctype, name and data for one record, or documents for several.",
+            }
 
         # Reject direct updates to child-table doctypes. Saving a child row in isolation
         # bypasses the parent's validate() pipeline, so derived fields (e.g. ERPNext's
@@ -413,6 +438,38 @@ class DocumentUpdate(BaseTool):
 
             # Log failed update
             return result
+
+    # -- several documents in one call ------------------------------------------------------
+
+    def _execute_many(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Update ``documents`` in one call: checked first, then all updated or none."""
+        try:
+            documents = document_batch.read_documents(arguments, ("doctype", "name", "data"), with_name=True)
+            document_batch.check_access(documents, "write")
+            results = document_batch.write_all(
+                documents,
+                lambda entry: self.execute(
+                    {"doctype": entry["doctype"], "name": entry["name"], "data": dict(entry["data"])}
+                ),
+                _("updated"),
+            )
+        except document_batch.BatchProblem as e:
+            if e.written:
+                # The batch was undone, with the Error Log the failed record wrote: keep one.
+                frappe.log_error(title=_("Document Update Error"), message=str(e))
+            return {"success": False, "error": str(e), "problems": e.problems}
+        except Exception as e:
+            frappe.log_error(title=_("Document Update Error"), message=frappe.get_traceback())
+            return {"success": False, "error": exception_message(e)}
+
+        updated = [{"doctype": r["doctype"], "name": r["name"]} for r in results]
+        return {
+            "success": True,
+            "updated": updated,
+            "message": _("Updated {0}.").format(
+                _("1 record") if len(updated) == 1 else _("{0} records").format(len(updated))
+            ),
+        }
 
 
 # Make sure class name matches file name for discovery

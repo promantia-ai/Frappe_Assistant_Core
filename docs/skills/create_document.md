@@ -8,10 +8,12 @@ The `create_document` tool creates new Frappe documents (records). It handles fi
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `doctype` | string | **Yes** | — | Exact DocType name |
-| `data` | object | **Yes** | — | Field values as key-value pairs |
-| `submit` | boolean | No | `false` | Submit after creation (for submittable DocTypes) |
+| `doctype` | string | **Yes**, for one record | — | Exact DocType name |
+| `data` | object | **Yes**, for one record | — | Field values as key-value pairs |
+| `submit` | boolean | No | `false` | Submit after creation (for submittable DocTypes). One record only |
 | `validate_only` | boolean | No | `false` | Validate without saving — use to test data format |
+| `documents` | array | **Yes**, for several records | — | Instead of `doctype` and `data`: a list of `{doctype, data}`, up to 100. See **Several records at once** |
+| `import_session` | string | No | — | With `documents`: the import session whose missing masters these are. See **Missing masters of an import** |
 
 ## Response Format
 
@@ -88,6 +90,51 @@ The `create_document` tool creates new Frappe documents (records). It handles fi
   "submit": true
 }
 ```
+
+## Several records at once
+
+Pass `documents` instead of `doctype` and `data`: one call, so the user approves **once** for all of them.
+
+```json
+{
+  "documents": [
+    {"doctype": "Customer Group", "data": {"customer_group_name": "Hospitals", "parent_customer_group": "All Customer Groups"}},
+    {"doctype": "Territory", "data": {"territory_name": "Karnataka", "parent_territory": "All Territories"}},
+    {"doctype": "UOM", "data": {"uom_name": "Dozen"}}
+  ]
+}
+```
+
+- **Any DocTypes, up to 100 records.** More than that: split them into several calls.
+- **In order:** put a parent before the records under it.
+- **All or nothing.** Every record is checked first (permission, restricted fields); then they are created one by one with the same checks as a single record. If one fails, none is kept, and the error names it: "Document 2 (Territory) couldn't be created: … Nothing was created." Fix it, or take it out, and call again. What a save sends out at once can't be taken back, as with one record: a Notification's Slack or SMS message, say.
+- **Show the user the list as a table before calling**: the approval card shows only how many records there are.
+- `validate_only` validates each record on its own and creates none. `submit` is for one record at a time: create a list as drafts, then submit each.
+
+Reply: `{"success": true, "created": [{"doctype": "Customer Group", "name": "Hospitals"}, …], "message": "Created 3 records."}`. When nothing was created: `success: false`, the `error`, and `problems` (each with the record's number `document` and why).
+
+## Missing masters of an import
+
+`dry_run_import` lists the masters a migration file needs that don't exist yet and can be created from their name (`masters_plan`): Customer Groups, Territories, UOMs, Brands and the like. Create them with this tool, `documents` and **`import_session`**:
+
+1. **Show the plan as one table**, with every record: DocType, name, parent, rows it fixes. Let the user change a parent; it must be an existing group of the same tree (e.g. a Customer Group with "Is Group" ticked). Ask once: "Create these 4 records?"
+2. **Call once** with each plan entry's `doctype` and `data`, and the session:
+
+   ```json
+   {
+     "import_session": "IMP-2026-00012",
+     "documents": [
+       {"doctype": "Customer Group", "data": {"customer_group_name": "Hospitals", "parent_customer_group": "All Customer Groups"}},
+       {"doctype": "Market Segment", "data": {"market_segment": "Healthcare"}}
+     ]
+   }
+   ```
+
+3. **Show the change log**: the same table with a Result column. Then call `dry_run_import` again without fixes: the rows that needed them now pass.
+
+With `import_session`, each record must be one of that session's missing masters as its **latest** check planned it: the same DocType and name, only the name and the parent. **Never invent one**; to use another name, map the rows instead. Each record created is listed on the session (**Created Records**), so the session can undo it. Refused, with nothing created, when the file or its mapping changed since the check (check again first), or a record already exists or can't be created here.
+
+A missing record that can't be created has no `create` fix in the check; its group has `cannot_create` saying why. For example: ERPNext names it itself (Customer, Supplier, Warehouse, Account), it needs more than a name (Item, Price List), it is a system record (Currency, User), it is a Company, or the file imports that DocType itself. Offer **map** to an existing record, or **leave out** the rows.
 
 ## Edge Cases
 

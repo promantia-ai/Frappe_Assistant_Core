@@ -8,9 +8,10 @@ The `update_document` tool modifies field values on an existing Frappe document.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `doctype` | string | **Yes** | Exact **parent** DocType name (e.g., `Sales Order`, not `Sales Order Item`) |
-| `name` | string | **Yes** | Document name/ID to update |
-| `data` | object | **Yes** | Only the fields to change. For child tables, pass a list of row dicts under the table fieldname |
+| `doctype` | string | **Yes**, for one record | Exact **parent** DocType name (e.g., `Sales Order`, not `Sales Order Item`) |
+| `name` | string | **Yes**, for one record | Document name/ID to update |
+| `data` | object | **Yes**, for one record | Only the fields to change. For child tables, pass a list of row dicts under the table fieldname |
+| `documents` | array | **Yes**, for several records | Instead of `doctype`, `name` and `data`: a list of `{doctype, name, data}`, up to 100. See **Several records at once** |
 
 ## Response Format
 
@@ -100,6 +101,25 @@ ERPNext (and Frappe in general) computes derived fields — row `amount`, parent
 5. **Use replace mode only when you intend a wipe-and-refill** — it discards any row you omit.
 6. **Link fields use the `name`** — not the display title. Use `search_documents` with `purpose: "link_value"` to find valid values.
 7. **Cannot update submitted documents** — `docstatus=1` documents must be amended or cancelled first.
+
+## Several records at once
+
+Pass `documents` instead of `doctype`, `name` and `data`: one call, so the user approves **once** for all of them.
+
+```json
+{
+  "documents": [
+    {"doctype": "Customer", "name": "CUST-0001", "data": {"territory": "Karnataka"}},
+    {"doctype": "Customer", "name": "CUST-0002", "data": {"territory": "Karnataka"}}
+  ]
+}
+```
+
+- **Up to 100 records**, any DocTypes; each `data` works as for one record (child tables included).
+- **All or nothing.** Every record is checked first (permission, restricted fields); then they are updated one by one with the same checks as a single record. If one fails, none is changed, and the error names it: "Document 2 (Customer 'CUST-0002') couldn't be updated: … Nothing was updated." What a save sends out at once can't be taken back, as with one record: a Notification's Slack or SMS message, say.
+- **Show the user the changes as a table before calling**: the approval card shows only how many records there are.
+
+Reply: `{"success": true, "updated": [{"doctype": "Customer", "name": "CUST-0001"}, …], "message": "Updated 2 records."}`. When nothing was changed: `success: false`, the `error`, and `problems` (each with the record's number `document` and why).
 
 ## Edge Cases
 
