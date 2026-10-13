@@ -23,7 +23,7 @@ from frappe_assistant_core.core.base_tool import BaseTool, exception_message, pe
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 from frappe_assistant_core.plugins.core import import_fixes
 from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
-from frappe_assistant_core.plugins.core.import_session import FileProblem
+from frappe_assistant_core.plugins.core.import_session import FileProblem, get_readable_file
 
 
 class DryRunImport(BaseTool):
@@ -109,10 +109,14 @@ class DryRunImport(BaseTool):
                     )
                 return self._running(session)
             notice = None
-            if arguments.get("file_url"):
+            # The session's own file passed again (as a client may) is no new file: nothing to link.
+            if arguments.get("file_url") and not _is_sessions_file(session, arguments["file_url"]):
                 if fixes:
                     raise dry_run.DryRunProblem(
-                        _("Check the new file first, without fixes; fixes apply to the groups it finds.")
+                        _(
+                            "This file isn't the session's. Check it first, without fixes: fixes "
+                            "apply to the groups its check finds."
+                        )
                     )
                 before = session.source_file
                 dry_run.link_site_file(session, arguments["file_url"])
@@ -168,6 +172,11 @@ class DryRunImport(BaseTool):
         if notice:
             result["notice"] = notice
         return result
+
+
+def _is_sessions_file(session, file_url: str) -> bool:
+    """Whether ``file_url`` is a file the user can read with the same bytes as the session's."""
+    return bool(session.source_file) and _same_content(session.source_file, get_readable_file(file_url).name)
 
 
 def _same_content(file_a: str, file_b: str) -> bool:

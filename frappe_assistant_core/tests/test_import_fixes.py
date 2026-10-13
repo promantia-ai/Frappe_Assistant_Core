@@ -415,6 +415,25 @@ class TestImportFixes(BaseAssistantTest):
         self.assertEqual(response["result"]["excluded"], 2)
         self.assertEqual(json.loads(self._doc(session).excluded_rows), [3, 4])
 
+    def test_fixes_sent_with_the_sessions_own_file_url_are_applied(self):
+        session, result = self._session()
+        link = self._group(result, "Missing link")
+        own = frappe.db.get_value("File", self._doc(session).source_file, "file_url")
+
+        # What FACO sent in a live demo: the fixes, with the file_url the session already has.
+        response = self._run(
+            "dry_run_import",
+            {
+                "session": session,
+                "file_url": own,
+                "fixes": [{"group": link["id"], "action": "map", "to": self.existing_group}],
+            },
+        )
+
+        self.assertTrue(response["success"], response)
+        self.assertNotIn("Missing link", [g["cause"] for g in response["result"]["groups"]])
+        self.assertNotIn("Link File", [step.step for step in self._doc(session).steps])  # nothing re-linked
+
     def test_a_new_file_and_fixes_in_one_call_are_refused(self):
         session, result = self._session()
         link = self._group(result, "Missing link")
