@@ -105,11 +105,15 @@ describe("documentLines", () => {
 		expect(lines).toEqual(["Customer · CUST-0001 — Territory: Karnataka"]);
 	});
 
-	it("keeps a line short when a record has many fields", () => {
-		const [line] = documentLines({
-			documents: [{ doctype: "Customer", name: "C-1", data: { a: 1, b: 2, c: 3, d: 4, e: 5 } }],
+	it("lists every field a record sets or changes, hiding none", () => {
+		const [update, create] = documentLines({
+			documents: [
+				{ doctype: "Customer", name: "C-1", data: { territory: "Karnataka", a: 1, b: 2, credit_limit: 0, disabled: 1 } },
+				{ doctype: "ToDo", data: { description: "Call", a: 1, b: 2, c: 3, priority: "High" } },
+			],
 		});
-		expect(line).toBe("Customer · C-1 — A: 1, B: 2, C: 3, +2 more");
+		expect(update).toBe("Customer · C-1 — Territory: Karnataka, A: 1, B: 2, Credit Limit: 0, Disabled: 1");
+		expect(create).toBe("ToDo · Call — A: 1, B: 2, C: 3, Priority: High");
 	});
 
 	it("is empty for a single-record call, which keeps its field table", () => {

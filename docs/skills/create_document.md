@@ -108,7 +108,7 @@ Pass `documents` instead of `doctype` and `data`: one call, so the user approves
 - **Any DocTypes, up to 100 records.** More than that: split them into several calls.
 - **In order:** put a parent before the records under it.
 - **All or nothing.** Every record is checked first (permission, restricted fields); then they are created one by one with the same checks as a single record. If one fails, none is kept, and the error names it: "Document 2 (Territory) couldn't be created: … Nothing was created." Fix it, or take it out, and call again. What a save sends out at once can't be taken back, as with one record: a Notification's Slack or SMS message, say.
-- **Show the user the list as a table before calling**: the approval card shows only how many records there are.
+- **Show the user the list as a table before calling.** The approval card then lists each record with every field it sets (the first 10, the rest on request).
 - `validate_only` validates each record on its own and creates none. `submit` is for one record at a time: create a list as drafts, then submit each.
 
 Reply: `{"success": true, "created": [{"doctype": "Customer Group", "name": "Hospitals"}, …], "message": "Created 3 records."}`. When nothing was created: `success: false`, the `error`, and `problems` (each with the record's number `document` and why).

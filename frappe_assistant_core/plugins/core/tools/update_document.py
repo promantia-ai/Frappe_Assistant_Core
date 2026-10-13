@@ -192,7 +192,7 @@ class DocumentUpdate(BaseTool):
             "child row updates under the table fieldname (e.g. 'items'). "
             "SEVERAL RECORDS AT ONCE: instead of doctype, name and data, pass documents, a list of "
             "{doctype, name, data} (up to 100): one approval for all, and all are updated or none. "
-            "Show the user the changes as a table first: the approval card shows only how many."
+            "Show the user the changes as a table first; the approval card then lists each one."
         )
         self.requires_permission = None  # Permission checked dynamically per DocType
 

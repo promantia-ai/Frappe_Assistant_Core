@@ -117,7 +117,7 @@ Pass `documents` instead of `doctype`, `name` and `data`: one call, so the user 
 
 - **Up to 100 records**, any DocTypes; each `data` works as for one record (child tables included).
 - **All or nothing.** Every record is checked first (permission, restricted fields); then they are updated one by one with the same checks as a single record. If one fails, none is changed, and the error names it: "Document 2 (Customer 'CUST-0002') couldn't be updated: … Nothing was updated." What a save sends out at once can't be taken back, as with one record: a Notification's Slack or SMS message, say.
-- **Show the user the changes as a table before calling**: the approval card shows only how many records there are.
+- **Show the user the changes as a table before calling.** The approval card then lists each record with every field it changes (the first 10, the rest on request).
 
 Reply: `{"success": true, "updated": [{"doctype": "Customer", "name": "CUST-0001"}, …], "message": "Updated 2 records."}`. When nothing was changed: `success: false`, the `error`, and `problems` (each with the record's number `document` and why).
 
