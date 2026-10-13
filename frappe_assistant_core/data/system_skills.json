@@ -120,6 +120,16 @@
     "content_file": "dry_run_import.md"
   },
   {
+    "skill_id": "create-missing-masters-usage",
+    "title": "How to Use create_missing_masters",
+    "description": "Creating the missing masters a migration dry run found (groups, territories, units) in one approved batch: the plan table, parents, all or nothing, the change log",
+    "skill_type": "Tool Usage",
+    "linked_tool": "create_missing_masters",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "create_missing_masters.md"
+  },
+  {
     "skill_id": "run-database-query-usage",
     "title": "How to Use run_database_query",
     "description": "SQL queries with analysis_type, validation, table naming conventions, JOINs, and aggregations",

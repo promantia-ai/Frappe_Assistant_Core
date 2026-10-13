@@ -9,7 +9,7 @@
 """
 Explain errors in plain language and fix them together (#33991): each dry-run group gets a
 plain cause and its fixes; a picked fix becomes a value map or rows left out, a missing record
-is created with create_document, and the file is checked again.
+is created with create_missing_masters, and the file is checked again.
 
 Customer again, as in the dry run's tests: Customer Group is a Link to a tree whose group
 nodes can't be used, and Customer Type is a Select.
@@ -148,7 +148,13 @@ class TestImportFixes(BaseAssistantTest):
         self.assertNotIn("All Customer Groups", fixes[0]["closest"])  # a group node fails as a link
         self.assertEqual(
             fixes[1],
-            {"action": "create", "use": "create_document", "doctype": "Customer Group", "name": self.missing},
+            {
+                "action": "create",
+                "use": "create_missing_masters",
+                "doctype": "Customer Group",
+                "name": self.missing,
+                "parent": "All Customer Groups",
+            },
         )
         self.assertEqual(fixes[2], {"action": "leave_out", "rows": 2})
 
@@ -255,17 +261,9 @@ class TestImportFixes(BaseAssistantTest):
         session, result = self._session()
         link = self._group(result, "Missing link")
 
-        # "Create" is done the way FACO does it: create_document, then check again.
-        created = self._run(
-            "create_document",
-            {
-                "doctype": link["fixes"][1]["doctype"],
-                "data": {
-                    "customer_group_name": link["value"],
-                    "parent_customer_group": "All Customer Groups",
-                },
-            },
-        )
+        # "Create" is done the way FACO does it: the approved plan, then check again.
+        records = [{k: m[k] for k in ("group", "doctype", "name", "parent")} for m in result["masters_plan"]]
+        created = self._run("create_missing_masters", {"session": session, "records": records})
         self.assertTrue(created["success"], created)
         rechecked = self._run("dry_run_import", {"session": session})["result"]
         self.assertEqual((rechecked["ready"], rechecked["failed"]), (3, 2))
@@ -474,13 +472,13 @@ class TestImportFixes(BaseAssistantTest):
         self.assertTrue(response["success"], response)
         self.assertEqual((response["result"]["ready"], response["result"]["failed"]), (1, 4))
 
-    def test_create_is_not_a_fix_it_is_done_with_create_document(self):
+    def test_create_is_not_a_fix_it_is_done_with_create_missing_masters(self):
         session, result = self._session()
         link = self._group(result, "Missing link")
 
         response = self._fix_fails(session, {"group": link["id"], "action": "create"})
 
-        self.assertIn("create_document", response["problems"][0]["error"])
+        self.assertIn("create_missing_masters", response["problems"][0]["error"])
         self.assertFalse(frappe.db.exists("Customer Group", self.missing))
 
     def test_a_duplicate_can_only_be_left_out(self):

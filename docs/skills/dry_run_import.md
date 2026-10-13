@@ -43,7 +43,7 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
       "explanation": "2 rows: there is no Customer Group called 'Retial' in ERPNext.",
       "fixes": [
         {"action": "map", "closest": ["Retail"]},
-        {"action": "create", "use": "create_document", "doctype": "Customer Group", "name": "Retial"},
+        {"action": "create", "use": "create_missing_masters", "doctype": "Customer Group", "name": "Retial", "parent": "All Customer Groups"},
         {"action": "leave_out", "rows": 2}
       ]
     },
@@ -68,6 +68,7 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 - **`previous`** appears on a second check: how many rows failed last time, and how many of those now pass.
 - **`status`** becomes `Ready to Import` when nothing fails, else `Dry Run Failed`. Then `message` also says the file is ready, with the final count.
 - **`id`** stays the same from check to check while the group's rows still fail. **`parent`** is the DocType the field is on: a child table's for its columns, e.g. `Sales Invoice Item`.
+- **`masters_plan`** lists every missing master that can be created, with its parent and the rows it fixes; see the `create_missing_masters` skill.
 - **`explanation`** is the group's cause in plain words, and **`fixes`** the fixes that fit it (see **Fixing the groups**). `fix_in_file` means the rows must be corrected in the file.
 
 The full per-row list is attached to the session (`validation_results`). You get only the groups and up to 3 examples each.
@@ -98,7 +99,7 @@ Explain each group with its `explanation`, offer only its `fixes`, then call `dr
 | `action` | For | What it does |
 |----------|-----|--------------|
 | `map` | Missing link, value that isn't an allowed option | Every row with the group's value gets `to` instead. Stored as a transformation rule on the session; the file isn't changed. |
-| `create` | Missing link | **Not sent in `fixes`.** Create the record with `create_document` (the user approves it), then call `dry_run_import` again without `fixes`: the rows that needed it now pass. |
+| `create` | Missing link, when the record is a simple master | **Not sent in `fixes`.** Create every missing master at once with `create_missing_masters`, from `masters_plan` (one table, one approval), then call `dry_run_import` again without `fixes`: the rows that needed them now pass. A group without this fix has `cannot_create` saying why. |
 | `leave_out` | Any group | Its rows are skipped by the import and listed in its report, with the reason. |
 
 Any other problem (a bad date, a duplicate, a rule ERPNext enforces) is corrected in the file: tell the user which rows and what to change, then start again with the new file. The group says so with `"fix_in_file": true`.
@@ -142,7 +143,7 @@ The reply is a new check, plus **`applied`**: one sentence per fix, e.g. "Custom
 The fixes are all or nothing. If any is wrong, none is saved and `problems` says which group and why:
 
 - **`to` doesn't exist** or isn't an allowed option: the error lists the closest names or the choices.
-- **`create` sent in `fixes`**: refused. Use `create_document` instead.
+- **`create` sent in `fixes`**: refused. Use `create_missing_masters` instead.
 - **A group id that isn't in the latest check**: its rows already pass. Use the ids from the latest result.
 - **`fixes` with a new `file_url`**: refused. Check the new file first, then fix its groups.
 - **No check yet**, or the mapping changed since: call without `fixes` first.

@@ -1,0 +1,499 @@
+# Frappe Assistant Core - AI Assistant integration for Frappe Framework
+# Copyright (C) 2025 Paul Clinton
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+"""
+Create missing masters in one approved batch (#33992): the dry run plans every missing master
+that can be created from its name, create_missing_masters creates them all in one call (one
+approval card) or none, and links each to the import session.
+
+Customer again: Customer Group and Territory are trees (a parent each), Market Segment is a
+plain list, and Currency is a system record that is never created here.
+"""
+
+import json
+import unittest
+from unittest.mock import patch
+
+import frappe
+
+from frappe_assistant_core.core.tool_registry import get_tool_registry
+from frappe_assistant_core.plugins.core import import_fixes
+from frappe_assistant_core.plugins.core.tools.create_document import DocumentCreate
+from frappe_assistant_core.tests.base_test import BaseAssistantTest
+
+MAPPING = {
+    "Customer Name": "customer_name",
+    "Customer Group": "customer_group",
+    "Territory": "territory",
+    "Market Segment": "market_segment",
+    "Currency": "default_currency",
+}
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestImportMasters(BaseAssistantTest):
+    def setUp(self):
+        super().setUp()
+        frappe.set_user("Administrator")
+        self.registry = get_tool_registry()
+        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.tag = frappe.generate_hash(length=6)
+        self.group = f"Wholesale {self.tag}"
+        self.territory = f"North {self.tag}"
+        self.segment = f"Retail Chains {self.tag}"
+        self.currency = f"ZZ{self.tag}"
+
+    def tearDown(self):
+        frappe.set_user("Administrator")
+        # The transaction rollback removes File rows but not the files on disk.
+        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
+            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        super().tearDown()
+
+    # -- helpers -----------------------------------------------------------------------
+
+    def _run(self, tool_name, arguments):
+        return self.registry.get_tool(tool_name)._safe_execute(arguments)
+
+    def _session(self):
+        """Upload a CSV, open its session, map it and check it, as the earlier steps do."""
+        t = self.tag
+        lines = [",".join(MAPPING)]
+        lines += [
+            f"Alpha {t},{self.group},{self.territory},{self.segment},INR",
+            f"Beta {t},{self.group},{self.territory},,INR",
+            f"Gamma {t},{self.group},,,{self.currency}",
+        ]
+        file_doc = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "customers.csv",
+                "content": ("\n".join(lines) + "\n").encode(),
+                "is_private": 1,
+            }
+        ).insert()
+        session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})
+        self.assertTrue(checked["success"], checked)
+        return session, checked["result"]
+
+    @staticmethod
+    def _planned(result, doctype):
+        return next(m for m in result["masters_plan"] if m["doctype"] == doctype)
+
+    @staticmethod
+    def _records(result, **parents):
+        """The plan as FACO passes it back once the user approves it."""
+        return [
+            {
+                "group": m["group"],
+                "doctype": m["doctype"],
+                "name": m["name"],
+                "parent": parents.get(m["doctype"], m.get("parent")),
+            }
+            for m in result["masters_plan"]
+        ]
+
+    def _create(self, session, records):
+        return self._run("create_missing_masters", {"session": session, "records": records})
+
+    def _doc(self, session):
+        return frappe.get_doc("FAC Import Session", session)
+
+    def _group_node(self, name):
+        return frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": name,
+                "parent_customer_group": "All Customer Groups",
+                "is_group": 1,
+            }
+        ).insert()
+
+    # -- registration ------------------------------------------------------------------
+
+    def test_creating_masters_is_one_write_tool_so_one_approval_card(self):
+        from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
+
+        tool = self.registry.get_tool("create_missing_masters")
+
+        self.assertEqual(detect_tool_category(tool), "write")
+        self.assertEqual(tool.inputSchema["required"], ["session", "records"])
+
+    # -- criterion 1: one plan listing every record ---------------------------------------------
+
+    def test_the_dry_run_plans_every_missing_master_that_can_be_created(self):
+        _session, result = self._session()
+
+        plan = {(m["doctype"], m["name"]): m for m in result["masters_plan"]}
+
+        self.assertEqual(
+            set(plan),
+            {("Customer Group", self.group), ("Territory", self.territory), ("Market Segment", self.segment)},
+        )
+        self.assertEqual(plan[("Customer Group", self.group)]["rows"], 3)
+        self.assertEqual(plan[("Territory", self.territory)]["rows"], 2)
+
+    def test_a_master_that_cannot_be_created_is_not_offered_and_says_why(self):
+        _session, result = self._session()
+
+        currency = next(g for g in result["groups"] if g.get("value") == self.currency)
+
+        self.assertNotIn("create", [f["action"] for f in currency["fixes"]])
+        self.assertIn("system record", currency["cannot_create"])
+        self.assertNotIn("Currency", [m["doctype"] for m in result["masters_plan"]])
+
+    def test_a_missing_link_that_can_be_created_points_to_the_batch_tool(self):
+        _session, result = self._session()
+
+        group = next(g for g in result["groups"] if g.get("value") == self.group)
+
+        self.assertIn(
+            {
+                "action": "create",
+                "use": "create_missing_masters",
+                "doctype": "Customer Group",
+                "name": self.group,
+                "parent": "All Customer Groups",
+            },
+            group["fixes"],
+        )
+
+    # -- criterion 3: a parent is shown and can be changed ---------------------------------------
+
+    def test_the_plan_shows_each_tree_masters_parent(self):
+        _session, result = self._session()
+
+        self.assertEqual(self._planned(result, "Customer Group")["parent"], "All Customer Groups")
+        self.assertEqual(self._planned(result, "Territory")["parent"], "All Territories")
+        self.assertIsNone(self._planned(result, "Market Segment")["parent"])
+
+    def test_the_user_can_choose_another_parent(self):
+        session, result = self._session()
+        commercial = self._group_node(f"Commercial {self.tag}")
+
+        response = self._create(session, self._records(result, **{"Customer Group": commercial.name}))
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(
+            frappe.db.get_value("Customer Group", self.group, "parent_customer_group"), commercial.name
+        )
+
+    def test_a_parent_that_cannot_hold_records_is_refused_and_nothing_is_created(self):
+        session, result = self._session()
+        leaf = frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": f"Leaf {self.tag}",
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+
+        response = self._create(session, self._records(result, **{"Customer Group": leaf.name}))
+
+        self.assertFalse(response["success"], response)
+        self.assertIn(f"'{leaf.name}' isn't a Customer Group", response["result"]["problems"][0]["error"])
+        self.assertFalse(frappe.db.exists("Territory", self.territory))  # all or nothing
+
+    # -- one approval, all created, linked to the session (criterion 2) -----------------------------
+
+    def test_one_call_creates_every_master_and_links_it_to_the_session(self):
+        session, result = self._session()
+
+        response = self._create(session, self._records(result))
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(len(response["result"]["created"]), 3)
+        for doctype, name in [
+            ("Customer Group", self.group),
+            ("Territory", self.territory),
+            ("Market Segment", self.segment),
+        ]:
+            self.assertTrue(frappe.db.exists(doctype, name), (doctype, name))
+        doc = self._doc(session)
+        self.assertEqual(
+            {(r.record_doctype, r.record_name, r.parent_record or None) for r in doc.created_records},
+            {
+                ("Customer Group", self.group, "All Customer Groups"),
+                ("Territory", self.territory, "All Territories"),
+                ("Market Segment", self.segment, None),
+            },
+        )
+        self.assertEqual((doc.steps[-1].step, doc.steps[-1].outcome), ("Create Masters", "Success"))
+
+        # The rows that needed them now pass: only the Currency still fails.
+        rechecked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual([g.get("value") for g in rechecked["groups"]], [self.currency])
+        self.assertEqual(rechecked["masters_plan"], [])
+
+    def test_one_record_failing_creates_none_and_says_which(self):
+        session, result = self._session()
+        real_execute = DocumentCreate.execute
+
+        def territory_fails(tool, arguments):
+            if arguments["doctype"] == "Territory":
+                return {"success": False, "error": "Territory is locked"}
+            return real_execute(tool, arguments)
+
+        logged = {"method": "FAC Import: missing masters not created"}
+        logs_before = frappe.db.count("Error Log", logged)
+        with (
+            patch.object(DocumentCreate, "execute", autospec=True, side_effect=territory_fails),
+            patch("frappe.utils.global_search.sync_value_in_queue") as search_queue,
+        ):
+            response = self._create(session, self._records(result))
+
+        self.assertFalse(response["success"], response)
+        self.assertEqual(frappe.db.count("Error Log", logged), logs_before + 1)
+        self.assertIn("Territory", response["result"]["error"])
+        self.assertIn("Territory is locked", response["result"]["error"])
+        self.assertFalse(frappe.db.exists("Customer Group", self.group))
+        self.assertFalse(self._doc(session).created_records)
+        # The record that was undone never reaches global search.
+        self.assertEqual(search_queue.call_count, 0)
+
+    def test_an_undone_batch_drops_what_its_inserts_queued_for_the_commit(self):
+        session, result = self._session()
+        doc = self._doc(session)
+        real_execute = DocumentCreate.execute
+
+        def territory_fails(tool, arguments):
+            if arguments["doctype"] == "Territory":
+                return {"success": False, "error": "Territory is locked"}
+            return real_execute(tool, arguments)
+
+        before = len(frappe.db.after_commit._functions)
+        with patch.object(DocumentCreate, "execute", autospec=True, side_effect=territory_fails):
+            with self.assertRaises(import_fixes.FixProblem):
+                import_fixes.create_masters(doc, import_fixes.last_groups(doc), self._records(result))
+
+        # The Customer Group's insert queued its realtime update for the commit; it is gone.
+        self.assertEqual(len(frappe.db.after_commit._functions), before)
+
+    def test_an_undone_batch_drops_the_realtime_events_its_inserts_queued(self):
+        session, result = self._session()
+        doc = self._doc(session)
+        real_execute = DocumentCreate.execute
+        before = list(getattr(frappe.local, "_realtime_log", []))
+
+        def territory_fails(tool, arguments):
+            if arguments["doctype"] == "Territory":
+                return {"success": False, "error": "Territory is locked"}
+            return real_execute(tool, arguments)
+
+        with patch.object(DocumentCreate, "execute", autospec=True, side_effect=territory_fails):
+            with self.assertRaises(import_fixes.FixProblem):
+                import_fixes.create_masters(doc, import_fixes.last_groups(doc), self._records(result))
+
+        # The Customer Group's "doc_update" event is not sent for a record that was undone.
+        self.assertEqual(list(getattr(frappe.local, "_realtime_log", [])), before)
+
+    def test_a_controller_that_commits_cannot_end_the_batch(self):
+        session, result = self._session()
+        real_execute = DocumentCreate.execute
+        commit_held = []
+
+        def commits(tool, arguments):
+            # A controller's own frappe.db.commit() would make the records before it permanent.
+            commit_held.append("commit" in vars(frappe.db))
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — the controller this test imitates
+            return real_execute(tool, arguments)
+
+        with patch.object(DocumentCreate, "execute", autospec=True, side_effect=commits):
+            response = self._create(session, self._records(result))
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(commit_held, [True, True, True])
+        self.assertNotIn("commit", vars(frappe.db))  # given back afterwards
+
+    def test_records_created_reach_global_search_once_all_succeed(self):
+        session, result = self._session()
+
+        with patch("frappe.utils.global_search.sync_value_in_queue") as search_queue:
+            response = self._create(session, self._records(result))
+
+        self.assertTrue(response["success"], response)
+        queued = {(c.args[0]["doctype"], c.args[0]["name"]) for c in search_queue.call_args_list}
+        self.assertIn(("Customer Group", self.group), queued)
+
+    def test_a_record_erpnext_would_name_differently_is_refused(self):
+        session, result = self._session()
+        real_execute = DocumentCreate.execute
+
+        def renamed(tool, arguments):
+            out = real_execute(tool, arguments)
+            if arguments["doctype"] == "Market Segment":
+                out["name"] = f"{out['name']} - X"
+            return out
+
+        with patch.object(DocumentCreate, "execute", autospec=True, side_effect=renamed):
+            response = self._create(session, self._records(result))
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("name", response["result"]["error"])
+        self.assertFalse(frappe.db.exists("Customer Group", self.group))
+
+    # -- the model never invents what is created ----------------------------------------------
+
+    def test_a_name_that_is_not_the_groups_value_is_refused(self):
+        session, result = self._session()
+        records = self._records(result)
+        records[0]["name"] = "Made Up"
+
+        response = self._create(session, records)
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("not", response["result"]["problems"][0]["error"])
+        self.assertFalse(frappe.db.exists(records[1]["doctype"], records[1]["name"]))
+
+    def test_a_group_from_no_check_or_not_a_missing_link_is_refused(self):
+        session, result = self._session()
+
+        response = self._create(session, [{"group": "G0", "doctype": "Customer Group", "name": self.group}])
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("no group G0", response["result"]["problems"][0]["error"])
+
+    def test_a_master_that_already_exists_is_refused(self):
+        session, result = self._session()
+        frappe.get_doc({"doctype": "Market Segment", "market_segment": self.segment}).insert()
+
+        response = self._create(session, self._records(result))
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("already exists", response["result"]["problems"][0]["error"])
+
+    def test_a_currency_sent_anyway_is_refused(self):
+        session, result = self._session()
+        currency = next(g for g in result["groups"] if g.get("value") == self.currency)
+
+        response = self._create(
+            session, [{"group": currency["id"], "doctype": "Currency", "name": self.currency}]
+        )
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("can't be created here", response["result"]["problems"][0]["error"])
+        self.assertFalse(frappe.db.exists("Currency", self.currency))
+
+    def test_masters_are_not_created_after_the_mapping_changed(self):
+        session, result = self._session()
+        self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+
+        response = self._create(session, self._records(result))
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("Check it with dry_run_import first", response["result"]["error"])
+        self.assertFalse(frappe.db.exists("Customer Group", self.group))
+
+    def test_masters_are_not_created_from_a_check_the_session_no_longer_matches(self):
+        session, result = self._session()
+        # The session edited after its check (update_document can), but not checked again.
+        self._doc(session).db_set("excluded_rows", "[2]")
+
+        response = self._create(session, self._records(result))
+
+        self.assertFalse(response["success"], response)
+        self.assertFalse(frappe.db.exists("Customer Group", self.group))
+
+    def test_another_users_session_is_refused(self):
+        session, result = self._session()
+        frappe.set_user(self.make_throwaway_user("other", roles=("Sales Manager",)))
+
+        response = self._create(session, self._records(result))
+
+        self.assertFalse(response["success"])
+        frappe.set_user("Administrator")
+        self.assertFalse(frappe.db.exists("Customer Group", self.group))
+
+    # -- which masters can be created ---------------------------------------------------------
+
+    def test_only_masters_named_by_their_name_alone_can_be_created(self):
+        can = import_fixes.cannot_create
+
+        for doctype in ("Customer Group", "Territory", "Market Segment", "UOM", "Brand"):
+            self.assertEqual(can(doctype), "", doctype)
+        self.assertIn("names it itself", can("Customer"))  # a naming series
+        self.assertIn("names it itself", can("Warehouse"))  # the company's abbreviation is added
+        self.assertIn("more than a name", can("Item"))
+        self.assertIn("isn't a master", can("Sales Invoice"))
+        self.assertIn("system record", can("Currency"))
+        self.assertIn("chart of accounts", can("Company"))
+
+    def test_a_master_needing_a_table_row_or_named_after_another_record_is_not_offered(self):
+        can = import_fixes.cannot_create
+
+        self.assertIn("more than a name", can("Tax Withholding Category"))  # a rate table row
+        self.assertIn("must be an existing", can("Supplier Scorecard"))  # named after a Supplier
+
+    def test_a_record_of_the_doctype_the_file_imports_is_not_planned(self):
+        # A Territory file: row 3's parent is row 2, so the dry run finds it missing.
+        t = self.tag
+        lines = ["Territory Name,Parent Territory,Is Group", f"FacNorth {t},All Territories,1"]
+        lines.append(f"FacNorth-1 {t},FacNorth {t},0")
+        file_doc = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "territories.csv",
+                "content": ("\n".join(lines) + "\n").encode(),
+                "is_private": 1,
+            }
+        ).insert()
+        session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
+        mapping = {
+            "Territory Name": "territory_name",
+            "Parent Territory": "parent_territory",
+            "Is Group": "is_group",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Territory"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+
+        result = self._run("dry_run_import", {"session": session})["result"]
+
+        self.assertEqual(result["masters_plan"], [])
+        parent = next(g for g in result["groups"] if g.get("value") == f"FacNorth {t}")
+        self.assertNotIn("create", [f["action"] for f in parent["fixes"]])
+        self.assertIn("imports Territory records itself", parent["cannot_create"])
+
+    def test_the_default_parent_is_never_a_root_that_cannot_hold_records(self):
+        leaf = frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": f"Leaf {self.tag}",
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+
+        # A tree with several roots: get_root_of may return any of them, a leaf too.
+        with patch.object(import_fixes, "get_root_of", autospec=True, return_value=leaf.name):
+            self.assertIsNone(import_fixes.default_parent("Customer Group"))
+
+    def test_creating_is_off_where_create_document_is_off(self):
+        from frappe_assistant_core.core.tool_registry import ToolRegistry
+
+        def create_document_off(registry, tool_name, user):
+            return tool_name != "create_document"
+
+        with patch.object(
+            ToolRegistry, "_is_tool_accessible", autospec=True, side_effect=create_document_off
+        ):
+            self.assertIn("turned off", import_fixes.cannot_create("Customer Group"))
+
+    def test_a_site_can_keep_more_doctypes_from_being_created(self):
+        with patch.dict(frappe.local.conf, {"fac_import_never_create_doctypes": ["Brand"]}):
+            self.assertIn("doesn't allow", import_fixes.cannot_create("Brand"))
+
+    def test_a_user_who_cannot_create_it_is_not_offered_it(self):
+        frappe.set_user(self.make_throwaway_user("reader", roles=("Blogger",)))
+
+        self.assertIn("aren't allowed", import_fixes.cannot_create("Customer Group"))

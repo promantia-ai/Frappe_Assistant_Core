@@ -98,6 +98,7 @@ READ_ONLY_TOOLS = {
 WRITE_TOOLS = {
     # Document tools
     "create_document",
+    "create_missing_masters",  # creates records, all in one approved batch
     "update_document",
     # Document generation (saves a private Frappe File — a create side effect)
     "generate_document",  # Markdown -> PDF saved as a File record; NOT read-only
