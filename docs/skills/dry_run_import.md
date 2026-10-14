@@ -188,3 +188,15 @@ Give the user the `download_url`. The file has the user's own columns (with the 
 ### The corrected file
 
 When the user uploads the corrected file, pass its `file_id` (or `file_url`). It must keep the same columns; the two added ones may stay, and are not imported. It becomes the session's file and is **checked like any file**, so nothing goes in unchecked: a row already imported that came back in it fails as **Already in ERPNext**, so it can't be imported twice. Then `start_import` imports it as another Data Import of the same session.
+
+## Opening stock
+
+For a session set up with `set_opening_stock`, the check also reports: Totals row, Can't hold stock,
+Warehouse of another company, Group warehouse, No UOM conversion, Negative quantity, Zero quantity,
+No valuation rate, Batch needed, Serial numbers needed, Serial numbers don't match the quantity,
+Same item and warehouse, Already has stock. Its reply has `opening_stock`: `total_qty`, `total_value` and
+per-warehouse totals; pass those to `import_opening_stock`.
+
+The fix `allow_zero_rate` (only for **No valuation rate**) brings that item in at zero value. Offer it only
+when the user confirms the stock really has no value; otherwise the rate is corrected in the file.
+A warehouse of another company, or a group warehouse, can be mapped to a real one with `map`.
