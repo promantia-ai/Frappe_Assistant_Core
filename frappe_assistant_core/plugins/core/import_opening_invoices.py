@@ -666,3 +666,56 @@ def _erpnext_check(session, ready: List[Ready], checker: _InvoiceChecker) -> Lis
             {"cause": dry_run.CAUSE_REJECTED, "error": kind, "message": message},
         )
     return passed
+
+
+# -- missing parties (created by create_document, with import_session) -------------------------
+
+PARTY_LINKS = {
+    "Customer": {"customer_group": "Customer Group", "territory": "Territory"},
+    "Supplier": {"supplier_group": "Supplier Group"},
+}
+PARTY_KIND_FIELDS = {"Customer": "customer_type", "Supplier": "supplier_type"}
+DEFAULTS = {
+    "customer_group": ("Selling Settings", "customer_group"),
+    "territory": ("Selling Settings", "territory"),
+    "supplier_group": ("Buying Settings", "supplier_group"),
+}
+
+
+def _leaf(doctype: str, name: str) -> bool:
+    return bool(name) and bool(frappe.db.exists(doctype, {"name": name, "is_group": 0}))
+
+
+def party_data(doctype: str, value: str) -> Dict[str, Any]:
+    """The missing party as masters_plan proposes it: its name, a company, and the default group
+    (and territory) from Selling or Buying Settings when that can hold records."""
+    data = {PARTY_NAME_FIELDS[doctype]: value, PARTY_KIND_FIELDS[doctype]: "Company"}
+    for field, link in PARTY_LINKS[doctype].items():
+        default = frappe.db.get_single_value(*DEFAULTS[field])
+        if _leaf(link, default):
+            data[field] = default
+    return data
+
+
+def party_problem(doctype: str, data: Dict[str, Any]) -> Optional[str]:
+    """Why ``data`` isn't a party masters_plan could have proposed, or None."""
+    name_field, kind_field = PARTY_NAME_FIELDS[doctype], PARTY_KIND_FIELDS[doctype]
+    allowed = {name_field, kind_field, *PARTY_LINKS[doctype]}
+    others = sorted(set(data) - allowed)
+    if others:
+        return _("A missing {0} takes {1} only (as masters_plan's data has them), not {2}.").format(
+            _(doctype), ", ".join(sorted(allowed)), ", ".join(others)
+        )
+    if not cstr(data.get(name_field)).strip():
+        return _("Give the {0}'s {1}.").format(_(doctype), name_field)
+    kinds = [o for o in cstr(frappe.get_meta(doctype).get_field(kind_field).options).split("\n") if o]
+    if data.get(kind_field) and data[kind_field] not in kinds:
+        return _("{0} is one of: {1}.").format(kind_field, ", ".join(kinds))
+    for field, link in PARTY_LINKS[doctype].items():
+        value = data.get(field)
+        if value and (not _leaf(link, value) or not frappe.has_permission(link, "read", doc=value)):
+            leaves = frappe.get_list(link, filters={"is_group": 0}, pluck="name", limit_page_length=20)
+            return _("'{0}' isn't a {1} that can hold records. Some that can: {2}.").format(
+                value, _(link), ", ".join(leaves)
+            )
+    return None

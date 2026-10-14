@@ -514,6 +514,15 @@ def cannot_create(doctype: str, session=None) -> str:
     """
     if session and doctype == session.target_doctype:
         return _("the file imports {0} records itself, so add it to the file").format(_(doctype))
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    if opening_invoices.is_party(session, doctype):
+        # A party may be named by a series: the rows find it by its customer or supplier name.
+        if not frappe.has_permission(doctype, "create"):
+            return _("you aren't allowed to create a {0}").format(_(doctype))
+        if not _may_use_create_document():
+            return _("creating records with FACO is turned off for you")
+        return ""
     if doctype in NEVER_CREATE:
         return _(NEVER_CREATE[doctype])
     if doctype in (frappe.conf.get("fac_import_never_create_doctypes") or []):
@@ -603,11 +612,16 @@ def masters_plan(session, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         doctype = group.get("link_doctype")
         if group.get("cause") != dry_run.CAUSE_MISSING_LINK or not doctype or cannot_create(doctype, session):
             continue
-        parent = default_parent(doctype)
-        meta = frappe.get_meta(doctype)
-        data = {_name_field(meta): group["value"]}
-        if parent:
-            data[_parent_field(meta)] = parent
+        from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+        if opening_invoices.is_party(session, doctype):
+            parent, data = None, opening_invoices.party_data(doctype, group["value"])
+        else:
+            parent = default_parent(doctype)
+            meta = frappe.get_meta(doctype)
+            data = {_name_field(meta): group["value"]}
+            if parent:
+                data[_parent_field(meta)] = parent
         entry = plan.setdefault(
             (doctype, group["value"]),
             {
@@ -667,6 +681,28 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
                 _(doctype), reason
             )
         )
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    if opening_invoices.is_party(session, doctype):
+        data = {k: cstr(v).strip() for k, v in (entry.get("data") or {}).items() if cstr(v).strip()}
+        problem = opening_invoices.party_problem(doctype, data)
+        if problem:
+            raise FixProblem(problem)
+        name = data[opening_invoices.PARTY_NAME_FIELDS[doctype]]
+        if (doctype, name) not in plan:
+            missing = ", ".join(f"{_(d)} '{n}'" for d, n in plan) or _("none")
+            raise FixProblem(
+                _("{0} '{1}' isn't one of the masters the last check found missing ({2}).").format(
+                    _(doctype), name, missing
+                )
+            )
+        if opening_invoices.find_party(doctype, name):
+            raise FixProblem(
+                _("{0} '{1}' already exists. Check the file again with dry_run_import.").format(
+                    _(doctype), name
+                )
+            )
+        return {"doctype": doctype, "data": data}
     meta = frappe.get_meta(doctype)
     name_field, parent_field = _name_field(meta), _parent_field(meta)
     data = entry.get("data") or {}
@@ -698,12 +734,31 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
 
 
 def _planned_name(entry: Dict[str, Any]) -> str:
-    return entry["data"][_name_field(frappe.get_meta(entry["doctype"]))]
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    field = _name_field(frappe.get_meta(entry["doctype"])) or opening_invoices.PARTY_NAME_FIELDS.get(
+        entry["doctype"]
+    )
+    return entry["data"][field]
 
 
 def kept_its_name(entry: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
     """create_document's result for a missing master, refused if ERPNext named the record
     otherwise: the rows link to the name the file uses."""
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    doctype = entry["doctype"]
+    if not _name_field(frappe.get_meta(doctype)) and doctype in opening_invoices.PARTY_NAME_FIELDS:
+        # A party is found by its customer or supplier name, whatever name ERPNext gave it.
+        found = opening_invoices.find_party(doctype, _planned_name(entry))
+        if result.get("success") and not (found and found.name == result.get("name")):
+            return {
+                "success": False,
+                "error": _("ERPNext named it '{0}', and the rows wouldn't find it by '{1}'").format(
+                    result.get("name"), _planned_name(entry)
+                ),
+            }
+        return result
     if result.get("name") != _planned_name(entry):
         return {
             "success": False,

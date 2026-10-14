@@ -576,3 +576,80 @@ class TestFixes(OpeningInvoicesCase):
             self.assertNotIn("would fail", group["explanation"])
             self.assertTrue(group["fix_in_file"], group)
             self.assertEqual([f["action"] for f in group["fixes"]], expected.get(cause, ["leave_out"]), cause)
+
+
+class TestParties(OpeningInvoicesCase):
+    def _missing(self, title, **setup):
+        session, result = self._ready([f"{title},{self._number(1)},{self.date},,10"], **setup)
+        self.assertEqual(result["failed"], 1, result)
+        return session, result
+
+    def _create(self, session, documents):
+        # The plan leaves a group or territory out when the site's default is a group node (a
+        # party can't belong to one): the user then picks a leaf, as this does.
+        filled = []
+        for document in documents:
+            data = dict(document["data"])
+            for field, link in opening_invoices.PARTY_LINKS[document["doctype"]].items():
+                if field not in data:
+                    data[field] = frappe.db.get_value(link, {"is_group": 0})
+            filled.append({**document, "data": data})
+        return self._run("create_document", {"documents": filled, "import_session": session})
+
+    def test_plan_lists_the_missing_customer(self):
+        session, result = self._missing(f"New Cust {self.tag}")
+        plan = result["masters_plan"]
+        self.assertEqual(len(plan), 1, plan)
+        entry = plan[0]
+        self.assertEqual(
+            (entry["doctype"], entry["name"], entry["rows"]), ("Customer", f"New Cust {self.tag}", 1)
+        )
+        self.assertEqual(entry["data"]["customer_name"], f"New Cust {self.tag}")
+        self.assertEqual(entry["data"]["customer_type"], "Company")
+        for field in ("customer_group", "territory"):
+            if field in entry["data"]:
+                doctype = opening_invoices.PARTY_LINKS["Customer"][field]
+                self.assertFalse(frappe.db.get_value(doctype, entry["data"][field], "is_group"))
+
+    def test_created_customer_makes_the_rows_ready(self):
+        session, result = self._missing(f"New Cust {self.tag}")
+        entry = result["masters_plan"][0]
+        reply = self._create(session, [{"doctype": "Customer", "data": entry["data"]}])
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(self._check(session)["ready"], 1)
+        records = [r.record_doctype for r in self._doc(session).created_records]
+        self.assertIn("Customer", records)
+
+    def test_customer_named_by_series_is_still_found(self):
+        before = frappe.defaults.get_global_default("cust_master_name")
+        frappe.defaults.set_global_default("cust_master_name", "Naming Series")
+        try:
+            session, result = self._missing(f"Series Cust {self.tag}")
+            data = result["masters_plan"][0]["data"]
+            reply = self._create(session, [{"doctype": "Customer", "data": data}])
+            self.assertTrue(reply["success"], reply)
+            name = reply["result"]["created"][0]["name"]
+            self.assertNotEqual(name, f"Series Cust {self.tag}")
+            self.assertEqual(self._check(session)["ready"], 1)
+        finally:
+            frappe.defaults.set_global_default("cust_master_name", before)
+
+    def test_only_the_planned_fields_and_leaf_groups(self):
+        session, result = self._missing(f"New Cust {self.tag}")
+        data = dict(result["masters_plan"][0]["data"])
+        reply = self._create(session, [{"doctype": "Customer", "data": {**data, "email_id": "a@b.c"}}])
+        self.assertFalse(reply["success"])
+        self.assertIn("email_id", str(reply["result"]))
+        group = frappe.db.get_value("Customer Group", {"is_group": 1})
+        reply = self._create(session, [{"doctype": "Customer", "data": {**data, "customer_group": group}}])
+        self.assertFalse(reply["success"])
+        self.assertIn(group, str(reply["result"]))
+
+    def test_missing_supplier_is_planned_and_created(self):
+        session, result = self._missing(f"New Supp {self.tag}", invoice_type="Purchase")
+        entry = result["masters_plan"][0]
+        self.assertEqual(entry["doctype"], "Supplier")
+        self.assertEqual(entry["data"]["supplier_name"], f"New Supp {self.tag}")
+        reply = self._create(session, [{"doctype": "Supplier", "data": entry["data"]}])
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(self._check(session)["ready"], 1)
