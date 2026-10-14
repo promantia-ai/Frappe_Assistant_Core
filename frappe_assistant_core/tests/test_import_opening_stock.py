@@ -872,3 +872,48 @@ class TestFinalReviewFixes(OpeningStockCase):
         self.assertEqual(report["pending"], [])
         self.assertEqual(self._doc(session).status, "Failed")
         self.assertIn("couldn't submit", report["message"])
+
+
+class TestSecondReview(OpeningStockCase):
+    def _stalled_draft(self):
+        """A session whose document ERPNext never submitted, reported Failed, then checked again."""
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        with patch.object(StockReconciliation, "submit", lambda doc: None):  # as when queued
+            name = self._run("import_opening_stock", self._card(session, result))["result"]["documents"][0]
+        long_ago = frappe.utils.add_to_date(None, seconds=-(opening_stock.STALL_SECONDS + 60))
+        frappe.db.set_value("Stock Reconciliation", name, "modified", long_ago, update_modified=False)
+        opening_stock.report(self._doc(session))  # the session becomes Failed
+        again = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual(again["ready"], 1)
+        return session, again, name
+
+    def test_importing_again_deletes_the_draft_erpnext_never_submitted_first(self):
+        # A slow background job could still submit the old draft: it must be gone before the stock
+        # is brought in again, or it would be posted twice.
+        session, again, name = self._stalled_draft()
+
+        response = self._run("import_opening_stock", self._card(session, again))
+
+        self.assertTrue(response["success"], response)
+        # One document holds this stock, submitted: the old draft is gone. (Frappe gives the new
+        # document the deleted draft's name back, as it was the last of its series.)
+        parents = set(frappe.get_all("Stock Reconciliation Item", {"item_code": self.item}, pluck="parent"))
+        self.assertEqual(len(parents), 1)
+        self.assertEqual(frappe.db.get_value("Stock Reconciliation", parents.pop(), "docstatus"), 1)
+        self.assertEqual(self._qty(self.item, self.stores), 5)
+        self.assertIn(f"Deleted {name}", " ".join(step.message for step in self._doc(session).steps))
+
+    def test_a_draft_still_being_submitted_stops_a_new_import(self):
+        session, again, name = self._stalled_draft()
+        frappe.db.set_value("Stock Reconciliation", name, "modified", frappe.utils.now_datetime())
+
+        response = self._run("import_opening_stock", self._card(session, again))
+
+        self.assertFalse(response["success"], response)
+        self.assertIn(name, response["error"])
+        self.assertTrue(frappe.db.exists("Stock Reconciliation", name))
+        self.assertFalse(self._qty(self.item, self.stores))

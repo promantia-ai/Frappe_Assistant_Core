@@ -795,6 +795,37 @@ def _message_of_create(e: Exception) -> str:
     return _("ERPNext refused the opening stock: {0}").format(dry_run._message_of(e))
 
 
+DELETE_SAVEPOINT = "fac_opening_stock_delete_stalled"
+
+
+def _delete_stalled(session) -> None:
+    """Delete the drafts ERPNext never submitted, before the stock is brought in again: a slow
+    background job could otherwise still submit one, and post the same stock twice. The session's
+    link to each goes first (Frappe refuses to delete a linked record); all of it or none."""
+    late = stalled(session)
+    if not late:
+        return
+    frappe.db.savepoint(DELETE_SAVEPOINT)
+    try:
+        session.created_records = [
+            r for r in session.created_records if not (r.record_doctype == TARGET and r.record_name in late)
+        ]
+        session.log_step(
+            "Import", "Warning", _("Deleted {0}: drafts ERPNext never submitted.").format(", ".join(late))
+        )
+        session.save()
+        for name in late:
+            frappe.delete_doc(TARGET, name)
+    except Exception as e:
+        frappe.db.rollback(save_point=DELETE_SAVEPOINT)
+        session.reload()
+        raise OpeningStockProblem(
+            _("{0} is a draft ERPNext never submitted, and it couldn't be deleted: {1}").format(
+                ", ".join(late), _message_of_create(e)
+            )
+        ) from e
+
+
 def create(session) -> List[str]:
     """Create and submit the opening stock, a chunk at a time, each all or nothing. Chunks made
     by an earlier call are skipped, so calling again never duplicates. Returns the new names."""
@@ -808,6 +839,15 @@ def create(session) -> List[str]:
                 "The sheet isn't ready, or it changed since its last check. Check it with dry_run_import first."
             )
         )
+    waiting = pending(session)
+    if waiting:
+        raise OpeningStockProblem(
+            _(
+                "ERPNext is still submitting {0} from the earlier try. Wait for it, then call again: "
+                "importing now could bring the same stock in twice."
+            ).format(", ".join(waiting))
+        )
+    _delete_stalled(session)
     lines = ready_lines(session)
     expected = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
     if len(lines) != expected:
@@ -942,7 +982,8 @@ def report(session) -> Dict[str, Any]:
             )
             why.append(f"{name}: {frappe.utils.strip_html_tags(comment[0])}" if comment else name)
         message = _(
-            "ERPNext couldn't submit {0}. Delete the draft, then check the sheet again with dry_run_import."
+            "ERPNext couldn't submit {0}. Check the sheet again with dry_run_import; importing again "
+            "deletes that draft first."
         ).format("; ".join(why))
     elif waiting:
         message = _("{0} still being submitted in the background: {1}.").format(
