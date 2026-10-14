@@ -10,7 +10,7 @@ The `create_document` tool creates new Frappe documents (records). It handles fi
 |-----------|------|----------|---------|-------------|
 | `doctype` | string | **Yes**, for one record | — | Exact DocType name |
 | `data` | object | **Yes**, for one record | — | Field values as key-value pairs |
-| `submit` | boolean | No | `false` | Submit after creation (for submittable DocTypes). One record only |
+| `submit` | boolean | No | `false` | Submit after creation (for submittable DocTypes). One record only. Under an active Workflow the document is created as a draft instead |
 | `validate_only` | boolean | No | `false` | Validate without saving — use to test data format |
 | `documents` | array | **Yes**, for several records | — | Instead of `doctype` and `data`: a list of `{doctype, data}`, up to 100. See **Several records at once** |
 | `import_session` | string | No | — | With `documents`: the import session whose missing masters these are. See **Missing masters of an import** |
@@ -37,7 +37,7 @@ The `create_document` tool creates new Frappe documents (records). It handles fi
 3. **Link fields expect the `name` (ID)** — not the display title. Use `search_documents` with `purpose: "link_value"` to find valid values.
 4. **Don't set auto-generated fields** — `name`, `creation`, `modified`, `owner` are set automatically.
 5. **Handle naming series** — DocTypes with naming series auto-generate names; don't pass `name` unless it uses manual naming.
-6. **Use `submit: true` carefully** — only when explicitly requested. Creates and submits in one step.
+6. **Use `submit: true` carefully** — only when explicitly requested. Creates and submits in one step. If the submit is refused (a validation, a closed period), the document is kept as a clean draft and `submit_error` says why. If the DocType has an active Workflow, it is created as a draft and not submitted: continue with `run_workflow`, which applies the workflow's approval rules.
 
 ## Common Patterns
 
@@ -66,6 +66,18 @@ The `create_document` tool creates new Frappe documents (records). It handles fi
         "rate": 100
       }
     ]
+  }
+}
+```
+
+### Document with a Table MultiSelect field
+A Table MultiSelect takes an array of its link values, as Desk sends it. Each value fills the field `get_doctype_info` reports as that table's `link_field`. Objects work too: `[{"user": "jane@example.com"}]`.
+```json
+{
+  "doctype": "User Group",
+  "data": {
+    "name": "Reviewers",
+    "user_group_members": ["jane@example.com", "raj@example.com"]
   }
 }
 ```
@@ -144,4 +156,6 @@ A missing record that can't be created has no `create` fix in the check; its gro
 - **Permission errors** — the current user must have "create" permission on the DocType. A refusal returns `error_type: "permission_error"` with Frappe's own reason in `error`; it is not a field problem, so do not retry with different values.
 - **ToDo** — Frappe decides who may create a ToDo. Before Frappe v16.32.0 / v15.119.0, a user without a role that grants ToDo create (such as System Manager) may create only a ToDo that names them (`allocated_to` or `assigned_by`), so one that names nobody is allocated to them, and one naming someone else is refused; from those releases a user may create any ToDo. Omitting `allocated_to`, as the example above does, therefore works on every release. If Frappe refuses, `error` gives its reason.
 - **Default values** — fields with defaults are auto-populated if not specified.
-- **Child table rows** — pass as arrays of objects under the child table fieldname.
+- **Child table rows** — pass as arrays of objects under the child table fieldname. A Table MultiSelect also accepts an array of its link values (see the example above). A plain Table does not, because no single field says what a bare value means; that returns `error_type: "child_table_handling_error"` with the `field`.
+- **Restricted fields in a child row** — each row is checked against its child doctype's restricted fields, as on the parent. When you copy rows from another document, leave out system fields such as `owner`, `creation`, `docstatus` and `idx`.
+- **Child-table doctypes** — `create_document` with a child doctype such as `Sales Invoice Item` is refused with `error_type: "child_table_doctype"` and the `parent_doctypes` it belongs to. A row exists only inside its parent, so add it with `update_document` on the parent document.

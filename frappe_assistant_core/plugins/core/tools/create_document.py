@@ -26,6 +26,16 @@ from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.utils import document_batch
+from frappe_assistant_core.utils.savepoint import (
+    open_savepoint,
+    release_savepoint,
+    rollback_to_savepoint,
+)
+
+from .child_tables import ChildRowError, child_table_fields, normalize_child_rows, restricted_row_keys
+
+# The submit after a create runs inside this savepoint, so a refused submit leaves the draft.
+_SUBMIT_SAVEPOINT = "fac_create_document_submit"
 
 
 def _default_todo_allocation(doc: Any) -> None:
@@ -60,7 +70,7 @@ class DocumentCreate(BaseTool):
     def __init__(self):
         super().__init__()
         self.name = "create_document"
-        self.description = "Create new Frappe documents with proper validation and child table support. Supports all DocTypes including those with child tables. WORKFLOW: First use get_doctype_info to understand the DocType structure, identify required fields and child tables, then create the document with proper field values. Child tables must be provided as arrays of objects. Referenced records (customers, items, warehouses, etc.) must already exist in the system. Use exact field names as shown in DocType metadata. Error responses include specific guidance for resolution. Common use cases: creating Sales Orders with line items, Purchase Orders with items and taxes, customer records, inventory transactions. SEVERAL RECORDS AT ONCE: instead of doctype and data, pass documents, a list of {doctype, data} (up to 100, any DocTypes): one approval for all, and all are created or none. Show the user the records as a table first; the approval card then lists each one. A failure names the record and why."
+        self.description = "Create new Frappe documents with proper validation and child table support. Supports all DocTypes including those with child tables. WORKFLOW: First use get_doctype_info to understand the DocType structure, identify required fields and child tables, then create the document with proper field values. Child tables must be provided as arrays of objects; a Table MultiSelect field also accepts an array of its link values (e.g. ['user@example.com']). Referenced records (customers, items, warehouses, etc.) must already exist in the system. Use exact field names as shown in DocType metadata. Error responses include specific guidance for resolution. Common use cases: creating Sales Orders with line items, Purchase Orders with items and taxes, customer records, inventory transactions. SEVERAL RECORDS AT ONCE: instead of doctype and data, pass documents, a list of {doctype, data} (up to 100, any DocTypes): one approval for all, and all are created or none. Show the user the records as a table first; the approval card then lists each one. A failure names the record and why."
         self.requires_permission = None  # Permission checked dynamically per DocType
 
         self.inputSchema = {
@@ -77,7 +87,7 @@ class DocumentCreate(BaseTool):
                 "submit": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Whether to submit the document after creation (for submittable doctypes like Sales Invoice). Use true only when explicitly requested.",
+                    "description": "Whether to submit the document after creation (for submittable doctypes like Sales Invoice). Use true only when explicitly requested. If the DocType has an active Workflow, the document is created as a draft instead; move it on with run_workflow.",
                 },
                 "validate_only": {
                     "type": "boolean",
@@ -129,6 +139,7 @@ class DocumentCreate(BaseTool):
         # Import security validation
         from frappe_assistant_core.core.security_config import (
             filter_sensitive_fields,
+            get_restricted_fields,
             validate_document_access,
         )
 
@@ -146,19 +157,8 @@ class DocumentCreate(BaseTool):
         user_role = validation_result["role"]
 
         try:
-            # Filter out sensitive fields that user shouldn't be able to set
-            from frappe_assistant_core.core.security_config import ADMIN_ONLY_FIELDS, SENSITIVE_FIELDS
-
-            # Get restricted fields for this role and doctype
-            restricted_fields = set()
-            restricted_fields.update(SENSITIVE_FIELDS.get("all_doctypes", []))
-            restricted_fields.update(SENSITIVE_FIELDS.get(doctype, []))
-
-            if user_role == "Assistant User":
-                restricted_fields.update(ADMIN_ONLY_FIELDS.get("all_doctypes", []))
-                doctype_admin_fields = ADMIN_ONLY_FIELDS.get(doctype, [])
-                if doctype_admin_fields != "*":
-                    restricted_fields.update(doctype_admin_fields)
+            # Fields this role may not set; child rows are screened against their own doctype below
+            restricted_fields = get_restricted_fields(doctype, user_role)
 
             # Check for attempts to set restricted fields
             restricted_fields_attempted = [field for field in data.keys() if field in restricted_fields]
@@ -201,29 +201,42 @@ class DocumentCreate(BaseTool):
                         # Don't return error, just disable submit
                         submit = False
 
+            # Get DocType metadata for proper field handling. Table and Table MultiSelect
+            # are both child tables; matching only "Table" left a Table MultiSelect value
+            # to be set raw, and the insert failed on .is_new() (#291).
+            meta = frappe.get_meta(doctype)
+            table_fields = child_table_fields(meta)
+
+            # Build and screen every child table before touching the document. Frappe
+            # keeps a new row's own owner and creation, so an unscreened row could
+            # forge them; rows answer to their child doctype's restricted fields.
+            child_rows = {}
+            for field, value in data.items():
+                if field not in table_fields:
+                    continue
+                rows = normalize_child_rows(table_fields[field], value)
+                child_doctype = table_fields[field].options
+                violating = restricted_row_keys(rows, get_restricted_fields(child_doctype, user_role))
+                if violating:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Cannot set restricted child-table fields: {', '.join(violating)} "
+                            f"in {child_doctype}. These fields require higher privileges."
+                        ),
+                        "field": field,
+                    }
+                child_rows[field] = rows
+
             # Create document
             doc = frappe.new_doc(doctype)
 
-            # Get DocType metadata for proper field handling
-            meta = frappe.get_meta(doctype)
-            table_fields = {f.fieldname: f.options for f in meta.fields if f.fieldtype == "Table"}
-
-            # Set field values with proper child table handling
             for field, value in data.items():
-                if field in table_fields:
-                    # Handle child table fields properly
-                    if isinstance(value, list):
-                        for row_data in value:
-                            if isinstance(row_data, dict):
-                                doc.append(field, row_data)
-                            else:
-                                raise ValueError(
-                                    f"Child table '{field}' requires list of dictionaries, got: {type(row_data)}"
-                                )
-                    else:
-                        raise ValueError(f"Child table '{field}' requires a list, got: {type(value)}")
+                if field in child_rows:
+                    for row in child_rows[field]:
+                        # append writes into the dict it is given; child_rows stays the input
+                        doc.append(field, dict(row))
                 else:
-                    # Handle regular fields
                     setattr(doc, field, value)
 
             _default_todo_allocation(doc)
@@ -255,11 +268,9 @@ class DocumentCreate(BaseTool):
                     "next_step": "Use create_document with validate_only=false to actually create the document",
                 }
 
-            # Capture input child-table values for post-save comparison (issue #181)
-            input_child_values = {}
-            for field, value in data.items():
-                if field in table_fields and isinstance(value, list):
-                    input_child_values[field] = value
+            # Capture input child-table values for post-save comparison (issue #181).
+            # The normalized rows, so a Table MultiSelect value compares as its row.
+            input_child_values = child_rows
 
             # Save document
             doc.insert()
@@ -303,18 +314,42 @@ class DocumentCreate(BaseTool):
             }
 
             # Submit if requested and allowed
-            if submit and doc.docstatus == 0:
+            from frappe.model.workflow import get_workflow_name
+
+            workflow_name = get_workflow_name(doctype) if submit and doc.docstatus == 0 else None
+            if workflow_name:
+                # Submitting directly skips the workflow's approval steps: Frappe validates the
+                # workflow before it sets the submitted state. The draft goes through run_workflow.
+                submit_error = (
+                    f"{doctype} has an active Workflow ('{workflow_name}'), so it is submitted "
+                    "through the workflow, not directly"
+                )
+                result["message"] = f"{doctype} '{doc.name}' created as draft. Not submitted: {submit_error}"
+                result["submit_error"] = submit_error
+                result["workflow"] = workflow_name
+                result["suggestion"] = (
+                    f"Use run_workflow on {doctype} '{doc.name}' to move it through its workflow."
+                )
+            elif submit and doc.docstatus == 0:
+                # Frappe writes docstatus=1 before on_submit, so without this a submit refused
+                # partway would be committed as a submitted document with half its postings,
+                # under a message that says it is a draft.
+                marks = open_savepoint(_SUBMIT_SAVEPOINT)
                 try:
                     doc.submit()
-                    result["submitted"] = True
-                    result["docstatus"] = 1
-                    result["message"] = f"{doctype} '{doc.name}' created and submitted successfully"
                 except Exception as e:
+                    rollback_to_savepoint(_SUBMIT_SAVEPOINT, marks, doctype, doc.name)
+                    doc.reload()
                     submit_error = exception_message(e)
                     result["message"] = (
                         f"{doctype} '{doc.name}' created as draft. Submit failed: {submit_error}"
                     )
                     result["submit_error"] = submit_error
+                else:
+                    release_savepoint(_SUBMIT_SAVEPOINT)
+                    result["submitted"] = True
+                    result["docstatus"] = 1
+                    result["message"] = f"{doctype} '{doc.name}' created and submitted successfully"
             else:
                 result["message"] = f"{doctype} '{doc.name}' created successfully as draft"
 
@@ -349,6 +384,8 @@ class DocumentCreate(BaseTool):
 
             return result
 
+        except ChildRowError as e:
+            return {**e.as_result(), "doctype": doctype}
         except frappe.MandatoryError as e:
             # Frappe raises MandatoryError after set_missing_values() has run, so the
             # missing fieldnames here are genuine — not the false positives we'd see
@@ -407,9 +444,10 @@ class DocumentCreate(BaseTool):
                 result.update(
                     {
                         "error_type": "child_table_handling_error",
-                        "guidance": "This error occurs when child table data is not properly formatted. Child tables require lists of dictionaries.",
+                        "guidance": "This error occurs when child table data is not properly formatted. Child tables require lists of dictionaries; a Table MultiSelect also accepts a list of its link values.",
                         "suggestion": f"1. Use get_doctype_info tool with doctype='{doctype}' to see child table fields\n2. Ensure child table fields are formatted as lists of dictionaries\n3. Example: {{'items': [{{'item_code': 'ITEM001', 'qty': 10}}]}}",
-                        "child_tables": list(frappe.get_meta(doctype).get_table_fields()) if doctype else [],
+                        # Fieldnames: DocField objects reach the client as their str() repr
+                        "child_tables": list(child_table_fields(frappe.get_meta(doctype))) if doctype else [],
                     }
                 )
             elif "does not exist" in error_msg.lower():

@@ -88,8 +88,7 @@ def check_access(documents: List[Dict[str, Any]], perm_type: str) -> None:
     """Before anything is written: may the user ``perm_type`` each record, without setting a
     field kept from them? The same checks the tools make for one record. Raises BatchProblem
     listing every record that fails."""
-    from frappe_assistant_core.core.security_config import validate_document_access
-    from frappe_assistant_core.plugins.core.tools.update_document import _restricted_fields_for_doctype
+    from frappe_assistant_core.core.security_config import get_restricted_fields, validate_document_access
 
     problems = []
     for number, entry in enumerate(documents, start=1):
@@ -100,7 +99,7 @@ def check_access(documents: List[Dict[str, Any]], perm_type: str) -> None:
         if not access.get("success"):
             problems.append(_problem(number, entry, access.get("error")))
             continue
-        restricted = _restricted_fields_for_doctype(doctype, access.get("role"))
+        restricted = get_restricted_fields(doctype, access.get("role"))
         kept = [field for field in entry["data"] if field in restricted]
         if kept:
             problems.append(

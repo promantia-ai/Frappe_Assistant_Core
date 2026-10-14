@@ -11,6 +11,9 @@ export const user = {
 	connectFACServer: () =>
 		baseCall("frappe_assistant_core.chat.api.connect_fac_mcp_server"),
 
+	verifySiteConnection: () =>
+		baseCall("frappe_assistant_core.chat.api.verify_site_connection"),
+
 	getMCPServers: () =>
 		getCall("frappe_assistant_core.chat.api.get_user_mcp_servers"),
 
@@ -24,6 +27,6 @@ export const user = {
 			server_name: serverName,
 		}),
 
-	listTools: () =>
-		getCall("frappe_assistant_core.chat.api.list_user_tools"),
+	listTools: (runtimeUser = null) =>
+		getCall("frappe_assistant_core.chat.api.list_user_tools", { runtime_user: runtimeUser }),
 };

@@ -15,9 +15,20 @@ from unittest.mock import patch
 
 import frappe
 
-from frappe_assistant_core.chat.api.chat.helpers import _attach_files_to_message, _extract_file_attachments
+from frappe_assistant_core.chat.api.chat.conversation_files import _describe, _file_text
+from frappe_assistant_core.chat.api.chat.helpers import _attach_files_to_message
 from frappe_assistant_core.chat.api.settings.uploads import upload_message_file
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+
+
+def _message_files_text(message_name: str) -> str:
+    """What the model is shown for the files attached to one message."""
+    files = frappe.get_all(
+        "File",
+        filters={"attached_to_doctype": "FAC Chat Message", "attached_to_name": message_name},
+        fields=["name", "file_name", "file_url", "file_size"],
+    )
+    return "\n\n".join(_describe(f, f"Content:\n{_file_text(f)}") for f in files)
 
 
 class TestJsonXmlAttachments(BaseAssistantTest):
@@ -36,7 +47,7 @@ class TestJsonXmlAttachments(BaseAssistantTest):
         _attach_files_to_message([result["file"]["file_url"]], message_name)
         logs_before = frappe.db.count("Error Log")
 
-        extracted = _extract_file_attachments(message_name)
+        extracted = _message_files_text(message_name)
 
         self.assertEqual(frappe.db.count("Error Log"), logs_before)
         self.assertIn(f"File: {file_name}", extracted)
