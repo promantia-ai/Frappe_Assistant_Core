@@ -92,6 +92,7 @@ READ_ONLY_TOOLS = {
     "set_column_mapping",
     # Writes only the session's settings and mapping, as set_column_mapping does.
     "set_opening_stock",
+    "set_opening_invoices",
     # Every row it inserts is rolled back; it writes only the session and its result file.
     "dry_run_import",
 }
