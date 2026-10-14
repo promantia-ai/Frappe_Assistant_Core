@@ -482,3 +482,157 @@ class TestOpeningStockFixes(OpeningStockCase):
 
         self.assertFalse(response["success"], response)
         self.assertIn("zero rate", frappe.as_json(response))
+
+
+class TestCreatingOpeningStock(OpeningStockCase):
+    def _ready(self, lines):
+        session = self._session(lines)
+        self._setup(session)
+        result = self._run("dry_run_import", {"session": session})["result"]
+        return session, result
+
+    def _card(self, session, result, **changes):
+        totals = result["opening_stock"]
+        return {
+            "session": session,
+            "company": self.company,
+            "posting_date": self.date,
+            "rows": result["ready"],
+            "total_qty": totals["total_qty"],
+            "total_value": totals["total_value"],
+            **changes,
+        }
+
+    def _qty(self, item, warehouse):
+        return frappe.db.get_value("Bin", {"item_code": item, "warehouse": warehouse}, "actual_qty")
+
+    def test_tool_needs_approval(self):
+        from frappe_assistant_core.plugins.core.plugin import CorePlugin
+        from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
+
+        self.assertIn("import_opening_stock", CorePlugin().get_tools())
+        self.assertNotEqual(detect_tool_category(self.registry.get_tool("import_opening_stock")), "read_only")
+
+    def test_an_approved_sheet_becomes_a_submitted_opening_stock_reconciliation(self):
+        session, result = self._ready([f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"])
+
+        response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertTrue(response["success"], response)
+        name = response["result"]["documents"][0]
+        doc = frappe.get_doc("Stock Reconciliation", name)
+        self.assertEqual(
+            (doc.docstatus, doc.purpose, doc.expense_account), (1, "Opening Stock", self.temporary)
+        )
+        self.assertEqual(str(doc.posting_date), self.date)
+        self.assertEqual(str(doc.posting_time), "23:59:59")
+        self.assertEqual(self._qty(self.item, self.stores), 5)
+        session_doc = self._doc(session)
+        self.assertEqual(session_doc.status, "Completed")
+        self.assertEqual([r.record_name for r in session_doc.created_records], [name])
+
+    def test_card_values_that_differ_from_the_check_are_refused(self):
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+
+        response = self._run("import_opening_stock", self._card(session, result, total_value=999))
+
+        self.assertFalse(response["success"], response)
+        self.assertFalse(self._doc(session).created_records)
+
+    def test_a_sheet_changed_since_its_check_is_refused(self):
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        doc = self._doc(session)
+        doc.transformation_rules = frappe.as_json({"zero_rate_items": ["X"]})  # a fix since the check
+        doc.save()
+
+        response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("last check", frappe.as_json(response))
+        self.assertFalse(self._doc(session).created_records)
+
+    def test_stock_that_moved_since_the_check_stops_the_import(self):
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        frappe.get_doc(
+            {
+                "doctype": "Stock Entry",
+                "stock_entry_type": "Material Receipt",
+                "company": self.company,
+                "items": [{"item_code": self.item, "t_warehouse": self.stores, "qty": 1, "basic_rate": 5}],
+            }
+        ).insert().submit()
+
+        response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("changed", frappe.as_json(response))
+        self.assertFalse(self._doc(session).created_records)
+
+    def test_calling_again_creates_nothing_more(self):
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        first = self._run("import_opening_stock", self._card(session, result))
+
+        second = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertTrue(second["success"], second)
+        self.assertEqual(second["result"]["documents"], first["result"]["documents"])
+        self.assertEqual(len(self._doc(session).created_records), 1)
+        self.assertEqual(self._qty(self.item, self.stores), 5)
+
+    def test_a_chunk_that_fails_rolls_back_whole_and_the_session_says_so(self):
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+
+        with patch.object(StockReconciliation, "on_submit", side_effect=frappe.ValidationError("refused")):
+            response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertFalse(response["success"], response)
+        self.assertEqual(self._doc(session).status, "Failed")
+        self.assertFalse(self._qty(self.item, self.stores))
+
+    def test_after_a_later_chunk_fails_only_the_rest_is_checked_and_imported(self):
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        real_on_submit, calls = StockReconciliation.on_submit, []
+
+        def second_fails(doc):
+            calls.append(doc.name)
+            if len(calls) == 2:
+                raise frappe.ValidationError("refused")
+            return real_on_submit(doc)
+
+        with patch.object(opening_stock, "CHUNK_ROWS", 1):
+            session, result = self._ready(
+                [f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"]
+            )
+            with patch.object(StockReconciliation, "on_submit", second_fails):
+                self._run("import_opening_stock", self._card(session, result))
+            self.assertEqual(self._doc(session).status, "Partially Completed")
+
+            again = self._run("dry_run_import", {"session": session})["result"]
+            self.assertEqual((again["imported"], again["ready"]), (1, 1))
+            response = self._run("import_opening_stock", self._card(session, again))
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(len(self._doc(session).created_records), 2)
+        self.assertEqual(self._qty(self.item, self.stores), 5)
+        self.assertEqual(self._qty(self.item2, self.shop), 2)
+
+    def test_a_document_erpnext_is_still_submitting_keeps_the_session_importing(self):
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+
+        with patch.object(StockReconciliation, "submit", lambda doc: None):  # as when queued
+            response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(self._doc(session).status, "Importing")
+        self.assertEqual(response["result"]["pending"], response["result"]["documents"])

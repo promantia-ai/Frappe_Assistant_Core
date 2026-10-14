@@ -75,6 +75,7 @@ class CorePlugin(BasePlugin):
             "set_opening_stock",
             "dry_run_import",
             "start_import",
+            "import_opening_stock",
         ]
 
     def validate_environment(self):

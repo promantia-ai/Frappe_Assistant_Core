@@ -489,8 +489,12 @@ def _check_lines(session, checker: _StockChecker) -> List[Ready]:
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
     stock, excluded, allowed = settings(session), dry_run._excluded_rows(session), _allowed_zero(session)
+    imported = imported_rows(session)
     ready, seen = [], {}
     for line in read_lines(session):
+        if line.row in imported:  # in a chunk submitted before: its stock is in, not to be checked again
+            checker.mark(line.row, "imported")
+            continue
         if line.row in excluded:
             checker.mark(line.row, "excluded")
             continue
@@ -642,3 +646,129 @@ def _erpnext_check(session, ready: List[Ready], checker: _StockChecker) -> List[
                 frappe.db.rollback(save_point=SAVEPOINT)
                 frappe.clear_messages()
     return passed
+
+
+# -- creating --------------------------------------------------------------------------------
+
+CREATE_SAVEPOINT = "fac_opening_stock_create"
+
+
+def documents(session) -> List[str]:
+    return [r.record_name for r in session.created_records if r.record_doctype == TARGET]
+
+
+def pending(session) -> List[str]:
+    """The session's Stock Reconciliations not submitted yet (ERPNext's background submit)."""
+    names = documents(session)
+    submitted = set(
+        frappe.get_all(TARGET, filters={"name": ["in", names or [""]], "docstatus": 1}, pluck="name")
+    )
+    return [n for n in names if n not in submitted]
+
+
+def imported_rows(session) -> set:
+    """Rows already in a submitted Stock Reconciliation of this session (an earlier chunk)."""
+    progress = frappe.parse_json(session.progress or "{}") or {}
+    by_document = progress.get("documents") or {}
+    submitted = set(
+        frappe.get_all(
+            TARGET, filters={"name": ["in", list(by_document) or [""]], "docstatus": 1}, pluck="name"
+        )
+    )
+    return {int(row) for name, rows in by_document.items() if name in submitted for row in rows}
+
+
+def check_card(session, company, posting_date, rows, total_qty, total_value) -> None:
+    """The approval card shows what FACO passed: refuse unless it is what the last check found."""
+    summary = frappe.parse_json(session.validation_summary or "{}") or {}
+    totals, stock = summary.get("opening_stock") or {}, settings(session)
+    checked = (
+        stock.get("company"),
+        stock.get("posting_date"),
+        summary.get("ready"),
+        flt(totals.get("total_qty"), 6),
+        flt(totals.get("total_value"), 2),
+    )
+    try:
+        asked = (
+            cstr(company).strip(),
+            str(getdate(posting_date)),
+            int(rows),
+            flt(total_qty, 6),
+            flt(total_value, 2),
+        )
+    except (TypeError, ValueError):
+        asked = None
+    if asked != checked:
+        raise OpeningStockProblem(
+            _(
+                "The last check found {2} rows for {0} at {1}: quantity {3}, value {4}. Pass those, so "
+                "the approval card shows them."
+            ).format(*checked)
+        )
+
+
+def _message_of_create(e: Exception) -> str:
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    return _("ERPNext refused the opening stock: {0}").format(dry_run._message_of(e))
+
+
+def create(session) -> List[str]:
+    """Create and submit the opening stock, a chunk at a time, each all or nothing. Chunks made
+    by an earlier call are skipped, so calling again never duplicates. Returns the new names."""
+    from frappe_assistant_core.plugins.core import import_fixes
+
+    if session.status == "Completed" or (documents(session) and session.status == "Importing"):
+        return []
+    if session.status != "Ready to Import" or not import_fixes.checked_as_is(session):
+        raise OpeningStockProblem(
+            _(
+                "The sheet isn't ready, or it changed since its last check. Check it with dry_run_import first."
+            )
+        )
+    lines = ready_lines(session)
+    expected = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
+    if len(lines) != expected:
+        raise OpeningStockProblem(
+            _(
+                "The stock changed since the last check: {0} rows are ready now, not {1}. Check it "
+                "again with dry_run_import."
+            ).format(len(lines), expected)
+        )
+    stock, made = settings(session), []
+    by_document = dict((frappe.parse_json(session.progress or "{}") or {}).get("documents") or {})
+    session.status = "Importing"
+    session.save()
+    for chunk in chunks(lines):
+        frappe.db.savepoint(CREATE_SAVEPOINT)
+        try:
+            batches = _ensure_batches(chunk)
+            doc = build_document(stock, chunk).insert()
+            doc.submit()  # ERPNext submits more than 100 rows in the background
+            session.append("created_records", {"record_doctype": TARGET, "record_name": doc.name})
+            for batch in batches:
+                session.append("created_records", {"record_doctype": "Batch", "record_name": batch})
+            by_document[doc.name] = [line.row for line in chunk]
+            session.progress = frappe.as_json({"step": "Import", "documents": by_document})
+            session.log_step(
+                "Import", "Success", _("{0}: {1} rows.").format(doc.name, len(chunk)), rows_ok=len(chunk)
+            )
+            session.save()
+            made.append(doc.name)
+        except Exception as e:
+            frappe.db.rollback(save_point=CREATE_SAVEPOINT)
+            session.reload()
+            session.status = "Partially Completed" if documents(session) else "Failed"
+            session.log_step("Import", "Failed", _message_of_create(e), rows_failed=len(chunk))
+            session.save()
+            raise OpeningStockProblem(_message_of_create(e)) from e
+    # Over 100 rows, ERPNext submits in the background: the session stays Importing until
+    # report() finds every document submitted.
+    session.status = "Importing" if pending(session) else "Completed"
+    session.save()
+    return made
+
+
+def report(session) -> Dict[str, Any]:
+    return {"status": session.status, "documents": documents(session), "pending": pending(session)}
