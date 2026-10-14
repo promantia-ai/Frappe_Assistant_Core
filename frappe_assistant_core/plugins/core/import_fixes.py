@@ -36,6 +36,7 @@ from frappe.utils import cstr
 from frappe.utils.nestedset import get_root_of
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+from frappe_assistant_core.plugins.core.import_session import readable_session_file
 
 MAP = "map"
 CREATE = "create"
@@ -709,7 +710,7 @@ def checked_as_is(session) -> bool:
     """Whether the last check was of the session as it is now: same file, mapping and fixes."""
     if not session.source_file or not session.validated_fingerprint:
         return False
-    file_doc = frappe.get_doc("File", session.source_file)
+    file_doc = readable_session_file(session)
     return dry_run.fingerprint(session, file_doc) == session.validated_fingerprint
 
 

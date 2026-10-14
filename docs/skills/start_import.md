@@ -76,7 +76,7 @@ A session that is **Partially Completed** or **Failed** isn't imported again as 
 1. Call `dry_run_import`: it checks **only the rows not imported yet** (`imported` counts the rest).
 2. Call `start_import` with that check's `ready`. A **new Data Import** gets just those rows, with every fix made since, and the session's report covers every run. The records already in are never touched.
 
-Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with `failed_rows_file`), and their corrected file comes back through `dry_run_import` as `file_url`, checked before it is imported.
+Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with `failed_rows_file`), and their corrected file comes back through `dry_run_import` as `file_id` (or `file_url`), checked before it is imported.
 
 ## When it can't start
 

@@ -24,9 +24,9 @@ from unittest.mock import patch
 import frappe
 import openpyxl
 
-from frappe_assistant_core.plugins.core import import_run
+from frappe_assistant_core.plugins.core import import_fixes, import_run
 from frappe_assistant_core.plugins.core.import_failures import REASON_COLUMN, ROW_COLUMN
-from frappe_assistant_core.plugins.core.import_session import read_sheet_rows
+from frappe_assistant_core.plugins.core.import_session import FileProblem, read_sheet_rows
 from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase
 
 GROUP_NODE = "Cannot select a Group type Customer Group"
@@ -312,6 +312,18 @@ class TestImportFailures(ImportRunCase):
         self.assertIn("don't have access", check["result"]["error"])
         self.assertNotIn("CEO pay", frappe.as_json(check))
 
+    def test_whether_a_check_is_current_is_never_read_from_a_file_the_user_cannot_read(self):
+        secret = self._file("salaries.csv", f"{','.join(MAPPING)}\nCEO pay,{self.group},Company\n".encode())
+        frappe.set_user(self.make_throwaway_user("clerk", roles=("Sales Master Manager", "Desk User")))
+        own = self._file("mine.csv", f"{','.join(MAPPING)}\nOwn {self.tag},{self.group},Company\n".encode())
+        session, _checked = self._ready_session(own)
+        doc = self._doc(session)
+        doc.source_file = secret.name  # over the REST API
+        doc.save()
+
+        with self.assertRaisesRegex(FileProblem, "don't have access"):
+            import_fixes.checked_as_is(self._doc(session))
+
     def test_with_every_row_in_there_is_nothing_to_download(self):
         n = self._names()
         file_doc = self._file("one.csv", f"{','.join(MAPPING)}\n{n['alpha']},{self.group},Company\n".encode())
@@ -361,7 +373,7 @@ class TestImportFailures(ImportRunCase):
 
         # Not imported before it is checked.
         self.assertFalse(self._import(session, checked)["success"])
-        result = self._check(session, file_url=corrected.file_url)
+        result = self._check(session, file_id=corrected.name)  # as uploaded in File Manager
 
         self.assertEqual(
             (result["status"], result["ready"], result["imported"]), ("Ready to Import", 2, 0), result
