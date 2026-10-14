@@ -224,3 +224,130 @@ class TestReadingLines(OpeningStockCase):
         self.assertEqual([line.row for line in lines], [2, 4])
         self.assertEqual(lines[1].cells["item_code"], self.item2)
         self.assertEqual(lines[1].cells["qty"], "3")
+
+
+class TestOpeningStockCheck(OpeningStockCase):
+    def _check(self, session, **arguments):
+        response = self._run("dry_run_import", {"session": session, **arguments})
+        self.assertTrue(response["success"], response)
+        return response["result"]
+
+    def _causes(self, result):
+        return {g["cause"]: g for g in result["groups"]}
+
+    def test_a_clean_sheet_is_ready_with_totals_per_warehouse(self):
+        session = self._session([f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"])
+        self._setup(session)
+        before = frappe.db.count("Stock Reconciliation")
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"], result["status"]), (2, 0, "Ready to Import"))
+        totals = result["opening_stock"]
+        self.assertEqual((totals["total_qty"], totals["total_value"]), (7, 65))
+        self.assertEqual(totals["warehouses"][self.stores], {"qty": 5, "value": 50, "rows": 1})
+        self.assertEqual(frappe.db.count("Stock Reconciliation"), before)  # nothing written
+
+    def test_each_problem_is_its_own_group(self):
+        batch_item = self._item(f"OS-BATCH-{self.tag}", has_batch_no=1, create_new_batch=0)
+        disabled = self._item(f"OS-OFF-{self.tag}", disabled=1)
+        service = self._item(f"OS-SVC-{self.tag}", is_stock_item=0)
+        session = self._session(
+            [
+                f"{self.item},{self.stores},5,10",  # 2 ready
+                f"NOPE-{self.tag},{self.stores},1,1",  # 3 missing item
+                f"{disabled},{self.stores},1,1",  # 4 can't hold stock
+                f"{service},{self.stores},1,1",  # 5 can't hold stock
+                f"{self.item2},{self.stores},-3,1",  # 6 negative
+                f"{self.item2},{self.shop},0,1",  # 7 zero
+                f"{self.item2},{self.stores},4,",  # 8 no rate
+                f"{batch_item},{self.stores},2,3",  # 9 batch needed
+                f"{self.item},{self.stores},1,10",  # 10 same item and warehouse as row 2
+                "Grand Total,,40,",  # 11 totals row
+            ]
+        )
+        self._setup(session)
+
+        causes = self._causes(self._check(session))
+
+        self.assertEqual([e["row"] for e in causes["Missing link"]["examples"]], [3])
+        self.assertEqual(causes["Can't hold stock"]["count"], 2)
+        self.assertEqual(causes["Negative quantity"]["count"], 1)
+        self.assertEqual(causes["Zero quantity"]["count"], 1)
+        self.assertEqual(causes["No valuation rate"]["count"], 1)
+        self.assertEqual(causes["Batch needed"]["count"], 1)
+        self.assertEqual(causes["Same item and warehouse"]["count"], 1)
+        self.assertEqual(causes["Totals row"]["count"], 1)
+
+    def test_the_rate_is_worked_out_from_the_value(self):
+        session = self._session([f"{self.item},{self.stores},4,100"], header="Item,Warehouse,Qty,Value")
+        self._setup(
+            session,
+            columns={"Item": "item_code", "Warehouse": "warehouse", "Qty": "qty", "Value": "amount"},
+        )
+
+        result = self._check(session)
+
+        self.assertEqual(result["ready"], 1)
+        self.assertEqual(result["opening_stock"]["total_value"], 100)
+
+    def test_a_warehouse_without_the_company_suffix_is_found_by_its_name(self):
+        session = self._session([f"{self.item},OS Stores {self.tag},5,10"])
+        self._setup(session)
+
+        self.assertEqual(self._check(session)["ready"], 1)
+
+    def test_a_group_warehouse_is_refused(self):
+        group = self._warehouse(f"OS Group {self.tag}", is_group=1)
+        session = self._session([f"{self.item},{group},5,10"])
+        self._setup(session)
+
+        self.assertIn("Group warehouse", self._causes(self._check(session)))
+
+    def test_an_item_that_already_has_stock_is_refused(self):
+        frappe.get_doc(
+            {
+                "doctype": "Stock Entry",
+                "stock_entry_type": "Material Receipt",
+                "company": self.company,
+                "items": [{"item_code": self.item, "t_warehouse": self.stores, "qty": 1, "basic_rate": 5}],
+            }
+        ).insert().submit()
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._setup(session)
+
+        self.assertIn("Already has stock", self._causes(self._check(session)))
+
+    def test_a_unit_is_converted_to_the_stock_unit(self):
+        if not frappe.db.exists("UOM", "Box"):
+            frappe.get_doc({"doctype": "UOM", "uom_name": "Box"}).insert()
+        item = frappe.get_doc("Item", self.item)
+        item.append("uoms", {"uom": "Box", "conversion_factor": 10})
+        item.save()
+        session = self._session(
+            [f"{self.item},{self.stores},2,100,Box"], header="Item,Warehouse,Qty,Rate,Unit"
+        )
+        self._setup(
+            session,
+            columns={
+                "Item": "item_code",
+                "Warehouse": "warehouse",
+                "Qty": "qty",
+                "Rate": "valuation_rate",
+                "Unit": "uom",
+            },
+        )
+
+        result = self._check(session)
+
+        self.assertEqual(result["opening_stock"]["total_qty"], 20)  # 2 boxes of 10
+        self.assertEqual(result["opening_stock"]["total_value"], 200)  # 100 a box is 10 a unit
+
+    def test_stock_reconciliation_can_not_go_through_data_import(self):
+        # Why opening stock has its own route: Allow Import is off for Stock Reconciliation.
+        from frappe_assistant_core.plugins.core.import_session import import_target_problem
+
+        session = self._session([f"{self.item},{self.stores},5,10"])
+
+        self.assertFalse(opening_stock.is_opening_stock(self._doc(session)))
+        self.assertIn("Allow Import", import_target_problem("Stock Reconciliation"))

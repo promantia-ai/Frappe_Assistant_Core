@@ -94,6 +94,10 @@ def check_status(session) -> None:
 
 def check_can_run(session) -> None:
     """Raise DryRunProblem when ``session`` can't be checked yet, saying what to do."""
+    from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
+
+    if opening_stock.is_opening_stock(session):
+        return opening_stock.check_can_run(session)
     check_status(session)
     if not column_to_field_map(session):
         raise DryRunProblem(_("Map the columns first, with set_column_mapping."))
@@ -244,10 +248,13 @@ def _progress(state: str, done: int, total: int) -> str:
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """Check every row of the session's file. Stores the result on the session and
     returns the summary, with up to three example rows per group for the model."""
+    from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
     from frappe_assistant_core.plugins.core.import_failures import imported_rows
     from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
 
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    if opening_stock.is_opening_stock(session):
+        return opening_stock.run(session_name, commit_progress=commit_progress)
     file_doc = readable_session_file(session)
     rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
     import_file = _parse(session, file_doc, rows)
