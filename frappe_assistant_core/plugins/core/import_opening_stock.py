@@ -771,4 +771,81 @@ def create(session) -> List[str]:
 
 
 def report(session) -> Dict[str, Any]:
-    return {"status": session.status, "documents": documents(session), "pending": pending(session)}
+    """Quantity and value per warehouse from the Stock Ledger, next to the file's totals."""
+    names, stock = documents(session), settings(session)
+    file_totals = (frappe.parse_json(session.validation_summary or "{}") or {}).get("opening_stock") or {}
+    waiting = pending(session)
+    submitted = [n for n in names if n not in waiting]
+    if session.status == "Importing" and names and not waiting:
+        # ERPNext's background submit has finished since the import was started.
+        session.db_set("status", "Completed")
+        session.status = "Completed"
+
+    # A Stock Reconciliation's ledger entry keeps its balance in qty_after_transaction (its
+    # actual_qty is 0 in v15). Items that already had stock are refused by the check, so each
+    # item and warehouse has one entry and its balance is what the file brought in.
+    ledger = {}
+    if submitted:
+        for row in frappe.get_all(
+            "Stock Ledger Entry",
+            filters={"voucher_type": TARGET, "voucher_no": ["in", submitted], "is_cancelled": 0},
+            fields=["warehouse", "sum(qty_after_transaction) as qty", "sum(stock_value_difference) as value"],
+            group_by="warehouse",
+        ):
+            ledger[row.warehouse] = row
+    precision = frappe.get_precision(ITEM_TABLE, "valuation_rate") or 2
+    warehouses, differences = {}, []
+    for warehouse, expected in (file_totals.get("warehouses") or {}).items():
+        got = ledger.get(warehouse) or frappe._dict(qty=0, value=0)
+        entry = {
+            "file_qty": expected["qty"],
+            "file_value": expected["value"],
+            "erpnext_qty": flt(got.qty, 6),
+            "erpnext_value": flt(got.value, 2),
+        }
+        entry["difference_qty"] = flt(entry["erpnext_qty"] - entry["file_qty"], 6)
+        entry["difference_value"] = flt(entry["erpnext_value"] - entry["file_value"], 2)
+        tolerance = 0.5 * 10 ** (-precision) * max(expected.get("rows") or 1, 1)
+        if entry["difference_qty"] or abs(entry["difference_value"]) > tolerance:
+            differences.append(warehouse)
+        warehouses[warehouse] = entry
+
+    reposting = bool(
+        submitted
+        and frappe.db.exists(
+            "Repost Item Valuation",
+            {
+                "voucher_type": TARGET,
+                "voucher_no": ["in", submitted],
+                "status": ["not in", ["Completed", "Skipped"]],
+                "docstatus": ["<", 2],
+            },
+        )
+    )
+    accounting = (
+        _("Posted against {0}.").format(stock.get("difference_account"))
+        if stock.get("perpetual")
+        else _("Perpetual inventory is off for this company, so no accounting entries were made.")
+    )
+    if waiting:
+        message = _("{0} still being submitted in the background: {1}.").format(
+            len(waiting), ", ".join(waiting)
+        )
+    elif differences:
+        message = _("Imported, but these warehouses differ from the file: {0}.").format(
+            ", ".join(differences)
+        )
+    else:
+        message = _("Opening stock imported: every warehouse matches the file.")
+    if reposting:
+        message += " " + _("ERPNext is still reposting stock values, so values can still change.")
+    return {
+        "status": session.status,
+        "documents": names,
+        "pending": waiting,
+        "reposting": reposting,
+        "warehouses": warehouses,
+        "differences": differences,
+        "accounting": accounting,
+        "message": message,
+    }

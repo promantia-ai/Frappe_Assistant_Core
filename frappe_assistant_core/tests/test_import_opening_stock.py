@@ -125,6 +125,29 @@ class OpeningStockCase(BaseAssistantTest):
     def _doc(self, session):
         return frappe.get_doc("FAC Import Session", session)
 
+    def _ready(self, lines):
+        """A session whose sheet passed the check, with that check's reply."""
+        session = self._session(lines)
+        self._setup(session)
+        result = self._run("dry_run_import", {"session": session})["result"]
+        return session, result
+
+    def _card(self, session, result, **changes):
+        """The values the approval card shows: what the last check reported."""
+        totals = result["opening_stock"]
+        return {
+            "session": session,
+            "company": self.company,
+            "posting_date": self.date,
+            "rows": result["ready"],
+            "total_qty": totals["total_qty"],
+            "total_value": totals["total_value"],
+            **changes,
+        }
+
+    def _qty(self, item, warehouse):
+        return frappe.db.get_value("Bin", {"item_code": item, "warehouse": warehouse}, "actual_qty")
+
 
 class TestOpeningStockSetup(OpeningStockCase):
     def test_tool_is_registered_and_raises_no_approval_card(self):
@@ -485,27 +508,6 @@ class TestOpeningStockFixes(OpeningStockCase):
 
 
 class TestCreatingOpeningStock(OpeningStockCase):
-    def _ready(self, lines):
-        session = self._session(lines)
-        self._setup(session)
-        result = self._run("dry_run_import", {"session": session})["result"]
-        return session, result
-
-    def _card(self, session, result, **changes):
-        totals = result["opening_stock"]
-        return {
-            "session": session,
-            "company": self.company,
-            "posting_date": self.date,
-            "rows": result["ready"],
-            "total_qty": totals["total_qty"],
-            "total_value": totals["total_value"],
-            **changes,
-        }
-
-    def _qty(self, item, warehouse):
-        return frappe.db.get_value("Bin", {"item_code": item, "warehouse": warehouse}, "actual_qty")
-
     def test_tool_needs_approval(self):
         from frappe_assistant_core.plugins.core.plugin import CorePlugin
         from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
@@ -636,3 +638,63 @@ class TestCreatingOpeningStock(OpeningStockCase):
         self.assertTrue(response["success"], response)
         self.assertEqual(self._doc(session).status, "Importing")
         self.assertEqual(response["result"]["pending"], response["result"]["documents"])
+
+
+class TestOpeningStockReport(OpeningStockCase):
+    def _imported(self, lines):
+        session, result = self._ready(lines)
+        response = self._run("import_opening_stock", self._card(session, result))
+        self.assertTrue(response["success"], response)
+        return session, response["result"]
+
+    def test_the_report_puts_erpnext_totals_next_to_the_files(self):
+        _session, report = self._imported(
+            [f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"]
+        )
+
+        stores = report["warehouses"][self.stores]
+        self.assertEqual((stores["file_qty"], stores["erpnext_qty"]), (5, 5))
+        self.assertEqual((stores["file_value"], stores["erpnext_value"]), (50, 50))
+        self.assertEqual(report["differences"], [])
+        self.assertEqual(report["status"], "Completed")
+        self.assertIn("matches", report["message"])
+
+    def test_a_difference_is_listed(self):
+        session, _report = self._imported([f"{self.item},{self.stores},5,10"])
+        doc = self._doc(session)
+        summary = frappe.parse_json(doc.validation_summary)
+        summary["opening_stock"]["warehouses"][self.stores]["value"] = 60  # the file said 60
+        doc.db_set("validation_summary", frappe.as_json(summary))
+
+        report = opening_stock.report(self._doc(session))
+
+        self.assertEqual(report["differences"], [self.stores])
+        self.assertEqual(report["warehouses"][self.stores]["difference_value"], -10)
+
+    def test_pending_reposting_is_reported(self):
+        session, _report = self._imported([f"{self.item},{self.stores},5,10"])
+        name = self._doc(session).created_records[0].record_name
+        frappe.get_doc(
+            {
+                "doctype": "Repost Item Valuation",
+                "based_on": "Transaction",
+                "voucher_type": "Stock Reconciliation",
+                "voucher_no": name,
+                "company": self.company,
+                "posting_date": self.date,
+                "status": "Queued",
+            }
+        ).insert(ignore_permissions=True)
+
+        report = opening_stock.report(self._doc(session))
+
+        self.assertTrue(report["reposting"])
+        self.assertIn("reposting", report["message"])
+
+    def test_the_accounting_sentence_says_which_account_or_that_none_was_posted(self):
+        session, report = self._imported([f"{self.item},{self.stores},5,10"])
+
+        perpetual = opening_stock.settings(self._doc(session))["perpetual"]
+
+        self.assertEqual(self.temporary in report["accounting"], perpetual)
+        self.assertEqual("no accounting entries" in report["accounting"], not perpetual)
