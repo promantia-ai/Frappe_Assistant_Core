@@ -90,6 +90,8 @@ READ_ONLY_TOOLS = {
     "start_import_session",
     # Writes only the session's mapping; as a write tool every correction would raise a card.
     "set_column_mapping",
+    # Writes only the session's settings and mapping, as set_column_mapping does.
+    "set_opening_stock",
     # Every row it inserts is rolled back; it writes only the session and its result file.
     "dry_run_import",
 }
