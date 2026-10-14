@@ -411,7 +411,7 @@ class TestErpnextValidation(OpeningStockCase):
         self.assertEqual(result["status"], "Dry Run Failed")
 
     def test_a_large_sheet_is_split_into_documents_of_a_thousand_rows(self):
-        lines = [opening_stock.Ready(n, "X", "W", 1, 1) for n in range(2, 2502)]
+        lines = [opening_stock.Ready(n, f"X{n:05}", "W", 1, 1) for n in range(2, 2502)]
 
         self.assertEqual([len(c) for c in opening_stock.chunks(lines)], [1000, 1000, 500])
 
@@ -662,9 +662,10 @@ class TestOpeningStockReport(OpeningStockCase):
     def test_a_difference_is_listed(self):
         session, _report = self._imported([f"{self.item},{self.stores},5,10"])
         doc = self._doc(session)
-        summary = frappe.parse_json(doc.validation_summary)
-        summary["opening_stock"]["warehouses"][self.stores]["value"] = 60  # the file said 60
-        doc.db_set("validation_summary", frappe.as_json(summary))
+        options = frappe.parse_json(doc.template_options)
+        held = options["opening_stock"]["created"][doc.created_records[0].record_name]
+        held[self.stores]["value"] = 60  # the file said 60
+        doc.db_set("template_options", frappe.as_json(options))
 
         report = opening_stock.report(self._doc(session))
 
@@ -698,3 +699,176 @@ class TestOpeningStockReport(OpeningStockCase):
 
         self.assertEqual(self.temporary in report["accounting"], perpetual)
         self.assertEqual("no accounting entries" in report["accounting"], not perpetual)
+
+
+class TestFinalReviewFixes(OpeningStockCase):
+    """Findings of the whole-branch review, each pinned by a test that failed first."""
+
+    def _check(self, session, **arguments):
+        response = self._run("dry_run_import", {"session": session, **arguments})
+        self.assertTrue(response["success"], response)
+        return response["result"]
+
+    def _partly_imported(self, lines):
+        """One chunk per line; ERPNext refuses the second: the first is in, Partially Completed."""
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        real_on_submit, calls = StockReconciliation.on_submit, []
+
+        def second_fails(doc):
+            calls.append(doc.name)
+            if len(calls) == 2:
+                raise frappe.ValidationError("refused")
+            return real_on_submit(doc)
+
+        with patch.object(opening_stock, "CHUNK_ROWS", 1):
+            session, result = self._ready(lines)
+            with patch.object(StockReconciliation, "on_submit", second_fails):
+                self._run("import_opening_stock", self._card(session, result))
+        self.assertEqual(self._doc(session).status, "Partially Completed")
+        return session
+
+    # -- the rows already in are remembered whatever is checked or uploaded later ------------
+
+    def test_the_rows_already_in_survive_every_later_check(self):
+        session = self._partly_imported(
+            [f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"]
+        )
+
+        self._check(session)
+        second = self._check(session)
+
+        self.assertEqual((second["imported"], second["ready"], second["failed"]), (1, 1, 0), second)
+
+    def test_a_corrected_file_with_a_row_inserted_above_still_skips_what_is_in(self):
+        session = self._partly_imported(
+            [f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"]
+        )
+        item3 = self._item(f"OS-ITEM3-{self.tag}")
+        corrected = self._file(
+            [f"{item3},{self.shop},1,3", f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"]
+        )
+
+        result = self._check(session, file_id=corrected.name)
+
+        self.assertEqual((result["imported"], result["ready"], result["failed"]), (1, 2, 0), result)
+
+    def test_an_item_and_warehouse_are_never_split_across_documents(self):
+        from unittest.mock import patch
+
+        lines = [opening_stock.Ready(n, "A", "W", 1, 1, batch_no=f"B{n}") for n in (2, 3, 4)]
+        lines.append(opening_stock.Ready(5, "B", "W", 1, 1))
+
+        with patch.object(opening_stock, "CHUNK_ROWS", 2):
+            sizes = [len(c) for c in opening_stock.chunks(lines)]
+
+        self.assertEqual(sizes, [3, 1])
+
+    # -- the report covers every chunk and counts a batch once -------------------------------
+
+    def test_the_report_after_a_resumed_import_covers_every_chunk(self):
+        session = self._partly_imported(
+            [f"{self.item},{self.stores},5,10", f"{self.item2},{self.stores},2,7.5"]
+        )
+        again = self._check(session)
+
+        response = self._run("import_opening_stock", self._card(session, again))
+
+        self.assertTrue(response["success"], response)
+        report = response["result"]
+        self.assertEqual(report["differences"], [], report)
+        stores = report["warehouses"][self.stores]
+        self.assertEqual((stores["file_qty"], stores["erpnext_qty"]), (7, 7))
+
+    def test_two_batches_of_one_item_in_a_warehouse_are_not_counted_twice(self):
+        old = frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields")
+        frappe.db.set_single_value("Stock Settings", "use_serial_batch_fields", 1)
+        self.addCleanup(frappe.db.set_single_value, "Stock Settings", "use_serial_batch_fields", old)
+        batch_item = self._item(f"OS-BB-{self.tag}", has_batch_no=1, create_new_batch=0)
+        session = self._session(
+            [
+                f"{batch_item},{self.stores},10,2,B1-{self.tag}",
+                f"{batch_item},{self.stores},5,2,B2-{self.tag}",
+            ],
+            header="Item,Warehouse,Qty,Rate,Batch",
+        )
+        self._setup(
+            session,
+            columns={
+                "Item": "item_code",
+                "Warehouse": "warehouse",
+                "Qty": "qty",
+                "Rate": "valuation_rate",
+                "Batch": "batch_no",
+            },
+        )
+        result = self._check(session)
+
+        response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertTrue(response["success"], response)
+        report = response["result"]
+        stores = report["warehouses"][self.stores]
+        self.assertEqual((stores["file_qty"], stores["erpnext_qty"]), (15, 15), report)
+        self.assertEqual(report["differences"], [])
+
+    # -- one bad row fails alone ------------------------------------------------------------
+
+    def test_a_negative_rate_fails_its_own_row_not_the_chunk(self):
+        session = self._session([f"{self.item},{self.stores},5,(10)", f"{self.item2},{self.shop},2,7.5"])
+        self._setup(session)
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (1, 1), result)
+
+    def test_one_row_erpnext_refuses_fails_alone_and_names_its_sheet_row(self):
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        bad = self._item(f"OS-BAD-{self.tag}")
+        real_validate = StockReconciliation.validate
+
+        def refuse_bad(doc):
+            for row in doc.items:
+                if row.item_code == bad:
+                    raise frappe.ValidationError(f"Row #{row.idx}: refused for a test")
+            return real_validate(doc)
+
+        session = self._session(
+            [f"{self.item},{self.stores},5,10", f"{bad},{self.stores},1,1", f"{self.item2},{self.shop},2,7.5"]
+        )
+        self._setup(session)
+
+        with patch.object(StockReconciliation, "validate", refuse_bad):
+            result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 1), result)
+        rejected = next(g for g in result["groups"] if g["cause"] == "Rejected by ERPNext")
+        self.assertEqual([e["row"] for e in rejected["examples"]], [3])
+        self.assertIn("Row 3", rejected["message"])
+
+    # -- a background submit that never finishes is reported, not waited for forever ---------
+
+    def test_a_draft_erpnext_never_submitted_is_reported_failed_not_pending_forever(self):
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        with patch.object(StockReconciliation, "submit", lambda doc: None):  # as when queued
+            response = self._run("import_opening_stock", self._card(session, result))
+        name = response["result"]["documents"][0]
+        self.assertEqual(self._doc(session).status, "Importing")
+        long_ago = frappe.utils.add_to_date(None, seconds=-(opening_stock.STALL_SECONDS + 60))
+        frappe.db.set_value("Stock Reconciliation", name, "modified", long_ago, update_modified=False)
+
+        report = opening_stock.report(self._doc(session))
+
+        self.assertEqual(report["failed_documents"], [name])
+        self.assertEqual(report["pending"], [])
+        self.assertEqual(self._doc(session).status, "Failed")
+        self.assertIn("couldn't submit", report["message"])

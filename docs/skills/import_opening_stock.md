@@ -19,6 +19,9 @@ Pass exactly what the last check reported, so the approval card shows it: `sessi
   difference. `differences` lists the warehouses that don't match. Show this table.
 - `pending`: documents ERPNext is still submitting in the background (more than 100 rows). Call again later
   with the same values: nothing is created twice.
+- `failed_documents`: drafts ERPNext never submitted (its background submit failed, and it left them as
+  drafts). The session is then Failed or Partially Completed. Tell the user to delete those drafts, then check
+  the sheet again with `dry_run_import` and call this again.
 - `reposting`: ERPNext is still recalculating stock values; say values can still change.
 - `accounting`: which account was posted, or that perpetual inventory is off.
 
