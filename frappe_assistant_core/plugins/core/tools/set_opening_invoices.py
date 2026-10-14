@@ -46,7 +46,7 @@ class SetOpeningInvoices(BaseTool):
                 "cut_off": {"type": "string", "description": "Cut-off date, YYYY-MM-DD"},
                 "columns": {
                     "type": "object",
-                    "description": "File column header â†’ field, e.g. {'Customer Name': 'party'}",
+                    "description": "File column header → field, e.g. {'Customer Name': 'party'}",
                     "additionalProperties": {"type": "string"},
                 },
             },

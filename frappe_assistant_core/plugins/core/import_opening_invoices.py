@@ -19,13 +19,18 @@ and each is inserted and submitted here, in a savepoint of its own. An opening-i
 keeps its settings in ``template_options.opening_invoices``.
 """
 
-from typing import Any, Dict, Optional
+import datetime
+import re
+from typing import Any, Dict, List, Optional
 
 import frappe
+from dateutil import parser as date_parser
 from frappe import _
 from frappe.utils import cstr, getdate
 
+from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
+from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
 
 TOOL = "Opening Invoice Creation Tool"
 INVOICE_DOCTYPES = {"Sales": "Sales Invoice", "Purchase": "Purchase Invoice"}
@@ -189,3 +194,65 @@ def check_can_run(session) -> None:
 
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     raise NotImplementedError  # Task 3
+
+
+# -- reading the file ------------------------------------------------------------------------
+
+ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def date_of(text) -> Optional[str]:
+    """A date as the file writes it, as YYYY-MM-DD; None when blank. ISO dates are read as ISO;
+    others day first when the site writes dates day first. Raises ValueError otherwise."""
+    text = cstr(text).strip()
+    if not text:
+        return None
+    if ISO_DATE.match(text):  # dateutil would read 2026-03-04 as 3 April when day first
+        return str(datetime.date.fromisoformat(text[:10]))
+    from frappe.utils.data import get_user_date_format
+
+    day_first = get_user_date_format().lower().startswith("dd")
+    try:
+        return str(date_parser.parse(text, dayfirst=day_first).date())
+    except (ValueError, OverflowError) as e:
+        raise ValueError(text) from e
+
+
+def is_totals_row(cells: Dict[str, str]) -> bool:
+    party = cstr(cells.get("party")).strip()
+    has_amount = bool(cstr(cells.get("outstanding_amount")).strip())
+    return has_amount and (not party or bool(opening_stock.TOTALS.match(party)))
+
+
+def invoice_key(invoices: Dict[str, Any], cells: Dict[str, str]) -> str:
+    """What says a row is in, matched against the invoices earlier imports made: the invoice
+    number (with the supplier for purchases, as suppliers reuse numbers), or, without one, the
+    party, date and amount as the file writes them. Never the row's number: the sheet can change."""
+    party = cstr(cells.get("party")).strip().casefold()
+    number = cstr(cells.get("invoice_number")).strip().casefold()
+    if number:
+        return f"{party}|{number}" if invoices.get("invoice_type") == "Purchase" else number
+    date, amount = cstr(cells.get("posting_date")).strip(), cstr(cells.get("outstanding_amount")).strip()
+    return f"{party}|{date}|{amount}"
+
+
+def read_lines(session) -> List[opening_stock.Line]:
+    """Every non-blank row of the session's sheet, as field -> text, with value maps applied."""
+    from frappe_assistant_core.plugins.core.import_dry_run import column_to_field_map
+    from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
+
+    invoices = settings(session)
+    party_field = PARTY_FIELDS[invoices["party_type"]]
+    rows = apply_value_maps(session, read_sheet_rows(readable_session_file(session), session.sheet or None))
+    positions = {
+        int(position): "party" if target == party_field else target
+        for position, target in column_to_field_map(session).items()
+        if str(position).isdigit() and target in (party_field, *MAPPED)
+    }
+    positions.update({int(p): f for f, p in (invoices.get("columns") or {}).items()})
+    lines = []
+    for index, row in enumerate(rows[1:], start=2):
+        cells = {f: cstr(row[p]).strip() if p < len(row) else "" for p, f in positions.items()}
+        if any(cells.values()):
+            lines.append(opening_stock.Line(index, cells))
+    return lines

@@ -212,3 +212,59 @@ class TestSetup(OpeningInvoicesCase):
         session = self._session([f"{self.customer},{self._number(1)},{self.date},{self.date},100"])
         self._setup(session)
         self.assertIs(dry_run.special_engine(self._doc(session)), opening_invoices)
+
+
+class TestReadingLines(OpeningInvoicesCase):
+    def test_dates_as_files_write_them(self):
+        self.assertEqual(opening_invoices.date_of("2026-03-04"), "2026-03-04")  # ISO is never day-first
+        self.assertEqual(opening_invoices.date_of("2026-03-04 00:00:00"), "2026-03-04")
+        self.assertEqual(opening_invoices.date_of("31/03/2026"), "2026-03-31")
+        self.assertIsNone(opening_invoices.date_of("  "))
+        with self.assertRaises(ValueError):
+            opening_invoices.date_of("soon")
+
+    def test_totals_rows(self):
+        self.assertTrue(opening_invoices.is_totals_row({"party": "Grand Total", "outstanding_amount": "500"}))
+        self.assertTrue(opening_invoices.is_totals_row({"party": "", "outstanding_amount": "500"}))
+        self.assertFalse(opening_invoices.is_totals_row({"party": "Acme", "outstanding_amount": "500"}))
+        self.assertFalse(opening_invoices.is_totals_row({"party": "Total", "outstanding_amount": ""}))
+
+    def test_keys(self):
+        sales, purchase = {"invoice_type": "Sales"}, {"invoice_type": "Purchase"}
+        numbered = {"party": " Acme ", "invoice_number": "INV-1", "posting_date": "2026-01-01"}
+        self.assertEqual(opening_invoices.invoice_key(sales, numbered), "inv-1")
+        self.assertEqual(opening_invoices.invoice_key(purchase, numbered), "acme|inv-1")
+        bare = {"party": "Acme", "posting_date": "2026-01-01", "outstanding_amount": "1,250"}
+        self.assertEqual(opening_invoices.invoice_key(sales, bare), "acme|2026-01-01|1,250")
+
+    def test_lines_have_every_mapped_field_with_value_maps_applied(self):
+        session = self._session(
+            [
+                f'Old Name,{self._number(1)},{self.date},,"1,250.50"',
+                ",,,,",
+                f"{self.customer2},{self._number(2)},{self.date},{self.date},10",
+            ]
+        )
+        self._setup(session)
+        doc = self._doc(session)
+        doc.transformation_rules = frappe.as_json(
+            {
+                "value_maps": [
+                    {
+                        "parent": "Sales Invoice",
+                        "field": "customer",
+                        "label": "Customer",
+                        "from": "Old Name",
+                        "to": self.customer,
+                    }
+                ]
+            }
+        )
+        doc.save()
+        lines = opening_invoices.read_lines(doc)
+        self.assertEqual([line.row for line in lines], [2, 4])  # the blank row is skipped
+        first = lines[0].cells
+        self.assertEqual(first["party"], self.customer)
+        self.assertEqual(first["invoice_number"], self._number(1))
+        self.assertEqual(first["outstanding_amount"], "1,250.50")
+        self.assertEqual(first["due_date"], "")
