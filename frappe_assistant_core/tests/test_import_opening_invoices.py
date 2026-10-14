@@ -310,6 +310,7 @@ class TestCheck(OpeningInvoicesCase):
             }
         ).insert()
         before = frappe.db.count("GL Entry")
+        invoices_before = frappe.db.count("Sales Invoice")
         session, result = self._ready(
             [
                 self._line(self.customer, self._number(1), self.date, "", "10"),
@@ -320,6 +321,108 @@ class TestCheck(OpeningInvoicesCase):
         self.assertEqual(rejected["count"], 2)
         self.assertEqual(result["ready"], 0)
         self.assertEqual(frappe.db.count("GL Entry"), before)
+        self.assertEqual(frappe.db.count("Sales Invoice"), invoices_before)
+        for n in (1, 2):
+            self.assertFalse(frappe.db.exists("Sales Invoice", self._number(n)))
+
+    # -- post at the cut-off, repeated rows, excluded rows, bills ---------------------------
+
+    def _at_cutoff(self, session):
+        doc = self._doc(session)
+        doc.transformation_rules = frappe.as_json({"post_at_cutoff": True})
+        doc.save()
+        return self._doc(session)
+
+    def test_post_at_cutoff_moves_an_old_invoice_to_the_cutoff(self):
+        later = add_days(self.date, 10)
+        session = self._session(
+            [
+                self._line(self.customer, self._number(1), "1990-01-15", "1990-02-15", "10"),
+                self._line(self.customer, self._number(2), "1990-01-15", later, "20"),
+            ]
+        )
+        self._setup(session)
+        first, second = opening_invoices.ready_lines(self._at_cutoff(session))
+        self.assertEqual(
+            (first.posting_date, first.due_date, first.original_date), (self.date, self.date, "1990-01-15")
+        )
+        self.assertEqual(
+            (second.posting_date, second.due_date, second.original_date), (self.date, later, "1990-01-15")
+        )
+
+    def test_identical_unnumbered_rows_are_both_ready_with_their_own_keys(self):
+        session = self._session([self._line(self.customer, "", self.date, "", "10")] * 2)
+        self._setup(session)
+        ready = opening_invoices.ready_lines(self._doc(session))
+        self.assertEqual(len(ready), 2)
+        self.assertEqual(sorted(line.key[-2:] for line in ready), ["#1", "#2"])
+        self.assertEqual(len({line.key for line in ready}), 2)
+
+    def test_excluded_rows_are_marked_and_not_checked(self):
+        session = self._session(
+            [
+                self._line(f"Nobody {self.tag}", self._number(1), self.date, "", "10"),
+                self._line(self.customer, self._number(2), self.date, "", "10"),
+            ]
+        )
+        self._setup(session)
+        doc = self._doc(session)
+        doc.excluded_rows = frappe.as_json([2])
+        doc.save()
+        checker = opening_invoices._InvoiceChecker("Sales Invoice")
+        ready = opening_invoices._check_lines(self._doc(session), checker)
+        self.assertEqual([line.row for line in ready], [3])
+        self.assertEqual(checker.rows[0], {"row": 2, "status": "excluded"})
+        self.assertEqual(checker.groups, {})  # the missing customer in row 2 was never checked
+
+    def test_purchase_number_used_only_for_the_same_supplier(self):
+        session = self._session([self._line(self.supplier, "BILL-1", self.date, "", "10")])
+        self._setup(session, invoice_type="Purchase")
+        doc = self._doc(session)
+        opening_invoices.make_invoice(opening_invoices.settings(doc), opening_invoices.ready_lines(doc)[0])
+        other = self._session(
+            [
+                self._line(self.supplier, "BILL-1", self.date, "", "10"),
+                self._line(self.supplier2, "BILL-1", self.date, "", "20"),
+            ]
+        )
+        self._setup(other, invoice_type="Purchase")
+        result = self._check(other)
+        used = self._groups(result)[opening_invoices.CAUSE_NUMBER_USED]
+        self.assertEqual([e["row"] for e in used["examples"]], [2])
+        self.assertEqual(result["ready"], 1)
+
+    def test_purchase_invoice_carries_the_bill_number_and_dates(self):
+        session = self._session(
+            [
+                self._line(self.supplier, "BILL-2", self.date, "", "10"),
+                self._line(self.supplier, "BILL-3", "1990-01-15", "", "10"),
+            ]
+        )
+        self._setup(session, invoice_type="Purchase")
+        doc = self._at_cutoff(session)
+        invoices = opening_invoices.settings(doc)
+        plain, old = opening_invoices.ready_lines(doc)
+        built = opening_invoices.build_invoice(invoices, plain)
+        self.assertEqual((built.bill_no, str(built.bill_date)), ("BILL-2", self.date))
+        built = opening_invoices.build_invoice(invoices, old)
+        self.assertEqual((built.bill_no, str(built.bill_date)), ("BILL-3", "1990-01-15"))
+        self.assertEqual(str(built.posting_date), self.date)
+        self.assertIn("1990-01-15", built.remarks)
+
+    def test_two_disabled_parties_are_two_groups_with_their_own_values(self):
+        first = self._party("Customer", f"OI Off1 {self.tag}", disabled=1)
+        second = self._party("Customer", f"OI Off2 {self.tag}", disabled=1)
+        session, result = self._ready(
+            [
+                self._line(first, self._number(1), self.date, "", "10"),
+                self._line(second, self._number(2), self.date, "", "10"),
+                self._line(first, self._number(3), self.date, "", "10"),
+            ]
+        )
+        disabled = [g for g in result["groups"] if g["cause"] == opening_invoices.CAUSE_PARTY_DISABLED]
+        self.assertEqual(sorted(g["value"] for g in disabled), sorted([first, second]))
+        self.assertEqual(sorted(g["count"] for g in disabled), [1, 2])
 
 
 class TestReadingLines(OpeningInvoicesCase):
