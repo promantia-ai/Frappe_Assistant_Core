@@ -351,3 +351,73 @@ class TestOpeningStockCheck(OpeningStockCase):
 
         self.assertFalse(opening_stock.is_opening_stock(self._doc(session)))
         self.assertIn("Allow Import", import_target_problem("Stock Reconciliation"))
+
+
+class TestErpnextValidation(OpeningStockCase):
+    def _check(self, session):
+        response = self._run("dry_run_import", {"session": session})
+        self.assertTrue(response["success"], response)
+        return response["result"]
+
+    def test_the_draft_is_checked_by_erpnext_and_nothing_is_left_behind(self):
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._setup(session)
+        tables = ("Stock Reconciliation", "Serial and Batch Bundle", "Batch", "Stock Ledger Entry")
+        before = {dt: frappe.db.count(dt) for dt in tables}
+
+        result = self._check(session)
+
+        self.assertEqual(result["ready"], 1)
+        self.assertEqual({dt: frappe.db.count(dt) for dt in tables}, before)
+
+    def test_a_row_erpnext_refuses_is_grouped_as_rejected(self):
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._setup(session)
+
+        with patch.object(
+            StockReconciliation, "validate", side_effect=frappe.ValidationError("Row 1: refused for a test")
+        ):
+            result = self._check(session)
+
+        rejected = next(g for g in result["groups"] if g["cause"] == "Rejected by ERPNext")
+        self.assertEqual(rejected["count"], 1)
+        self.assertEqual(result["status"], "Dry Run Failed")
+
+    def test_a_large_sheet_is_split_into_documents_of_a_thousand_rows(self):
+        lines = [opening_stock.Ready(n, "X", "W", 1, 1) for n in range(2, 2502)]
+
+        self.assertEqual([len(c) for c in opening_stock.chunks(lines)], [1000, 1000, 500])
+
+    def test_a_batch_item_with_a_new_batch_and_a_serial_item_pass(self):
+        old = frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields")
+        frappe.db.set_single_value("Stock Settings", "use_serial_batch_fields", 1)
+        self.addCleanup(frappe.db.set_single_value, "Stock Settings", "use_serial_batch_fields", old)
+        batch_item = self._item(f"OS-B-{self.tag}", has_batch_no=1, create_new_batch=0)
+        serial_item = self._item(f"OS-S-{self.tag}", has_serial_no=1)
+        session = self._session(
+            [
+                f"{batch_item},{self.stores},3,2,B-{self.tag},",
+                f"{serial_item},{self.stores},2,9,,S1-{self.tag} S2-{self.tag}",
+            ],
+            header="Item,Warehouse,Qty,Rate,Batch,Serial",
+        )
+        self._setup(
+            session,
+            columns={
+                "Item": "item_code",
+                "Warehouse": "warehouse",
+                "Qty": "qty",
+                "Rate": "valuation_rate",
+                "Batch": "batch_no",
+                "Serial": "serial_no",
+            },
+        )
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result["groups"])
+        self.assertFalse(frappe.db.exists("Batch", f"B-{self.tag}"))  # rolled back

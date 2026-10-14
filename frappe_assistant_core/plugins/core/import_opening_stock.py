@@ -562,5 +562,83 @@ def ready_lines(session) -> List[Ready]:
     return _check_lines(session, _StockChecker())
 
 
+SAVEPOINT = "fac_opening_stock_check"
+
+
+def chunks(lines: List[Ready]) -> List[List[Ready]]:
+    return [lines[i : i + CHUNK_ROWS] for i in range(0, len(lines), CHUNK_ROWS)]
+
+
+def build_document(stock: Dict[str, Any], lines: List[Ready]):
+    """An unsaved Opening Stock Stock Reconciliation of ``lines``."""
+    batch_fields = bool(frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields"))
+    return frappe.get_doc(
+        {
+            "doctype": TARGET,
+            "purpose": PURPOSE,
+            "company": stock["company"],
+            "posting_date": stock["posting_date"],
+            "posting_time": stock["posting_time"],
+            "set_posting_time": 1,
+            "expense_account": stock["difference_account"],
+            "cost_center": frappe.get_cached_value("Company", stock["company"], "cost_center"),
+            "items": [
+                {
+                    "item_code": line.item_code,
+                    "warehouse": line.warehouse,
+                    "qty": line.qty,
+                    "valuation_rate": line.valuation_rate,
+                    "allow_zero_valuation_rate": 0 if line.valuation_rate else 1,
+                    "batch_no": line.batch_no or None,
+                    "serial_no": line.serial_no or None,
+                    "use_serial_batch_fields": 1 if batch_fields and (line.batch_no or line.serial_no) else 0,
+                }
+                for line in lines
+            ],
+        }
+    )
+
+
+def _ensure_batches(lines: List[Ready]) -> List[str]:
+    """Create the batches the file names that don't exist yet. Returns their names."""
+    made = []
+    for line in lines:
+        if line.batch_no and not frappe.db.exists("Batch", line.batch_no) and line.batch_no not in made:
+            frappe.get_doc(
+                {
+                    "doctype": "Batch",
+                    "batch_id": line.batch_no,
+                    "item": line.item_code,
+                    "expiry_date": line.expiry_date or None,
+                }
+            ).insert()
+            made.append(line.batch_no)
+    return made
+
+
 def _erpnext_check(session, ready: List[Ready], checker: _StockChecker) -> List[Ready]:
-    return ready  # ERPNext's own validation of the draft is added with its test, in the next task
+    """Insert each chunk as a draft inside a savepoint, rolled back: ERPNext's own validation.
+    A chunk it refuses fails as one group (its message names the row when ERPNext does)."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    stock, passed = settings(session), []
+    for chunk in chunks(ready):
+        frappe.clear_messages()
+        with dry_run.held_back():
+            frappe.db.savepoint(SAVEPOINT)
+            try:
+                _ensure_batches(chunk)
+                build_document(stock, chunk).insert()
+                passed += chunk
+            except Exception as e:
+                message, kind = dry_run._message_of(e), type(e).__name__
+                for line in chunk:
+                    checker.fail(
+                        line.row,
+                        (dry_run.CAUSE_REJECTED, kind, message),
+                        {"cause": dry_run.CAUSE_REJECTED, "error": kind, "message": message},
+                    )
+            finally:
+                frappe.db.rollback(save_point=SAVEPOINT)
+                frappe.clear_messages()
+    return passed
