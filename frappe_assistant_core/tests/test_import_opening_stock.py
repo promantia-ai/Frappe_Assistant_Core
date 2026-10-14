@@ -421,3 +421,64 @@ class TestErpnextValidation(OpeningStockCase):
 
         self.assertEqual((result["ready"], result["failed"]), (2, 0), result["groups"])
         self.assertFalse(frappe.db.exists("Batch", f"B-{self.tag}"))  # rolled back
+
+
+class TestOpeningStockFixes(OpeningStockCase):
+    def _check(self, session, **arguments):
+        response = self._run("dry_run_import", {"session": session, **arguments})
+        self.assertTrue(response["success"], response)
+        return response["result"]
+
+    def test_every_new_cause_comes_with_a_plain_explanation(self):
+        session = self._session([f"{self.item},{self.stores},4,", f"{self.item2},{self.stores},-1,3"])
+        self._setup(session)
+
+        groups = self._check(session)["groups"]
+
+        self.assertEqual(len(groups), 2)
+        for group in groups:
+            self.assertTrue(group["explanation"], group)
+            self.assertIn("leave_out", [f["action"] for f in group["fixes"]])
+        no_rate = next(g for g in groups if g["cause"] == "No valuation rate")
+        self.assertIn("allow_zero_rate", [f["action"] for f in no_rate["fixes"]])
+
+    def test_allowing_a_zero_rate_makes_the_row_ready_at_zero_value(self):
+        session = self._session([f"{self.item},{self.stores},4,"])
+        self._setup(session)
+        group = next(g for g in self._check(session)["groups"] if g["cause"] == "No valuation rate")
+
+        result = self._check(session, fixes=[{"group": group["id"], "action": "allow_zero_rate"}])
+
+        self.assertEqual((result["ready"], result["opening_stock"]["total_value"]), (1, 0))
+
+    def test_a_missing_warehouse_is_mapped_to_an_existing_one(self):
+        session = self._session([f"{self.item},Godown {self.tag},4,2"])
+        self._setup(session)
+        group = next(g for g in self._check(session)["groups"] if g["cause"] == "Missing link")
+
+        result = self._check(session, fixes=[{"group": group["id"], "action": "map", "to": self.stores}])
+
+        self.assertEqual(result["ready"], 1)
+
+    def test_a_group_warehouse_is_mapped_to_a_real_one(self):
+        group_warehouse = self._warehouse(f"OS Group {self.tag}", is_group=1)
+        session = self._session([f"{self.item},{group_warehouse},4,2"])
+        self._setup(session)
+        group = next(g for g in self._check(session)["groups"] if g["cause"] == "Group warehouse")
+
+        result = self._check(session, fixes=[{"group": group["id"], "action": "map", "to": self.stores}])
+
+        self.assertEqual(result["ready"], 1)
+
+    def test_allow_zero_rate_is_refused_for_other_groups(self):
+        session = self._session([f"{self.item},{self.stores},-1,3"])
+        self._setup(session)
+        group = self._check(session)["groups"][0]
+
+        response = self._run(
+            "dry_run_import",
+            {"session": session, "fixes": [{"group": group["id"], "action": "allow_zero_rate"}]},
+        )
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("zero rate", frappe.as_json(response))
