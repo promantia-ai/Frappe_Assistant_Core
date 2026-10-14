@@ -524,14 +524,55 @@ class TestFixes(OpeningInvoicesCase):
         result = self._fix(session, group["id"], "map", to=self.customer)["result"]
         self.assertEqual(result["ready"], 1, result)
 
-    def test_every_new_cause_has_a_plain_explanation(self):
-        session, result = self._ready(
+    def test_mapping_a_disabled_party_to_nobody_is_refused_and_changes_nothing(self):
+        disabled = self._party("Customer", f"OI Off {self.tag}", disabled=1)
+        session, result = self._ready([f"{disabled},{self._number(1)},{self.date},,10"])
+        group = self._groups(result)[opening_invoices.CAUSE_PARTY_DISABLED]
+        before = self._doc(session).transformation_rules
+        reply = self._fix(session, group["id"], "map", to=f"Nobody {self.tag}")
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("There is no", frappe.as_json(reply))
+        self.assertEqual(self._doc(session).transformation_rules, before)
+
+    def test_every_new_cause_has_its_own_explanation_and_fixes(self):
+        disabled = self._party("Customer", f"OI Off {self.tag}", disabled=1)
+        other = "USD" if self.currency != "USD" else "EUR"
+        foreign = self._party("Customer", f"OI Foreign {self.tag}", default_currency=other)
+
+        def line(party, number, date, due, amount):
+            return f"{party},{number},{date},{due},{amount}"
+
+        session = self._session(
             [
-                f"{self.customer},{self._number(1)},{self.date},,0",
-                f"{self.customer},{self._number(2)},{self.date},{add_days(self.date, -3)},10",
+                line(disabled, self._number(1), self.date, "", "10"),
+                line(foreign, self._number(2), self.date, "", "10"),
+                line(self.customer, self._number(3), self.date, "", "0"),
+                line(self.customer, self._number(4), "1990-01-15", "", "10"),
+                line(self.customer, self._number(5), self.date, add_days(self.date, -1), "10"),
+                line(self.customer, self._number(6), self.date, "", "10"),
+                line(self.customer2, self._number(6), self.date, "", "20"),
+                line(self.customer, self._number(7), self.date, "", "10"),
             ]
         )
-        for group in result["groups"]:
-            self.assertTrue(group["explanation"].startswith("1 row"), group)
-            self.assertIn("leave_out", [f["action"] for f in group["fixes"]])
-            self.assertTrue(group["fix_in_file"])
+        self.assertTrue(self._setup(session)["success"])
+        used = [
+            ready
+            for ready in opening_invoices.ready_lines(self._doc(session))
+            if ready.invoice_number == self._number(7)
+        ]
+        opening_invoices.make_invoice(opening_invoices.settings(self._doc(session)), used[0])
+        result = self._check(session)
+        groups = self._groups(result)
+        expected = {
+            opening_invoices.CAUSE_NO_FISCAL_YEAR: ["post_at_cutoff", "leave_out"],
+            opening_invoices.CAUSE_PARTY_DISABLED: ["map", "leave_out"],
+        }
+        self.assertEqual(set(opening_invoices.NEW_CAUSES) - set(groups), set(), "every new cause is produced")
+        for cause in opening_invoices.NEW_CAUSES:
+            group = groups[cause]
+            self.assertRegex(group["explanation"], r"^(1 row|\d+ rows)", group)
+            self.assertTrue(group["message"], group)
+            self.assertIn(group["message"], group["explanation"])
+            self.assertNotIn("would fail", group["explanation"])
+            self.assertTrue(group["fix_in_file"], group)
+            self.assertEqual([f["action"] for f in group["fixes"]], expected.get(cause, ["leave_out"]), cause)
