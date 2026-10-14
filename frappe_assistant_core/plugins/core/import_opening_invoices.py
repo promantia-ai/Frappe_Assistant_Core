@@ -21,12 +21,13 @@ keeps its settings in ``template_options.opening_invoices``.
 
 import datetime
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import frappe
 from dateutil import parser as date_parser
 from frappe import _
-from frappe.utils import cstr, getdate
+from frappe.utils import cstr, flt, getdate
 
 from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
@@ -193,12 +194,33 @@ def check_can_run(session) -> None:
 
 
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
-    raise NotImplementedError  # Task 3
+    """The dry run of an opening-invoices session: every row checked, ERPNext's own validation of
+    the ready rows, the result stored the dry run's way, with the totals."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    invoices = settings(session)
+    file_doc = readable_session_file(session)
+    checker = _InvoiceChecker(invoices["doctype"])
+    ready = _erpnext_check(session, _check_lines(session, checker), checker)
+    for line in ready:
+        checker.mark(line.row, "ready")
+    checker.rows.sort(key=lambda r: r["row"])
+    summary = dry_run._store(session_name, file_doc, checker, len(checker.rows))
+    summary["opening_invoices"] = _totals(invoices, ready)
+    frappe.db.set_value(
+        dry_run.SESSION_DOCTYPE,
+        session_name,
+        "validation_summary",
+        frappe.as_json(summary),
+        update_modified=False,
+    )
+    return summary
 
 
 # -- reading the file ------------------------------------------------------------------------
 
-ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ]|$)")
 
 
 def date_of(text) -> Optional[str]:
@@ -256,3 +278,391 @@ def read_lines(session) -> List[opening_stock.Line]:
         if any(cells.values()):
             lines.append(opening_stock.Line(index, cells))
     return lines
+
+
+# -- checking the rows -----------------------------------------------------------------------
+
+CAUSE_PARTY_DISABLED = "Party disabled"
+CAUSE_FOREIGN_CURRENCY = "Party in another currency"
+CAUSE_NOT_POSITIVE = "Not a positive amount"
+CAUSE_NO_FISCAL_YEAR = "Date in no fiscal year"
+CAUSE_DUE_BEFORE = "Due before the invoice date"
+CAUSE_NUMBER_TWICE = "Invoice number twice"
+CAUSE_NUMBER_USED = "Invoice number already used"
+NEW_CAUSES = (
+    CAUSE_PARTY_DISABLED,
+    CAUSE_FOREIGN_CURRENCY,
+    CAUSE_NOT_POSITIVE,
+    CAUSE_NO_FISCAL_YEAR,
+    CAUSE_DUE_BEFORE,
+    CAUSE_NUMBER_TWICE,
+    CAUSE_NUMBER_USED,
+)
+# One group per cause, so "12 rows are dated in no fiscal year" is one decision. A disabled party is
+# one group per party, because the fix (a party to map to) depends on which party it is.
+BY_VALUE = (CAUSE_PARTY_DISABLED,)
+LABELS = {
+    "outstanding_amount": "Outstanding Amount",
+    "invoice_number": "Invoice Number",
+    "posting_date": "Invoice Date",
+    "due_date": "Due Date",
+}
+
+
+@dataclass
+class Ready:
+    row: int
+    party: str
+    amount: float
+    posting_date: str
+    due_date: str
+    invoice_number: str = ""
+    item_name: str = ""
+    original_date: str = ""  # the file's date, when the invoice is posted at the cut-off
+    key: str = ""
+
+
+class _InvoiceChecker(opening_stock._StockChecker):
+    """Groups failures the dry run's way, so its results file, fixes and reply are reused."""
+
+    def __init__(self, doctype: str):
+        super().__init__()
+        self.doctype = doctype
+
+
+def _precision(invoices: Dict[str, Any]) -> int:
+    return frappe.get_precision(invoices["doctype"], "outstanding_amount") or 2
+
+
+def _problem(invoices: Dict[str, Any], cause: str, field: str, value: str, message: str):
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    by_value = cause in BY_VALUE or cause == dry_run.CAUSE_MISSING_LINK
+    party_type = invoices["party_type"]
+    target = PARTY_FIELDS[party_type] if field == "party" else field
+    key = (cause, invoices["doctype"], target) + ((value,) if by_value else ())
+    info = {
+        "cause": cause,
+        "parent": invoices["doctype"],
+        "field": target,
+        "label": _(party_type if field == "party" else LABELS[field]),
+        "value": value if by_value else None,
+        "message": message,
+    }
+    return key, info
+
+
+def find_party(party_type: str, text: str):
+    """The party named ``text``, or the only one whose customer or supplier name it is."""
+    if not text:
+        return None
+    fields = ["name", "disabled", "default_currency"]
+    found = frappe.db.get_value(party_type, text, fields, as_dict=True)
+    if found:
+        return found
+    matches = frappe.get_all(
+        party_type, filters={PARTY_NAME_FIELDS[party_type]: text}, fields=fields, limit=2
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _fiscal_years(company: str):
+    known: Dict[str, bool] = {}
+
+    def has_year(date: str) -> bool:
+        if date not in known:
+            known[date] = in_fiscal_year(date, company)
+        return known[date]
+
+    return has_year
+
+
+def _line_problem(line: opening_stock.Line, invoices: Dict[str, Any], post_at_cutoff: bool, has_year):
+    """The line's problem as (key, info), or the Ready line."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    cells = line.cells
+    if is_totals_row(cells):
+        return (opening_stock.CAUSE_TOTALS_ROW,), {
+            "cause": opening_stock.CAUSE_TOTALS_ROW,
+            "message": _("A totals row, not an invoice."),
+        }
+    text = cells.get("outstanding_amount", "")
+    try:
+        amount = flt(opening_stock.number(text), _precision(invoices))
+    except ValueError:
+        return _problem(
+            invoices,
+            dry_run.CAUSE_BAD_VALUE,
+            "outstanding_amount",
+            text,
+            _("'{0}' isn't a number.").format(text),
+        )
+    dates = {}
+    for name in ("posting_date", "due_date"):
+        try:
+            dates[name] = date_of(cells.get(name))
+        except ValueError:
+            return _problem(
+                invoices,
+                dry_run.CAUSE_BAD_DATE,
+                name,
+                cells[name],
+                _("'{0}' isn't a date.").format(cells[name]),
+            )
+
+    party_type, given = invoices["party_type"], cells.get("party", "")
+    party = find_party(party_type, given)
+    if not party:
+        return _problem(
+            invoices,
+            dry_run.CAUSE_MISSING_LINK,
+            "party",
+            given,
+            _("{0} '{1}' doesn't exist.").format(_(party_type), given),
+        )
+    if party.disabled:
+        return _problem(
+            invoices, CAUSE_PARTY_DISABLED, "party", given, _("{0} is disabled.").format(party.name)
+        )
+    if party.default_currency and party.default_currency != invoices["currency"]:
+        return _problem(
+            invoices,
+            CAUSE_FOREIGN_CURRENCY,
+            "party",
+            given,
+            _("The party's currency isn't {0}; foreign-currency invoices aren't brought in here.").format(
+                invoices["currency"]
+            ),
+        )
+    if amount <= 0:
+        return _problem(
+            invoices,
+            CAUSE_NOT_POSITIVE,
+            "outstanding_amount",
+            text,
+            _("Nothing is owed: credit notes and advances aren't brought in here."),
+        )
+
+    file_date = dates["posting_date"] or invoices["cut_off"]
+    posting, due, original = file_date, dates["due_date"] or file_date, ""
+    if not has_year(posting):
+        if not post_at_cutoff:
+            return _problem(
+                invoices,
+                CAUSE_NO_FISCAL_YEAR,
+                "posting_date",
+                cells.get("posting_date", ""),
+                _("The invoice date is in no fiscal year of {0}.").format(invoices["company"]),
+            )
+        # ERPNext refuses a due date before the posting date, so an earlier one moves up too.
+        posting, original = invoices["cut_off"], file_date
+        due = max(due, posting)
+    if due < posting:
+        return _problem(
+            invoices,
+            CAUSE_DUE_BEFORE,
+            "due_date",
+            cells.get("due_date", ""),
+            _("The due date is before the invoice date."),
+        )
+    return Ready(
+        line.row,
+        party.name,
+        amount,
+        posting,
+        due,
+        cells.get("invoice_number", ""),
+        cells.get("item_name", ""),
+        original,
+    )
+
+
+def _number_used(invoices: Dict[str, Any], line: Ready) -> bool:
+    if invoices["invoice_type"] == "Sales":
+        return bool(frappe.db.exists(invoices["doctype"], line.invoice_number))
+    return bool(
+        frappe.db.exists(
+            invoices["doctype"],
+            {"supplier": line.party, "bill_no": line.invoice_number, "docstatus": ["<", 2]},
+        )
+    )
+
+
+def _post_at_cutoff(session) -> bool:
+    rules = frappe.parse_json(session.transformation_rules or "{}") or {}
+    return bool(rules.get("post_at_cutoff"))
+
+
+def _check_lines(session, checker: _InvoiceChecker) -> List[Ready]:
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    invoices, excluded = settings(session), dry_run._excluded_rows(session)
+    post, has_year, imported = (
+        _post_at_cutoff(session),
+        _fiscal_years(invoices["company"]),
+        imported_keys(session),
+    )
+    ready, first_of, counts = [], {}, {}
+    for line in read_lines(session):
+        base = invoice_key(invoices, line.cells)
+        numbered = bool(line.cells.get("invoice_number"))
+        counts[base] = counts.get(base, 0) + 1
+        key = base if numbered else f"{base}#{counts[base]}"  # the same invoice twice without numbers
+        if line.row in excluded:
+            checker.mark(line.row, "excluded")
+            continue
+        if key in imported:
+            checker.mark(line.row, "imported")
+            continue
+        first = first_of.setdefault(key, line.row) if numbered else line.row
+        outcome = _line_problem(line, invoices, post, has_year)
+        if not isinstance(outcome, Ready):
+            checker.fail(line.row, *outcome)
+            continue
+        outcome.key = key
+        if first != line.row:
+            checker.fail(
+                line.row,
+                *_problem(
+                    invoices,
+                    CAUSE_NUMBER_TWICE,
+                    "invoice_number",
+                    outcome.invoice_number,
+                    _("The same invoice number is in row {0} too.").format(first),
+                ),
+            )
+            continue
+        if numbered and _number_used(invoices, outcome):
+            checker.fail(
+                line.row,
+                *_problem(
+                    invoices,
+                    CAUSE_NUMBER_USED,
+                    "invoice_number",
+                    outcome.invoice_number,
+                    _("ERPNext already has this invoice number."),
+                ),
+            )
+            continue
+        ready.append(outcome)
+    return ready
+
+
+def _totals(invoices: Dict[str, Any], ready: List[Ready]) -> Dict[str, Any]:
+    return {
+        "invoice_type": invoices["invoice_type"],
+        "party_type": invoices["party_type"],
+        "rows": len(ready),
+        "parties": len({line.party for line in ready}),
+        "total_amount": flt(sum(line.amount for line in ready), _precision(invoices)),
+    }
+
+
+def ready_lines(session) -> List[Ready]:
+    """The lines that pass the row checks now."""
+    return _check_lines(session, _InvoiceChecker(settings(session)["doctype"]))
+
+
+def imported_keys(session) -> set:
+    """The keys of the rows whose invoice an earlier import of this session made and is still
+    submitted. Task 6 stores them in ``created``."""
+    created = settings(session).get("created") or {}
+    if not created:
+        return set()
+    submitted = set(
+        frappe.get_all(
+            settings(session)["doctype"],
+            filters={"name": ["in", list(created)], "docstatus": 1},
+            pluck="name",
+        )
+    )
+    return {entry["key"] for name, entry in created.items() if name in submitted}
+
+
+# -- the invoice, as ERPNext's tool makes it ---------------------------------------------------
+
+
+def build_invoice(invoices: Dict[str, Any], line: Ready):
+    """An unsaved opening invoice of ``line``, built by ERPNext's Opening Invoice Creation Tool's
+    own code: one line of the outstanding amount against the Temporary Opening account, no stock,
+    no taxes, rounding off. The tool itself is never saved."""
+    tool = frappe.new_doc(TOOL)
+    tool.company = invoices["company"]
+    tool.invoice_type = invoices["invoice_type"]
+    tool.create_missing_party = 0  # parties are created with the user's permissions, by create_document
+    tool.append(
+        "invoices",
+        {
+            "party": line.party,
+            "qty": 1,
+            "outstanding_amount": line.amount,
+            "posting_date": line.posting_date,
+            "due_date": line.due_date,
+            "item_name": line.item_name or None,
+            "temporary_opening_account": invoices["temporary_opening_account"],
+            "invoice_number": line.invoice_number or None,
+        },
+    )
+    data = tool.get_invoices()[0]
+    data.pop("invoice_number", None)  # the tool passes it as the name; it isn't an invoice field
+    if invoices["invoice_type"] == "Purchase" and line.invoice_number:
+        data["bill_no"] = line.invoice_number
+        data["bill_date"] = line.original_date or line.posting_date
+    if line.original_date:
+        data["remarks"] = _("Opening invoice {0}, dated {1} in the old system.").format(
+            line.invoice_number, line.original_date
+        )
+    doc = frappe.get_doc(data)
+    doc.flags.ignore_mandatory = True  # as ERPNext's tool inserts it
+    doc.flags.dont_auto_add_taxes = True  # the outstanding amount already includes tax
+    return doc
+
+
+def make_invoice(invoices: Dict[str, Any], line: Ready):
+    """Insert and submit the opening invoice of ``line``. The caller holds the savepoint."""
+    doc = build_invoice(invoices, line)
+    sales_number = line.invoice_number if invoices["invoice_type"] == "Sales" else None
+    doc.insert(set_name=sales_number or None)
+    doc.submit()
+    return doc
+
+
+SAVEPOINT = "fac_opening_invoice_check"
+
+
+def _invoice_error(invoices: Dict[str, Any], line: Ready) -> Optional[Exception]:
+    """None when ERPNext accepts ``line``'s invoice, inserted and submitted, else why not. Rolled back."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    frappe.clear_messages()
+    with dry_run.held_back():
+        frappe.db.savepoint(SAVEPOINT)
+        try:
+            make_invoice(invoices, line)
+            return None
+        except Exception as e:
+            return e
+        finally:
+            frappe.db.rollback(save_point=SAVEPOINT)
+            frappe.clear_messages()
+
+
+def _erpnext_check(session, ready: List[Ready], checker: _InvoiceChecker) -> List[Ready]:
+    """Each ready row's invoice, inserted and submitted inside a savepoint and rolled back:
+    ERPNext's own validation, GL entries included. One group per message ERPNext gives."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    invoices, passed = settings(session), []
+    for line in ready:
+        error = _invoice_error(invoices, line)
+        if error is None:
+            passed.append(line)
+            continue
+        message, kind = dry_run._message_of(error), type(error).__name__
+        checker.fail(
+            line.row,
+            (dry_run.CAUSE_REJECTED, kind, message),
+            {"cause": dry_run.CAUSE_REJECTED, "error": kind, "message": message},
+        )
+    return passed

@@ -214,6 +214,114 @@ class TestSetup(OpeningInvoicesCase):
         self.assertIs(dry_run.special_engine(self._doc(session)), opening_invoices)
 
 
+class TestCheck(OpeningInvoicesCase):
+    def _line(self, party, number, date, due, amount):
+        return f"{party},{number},{date},{due},{amount}"
+
+    def test_ready_rows_and_totals_and_nothing_written(self):
+        before = frappe.db.count("Sales Invoice")
+        session, result = self._ready(
+            [
+                self._line(self.customer, self._number(1), self.date, self.date, '"1,250.50"'),
+                self._line(self.customer2, self._number(2), self.date, "", "100"),
+            ]
+        )
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result)
+        totals = result["opening_invoices"]
+        self.assertEqual((totals["rows"], totals["parties"], totals["total_amount"]), (2, 2, 1350.5))
+        self.assertEqual(self._doc(session).status, "Ready to Import")
+        self.assertEqual(frappe.db.count("Sales Invoice"), before)
+
+    def test_party_found_by_customer_name_when_named_otherwise(self):
+        renamed = frappe.rename_doc("Customer", self.customer2, f"CUST-{self.tag}", force=True)
+        title = frappe.db.get_value("Customer", renamed, "customer_name")
+        session = self._session([self._line(title, self._number(1), self.date, "", "10")])
+        self._setup(session)
+        self.assertEqual(opening_invoices.ready_lines(self._doc(session))[0].party, renamed)
+
+    def test_each_cause_is_one_group(self):
+        disabled = self._party("Customer", f"OI Off {self.tag}", disabled=1)
+        other = "USD" if self.currency != "USD" else "EUR"
+        foreign = self._party("Customer", f"OI Foreign {self.tag}", default_currency=other)
+        session, result = self._ready(
+            [
+                self._line(f"Nobody {self.tag}", self._number(1), self.date, "", "10"),
+                self._line(disabled, self._number(2), self.date, "", "10"),
+                self._line(foreign, self._number(3), self.date, "", "10"),
+                self._line(self.customer, self._number(4), self.date, "", "0"),
+                self._line(self.customer, self._number(5), self.date, "", "-5"),
+                self._line(self.customer, self._number(6), "1990-01-15", "", "10"),
+                self._line(self.customer, self._number(7), self.date, add_days(self.date, -1), "10"),
+                self._line(self.customer, self._number(8), self.date, "", "10"),
+                self._line(self.customer2, self._number(8), self.date, "", "20"),
+                self._line(self.customer, self._number(9), "soon", "", "10"),
+                self._line(self.customer, self._number(10), self.date, "", "ten"),
+                ",,,,1000",
+            ]
+        )
+        groups = self._groups(result)
+        self.assertEqual(groups[dry_run.CAUSE_MISSING_LINK]["value"], f"Nobody {self.tag}")
+        self.assertEqual(groups[opening_invoices.CAUSE_PARTY_DISABLED]["value"], disabled)
+        self.assertEqual(groups[opening_invoices.CAUSE_FOREIGN_CURRENCY]["count"], 1)
+        self.assertEqual(groups[opening_invoices.CAUSE_NOT_POSITIVE]["count"], 2)  # zero and negative
+        self.assertEqual([e["row"] for e in groups[opening_invoices.CAUSE_NO_FISCAL_YEAR]["examples"]], [7])
+        self.assertEqual([e["row"] for e in groups[opening_invoices.CAUSE_DUE_BEFORE]["examples"]], [8])
+        self.assertEqual([e["row"] for e in groups[opening_invoices.CAUSE_NUMBER_TWICE]["examples"]], [10])
+        self.assertEqual([e["row"] for e in groups[dry_run.CAUSE_BAD_DATE]["examples"]], [11])
+        self.assertEqual([e["row"] for e in groups[dry_run.CAUSE_BAD_VALUE]["examples"]], [12])
+        self.assertEqual(
+            [e["row"] for e in groups[opening_invoices.opening_stock.CAUSE_TOTALS_ROW]["examples"]], [13]
+        )
+        self.assertEqual(result["ready"], 1)  # only row 9
+
+    def test_number_already_used(self):
+        session = self._session([self._line(self.customer, self._number(1), self.date, "", "10")])
+        self._setup(session)
+        line = opening_invoices.ready_lines(self._doc(session))[0]
+        opening_invoices.make_invoice(opening_invoices.settings(self._doc(session)), line)
+        result = self._check(session)
+        self.assertEqual(
+            [e["row"] for e in self._groups(result)[opening_invoices.CAUSE_NUMBER_USED]["examples"]], [2]
+        )
+
+    def test_suppliers_may_share_a_bill_number_but_one_supplier_may_not(self):
+        session, result = self._ready(
+            [
+                self._line(self.supplier, "INV-1", self.date, "", "10"),
+                self._line(self.supplier2, "INV-1", self.date, "", "20"),
+                self._line(self.supplier, "INV-1", self.date, "", "30"),
+            ],
+            invoice_type="Purchase",
+        )
+        self.assertEqual(result["ready"], 2, result)
+        self.assertEqual(
+            [e["row"] for e in self._groups(result)[opening_invoices.CAUSE_NUMBER_TWICE]["examples"]], [4]
+        )
+
+    def test_rejected_by_erpnext_is_one_group_and_rolled_back(self):
+        frappe.get_doc(
+            {
+                "doctype": "Accounting Period",
+                "period_name": f"OI Closed {self.tag}",
+                "company": self.company,
+                "start_date": self.date,
+                "end_date": self.date,
+                "closed_documents": [{"document_type": "Sales Invoice", "closed": 1}],
+            }
+        ).insert()
+        before = frappe.db.count("GL Entry")
+        session, result = self._ready(
+            [
+                self._line(self.customer, self._number(1), self.date, "", "10"),
+                self._line(self.customer2, self._number(2), self.date, "", "20"),
+            ]
+        )
+        rejected = self._groups(result)[dry_run.CAUSE_REJECTED]
+        self.assertEqual(rejected["count"], 2)
+        self.assertEqual(result["ready"], 0)
+        self.assertEqual(frappe.db.count("GL Entry"), before)
+
+
 class TestReadingLines(OpeningInvoicesCase):
     def test_dates_as_files_write_them(self):
         self.assertEqual(opening_invoices.date_of("2026-03-04"), "2026-03-04")  # ISO is never day-first
@@ -222,6 +330,15 @@ class TestReadingLines(OpeningInvoicesCase):
         self.assertIsNone(opening_invoices.date_of("  "))
         with self.assertRaises(ValueError):
             opening_invoices.date_of("soon")
+
+    def test_ambiguous_date_follows_the_site_format(self):
+        for site_format, expected in (("dd-mm-yyyy", "2026-03-04"), ("mm-dd-yyyy", "2026-04-03")):
+            with patch("frappe.utils.data.get_user_date_format", return_value=site_format):
+                self.assertEqual(opening_invoices.date_of("04/03/2026"), expected)
+
+    def test_impossible_iso_date_is_refused(self):
+        with self.assertRaises(ValueError):
+            opening_invoices.date_of("2026-13-45")
 
     def test_totals_rows(self):
         self.assertTrue(opening_invoices.is_totals_row({"party": "Grand Total", "outstanding_amount": "500"}))
@@ -236,6 +353,7 @@ class TestReadingLines(OpeningInvoicesCase):
         self.assertEqual(opening_invoices.invoice_key(purchase, numbered), "acme|inv-1")
         bare = {"party": "Acme", "posting_date": "2026-01-01", "outstanding_amount": "1,250"}
         self.assertEqual(opening_invoices.invoice_key(sales, bare), "acme|2026-01-01|1,250")
+        self.assertEqual(opening_invoices.invoice_key(purchase, bare), "acme|2026-01-01|1,250")
 
     def test_lines_have_every_mapped_field_with_value_maps_applied(self):
         session = self._session(
