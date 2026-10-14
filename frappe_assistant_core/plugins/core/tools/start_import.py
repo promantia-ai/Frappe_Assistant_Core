@@ -73,6 +73,21 @@ class StartImport(BaseTool):
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
+        from frappe_assistant_core.plugins.core.import_dry_run import special_engine
+
+        engine = special_engine(session)
+        if engine:
+            tool = (
+                "import_opening_stock"
+                if engine.__name__.endswith("opening_stock")
+                else "import_opening_invoices"
+            )
+            return {
+                "success": False,
+                "error": _("This session is imported with {0}, not through Data Import.").format(tool),
+                "session": session_name,
+            }
+
         try:
             import_run.check_card(
                 session, arguments.get("doctype"), arguments.get("rows"), arguments.get("import_type")

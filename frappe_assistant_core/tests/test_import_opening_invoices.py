@@ -739,3 +739,132 @@ class TestParties(OpeningInvoicesCase):
         reply = self._create(session, [{"doctype": "Customer", "data": data}])
         self.assertFalse(reply["success"])
         self.assertIn("already exists", str(reply))
+
+
+class TestCreating(OpeningInvoicesCase):
+    def _lines(self, n=2, invoice_type="Sales"):
+        party = self.customer if invoice_type == "Sales" else self.supplier
+        return [f"{party},{self._number(i)},{self.date},,{10 * i}" for i in range(1, n + 1)]
+
+    def _import(self, session, result, **changes):
+        return self._run("import_opening_invoices", self._card(session, result, **changes))
+
+    def test_imports_sales_invoices_named_by_their_numbers(self):
+        session, result = self._ready(self._lines(2))
+        reply = self._import(session, result)
+        self.assertTrue(reply["success"], reply)
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Completed")
+        invoice = frappe.get_doc("Sales Invoice", self._number(2))
+        self.assertEqual((invoice.docstatus, invoice.is_opening, invoice.customer), (1, "Yes", self.customer))
+        self.assertEqual(invoice.outstanding_amount, 20)
+        self.assertEqual(invoice.items[0].income_account, self.temporary)
+        self.assertEqual(
+            {r.record_name for r in doc.created_records if r.record_doctype == "Sales Invoice"},
+            {self._number(1), self._number(2)},
+        )
+
+    def test_purchase_keeps_the_bill_number(self):
+        session, result = self._ready(self._lines(1, "Purchase"), invoice_type="Purchase")
+        self.assertTrue(self._import(session, result)["success"])
+        name = next(r.record_name for r in self._doc(session).created_records)
+        bill = frappe.db.get_value(
+            "Purchase Invoice", name, ["bill_no", "bill_date", "docstatus"], as_dict=True
+        )
+        self.assertEqual((bill.bill_no, str(bill.bill_date), bill.docstatus), (self._number(1), self.date, 1))
+        self.assertNotEqual(name, self._number(1))
+
+    def test_old_invoice_posted_at_cut_off_keeps_its_date(self):
+        session, result = self._ready(
+            [f"{self.supplier},{self._number(1)},1990-01-15,,10"], invoice_type="Purchase"
+        )
+        group = self._groups(result)[opening_invoices.CAUSE_NO_FISCAL_YEAR]
+        result = self._run(
+            "dry_run_import",
+            {"session": session, "fixes": [{"group": group["id"], "action": "post_at_cutoff"}]},
+        )["result"]
+        self.assertTrue(self._import(session, result)["success"])
+        name = next(r.record_name for r in self._doc(session).created_records)
+        bill = frappe.db.get_value(
+            "Purchase Invoice", name, ["posting_date", "bill_date", "remarks"], as_dict=True
+        )
+        self.assertEqual((str(bill.posting_date), str(bill.bill_date)), (self.date, "1990-01-15"))
+        self.assertIn("1990-01-15", bill.remarks)
+
+    def test_card_must_match_the_check(self):
+        session, result = self._ready(self._lines(2))
+        reply = self._import(session, result, total_amount=999)
+        self.assertFalse(reply["success"])
+        self.assertIn("30", frappe.as_json(reply))
+        self.assertFalse(frappe.db.exists("Sales Invoice", self._number(1)))
+
+    def test_changed_since_the_check_is_refused(self):
+        session, result = self._ready(self._lines(2))
+        doc = self._doc(session)
+        doc.excluded_rows = frappe.as_json([2])
+        doc.save()
+        reply = self._import(session, result)
+        self.assertFalse(reply["success"])
+        self.assertIn("dry_run_import", frappe.as_json(reply))
+
+    def test_calling_again_creates_nothing(self):
+        session, result = self._ready(self._lines(2))
+        self._import(session, result)
+        count = frappe.db.count("Sales Invoice", {"customer": self.customer})
+        reply = self._import(session, result)
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(frappe.db.count("Sales Invoice", {"customer": self.customer}), count)
+
+    def test_one_refused_invoice_does_not_stop_the_rest(self):
+        session, result = self._ready(self._lines(3))
+        real = opening_invoices.make_invoice
+
+        def refuse_second(invoices, line):
+            if line.invoice_number == self._number(2):
+                frappe.throw("Refused for the test")
+            return real(invoices, line)
+
+        with patch.object(opening_invoices, "make_invoice", side_effect=refuse_second):
+            reply = self._import(session, result)
+        self.assertTrue(reply["success"], reply)
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Partially Completed")
+        self.assertTrue(frappe.db.exists("Sales Invoice", self._number(3)))
+        self.assertFalse(frappe.db.exists("Sales Invoice", self._number(2)))
+        failed = opening_invoices.settings(doc)["failed"]
+        self.assertIn("Refused for the test", failed["3"]["message"])
+
+        result = self._check(session)  # the two made are "already imported", by invoice number
+        self.assertEqual((result["imported"], result["ready"]), (2, 1), result)
+        self.assertTrue(self._import(session, result)["success"])
+        self.assertEqual(self._doc(session).status, "Completed")
+        self.assertTrue(frappe.db.exists("Sales Invoice", self._number(2)))
+
+    def test_unnumbered_invoices_are_matched_by_party_date_and_amount(self):
+        lines = [f"{self.customer},,{self.date},,10", f"{self.customer},,{self.date},,10"]
+        session, result = self._ready(lines)
+        self.assertEqual(result["ready"], 2)  # the same twice is two invoices
+        self._import(session, result)
+        result = self._check(session)
+        self.assertEqual((result["imported"], result["ready"]), (2, 0), result)
+
+    def test_above_the_limit_runs_as_a_job(self):
+        session, result = self._ready(self._lines(3))
+        with patch.object(opening_invoices, "REQUEST_LIMIT", 1), patch.object(
+            opening_invoices, "COMMIT_EVERY", 2
+        ):
+            reply = self._import(session, result)
+        self.assertTrue(reply["success"], reply)
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Completed")
+        self.assertEqual(len(opening_invoices.settings(doc)["created"]), 3)
+        self.assertEqual(frappe.parse_json(doc.progress)["done"], 3)
+
+    def test_start_import_refuses_an_opening_invoices_session(self):
+        session, result = self._ready(self._lines(1))
+        reply = self._run(
+            "start_import",
+            {"session": session, "doctype": "Sales Invoice", "rows": 1, "import_type": "Insert New Records"},
+        )
+        self.assertFalse(reply["success"])
+        self.assertIn("import_opening_invoices", frappe.as_json(reply))

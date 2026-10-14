@@ -729,3 +729,220 @@ def party_problem(doctype: str, data: Dict[str, Any]) -> Optional[str]:
                 value, _(link), ", ".join(leaves)
             )
     return None
+
+
+# -- creating --------------------------------------------------------------------------------
+
+JOB = "fac_opening_invoices::{0}"
+CREATE_SAVEPOINT = "fac_opening_invoice_create"
+RECORD_DOCTYPE = "FAC Import Session Record"
+DONE = ("Importing", "Completed", "Partially Completed", "Failed")
+
+
+def check_card(session, company, invoice_type, rows, total_amount) -> None:
+    """The approval card shows what FACO passed: refuse unless it is what the last check found."""
+    summary = frappe.parse_json(session.validation_summary or "{}") or {}
+    totals, invoices = summary.get("opening_invoices") or {}, settings(session)
+    precision = _precision(invoices)
+    checked = (
+        invoices.get("company"),
+        invoices.get("invoice_type"),
+        summary.get("ready"),
+        flt(totals.get("total_amount"), precision),
+    )
+    try:
+        asked = (cstr(company).strip(), cstr(invoice_type).strip(), int(rows), flt(total_amount, precision))
+    except (TypeError, ValueError):
+        asked = None
+    if asked != checked:
+        raise OpeningInvoicesProblem(
+            _(
+                "The last check found {2} {1} invoices for {0}, {3} in all. Pass those, so the approval "
+                "card shows them."
+            ).format(*checked)
+        )
+
+
+def _message_of_create(e: Exception) -> str:
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    return _("ERPNext refused the invoice: {0}").format(dry_run._message_of(e))
+
+
+def _progress(state: str, done: int, total: int) -> str:
+    return frappe.as_json(
+        {
+            "step": "Import",
+            "state": state,
+            "done": done,
+            "total": total,
+            "updated_on": str(frappe.utils.now_datetime()),
+        }
+    )
+
+
+def create(session) -> None:
+    """Create and submit the ready rows' invoices, each all or nothing: in this request up to
+    REQUEST_LIMIT, else in a background job. Rows an earlier import made are already left out by
+    the check, so calling again never duplicates."""
+    from frappe_assistant_core.plugins.core import import_fixes
+
+    if session.status in DONE:
+        return  # running, or done: the caller reports
+    if session.status != "Ready to Import" or not import_fixes.checked_as_is(session):
+        raise OpeningInvoicesProblem(
+            _(
+                "The sheet isn't ready, or it changed since its last check. Check it with dry_run_import first."
+            )
+        )
+    lines = ready_lines(session)
+    expected = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
+    if len(lines) != expected:
+        raise OpeningInvoicesProblem(
+            _(
+                "The invoices changed since the last check: {0} rows are ready now, not {1}. Check it "
+                "again with dry_run_import."
+            ).format(len(lines), expected)
+        )
+    options = frappe.parse_json(session.template_options or "{}") or {}
+    options["opening_invoices"]["failed"] = {}  # this import's failures replace the last one's
+    session.template_options = frappe.as_json(options)
+    session.status = "Importing"
+    session.progress = _progress("queued", 0, len(lines))
+    session.save()
+    if len(lines) > REQUEST_LIMIT:
+        frappe.enqueue(
+            f"{__name__}.create_job",
+            queue="long",
+            timeout=4 * 60 * 60,
+            job_id=JOB.format(session.name),
+            deduplicate=True,
+            enqueue_after_commit=True,
+            now=bool(frappe.flags.in_test),
+            session_name=session.name,
+            user=frappe.session.user,
+        )
+        return
+    _import(session.name, lines, commit=False)  # the request commits when it returns
+
+
+def create_job(session_name: str, user: str) -> None:
+    """Background job: the invoices, as the user who approved them."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    frappe.set_user(user)
+    try:
+        session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+        _import(session_name, ready_lines(session), commit=True)
+    except Exception as e:
+        if frappe.flags.in_test:
+            raise
+        frappe.db.rollback()  # back to the last batch committed, with its record on the session
+        _stopped(session_name, _message_of_create(e))
+        frappe.db.commit()
+        frappe.log_error(title=_("FAC opening invoices import failed"), message=frappe.get_traceback())
+
+
+def _record(session_name: str, position: int, doctype: str, name: str) -> None:
+    """List an invoice on the session (Created Records) without saving the whole session again."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    frappe.get_doc(
+        {
+            "doctype": RECORD_DOCTYPE,
+            "parent": session_name,
+            "parenttype": dry_run.SESSION_DOCTYPE,
+            "parentfield": "created_records",
+            "idx": position,
+            "record_doctype": doctype,
+            "record_name": name,
+        }
+    ).db_insert()
+
+
+def _keep(session_name: str, created: Dict[str, Any], failed: Dict[str, Any], done: int, total: int) -> None:
+    """What this import made and refused so far, on the session, in the same transaction as the invoices."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    options = frappe.parse_json(
+        frappe.db.get_value(dry_run.SESSION_DOCTYPE, session_name, "template_options")
+    )
+    options["opening_invoices"]["created"] = created
+    options["opening_invoices"]["failed"] = failed
+    frappe.db.set_value(
+        dry_run.SESSION_DOCTYPE,
+        session_name,
+        {"template_options": frappe.as_json(options), "progress": _progress("running", done, total)},
+        update_modified=False,
+    )
+
+
+def _import(session_name: str, lines: List[Ready], commit: bool) -> None:
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    invoices = settings(session)
+    created, failed = dict(invoices.get("created") or {}), {}
+    position, total = len(session.created_records), len(lines)
+    for done, line in enumerate(lines, start=1):
+        frappe.db.savepoint(CREATE_SAVEPOINT)
+        try:
+            doc = make_invoice(invoices, line)
+            position += 1
+            _record(session_name, position, invoices["doctype"], doc.name)
+            created[doc.name] = {"row": line.row, "key": line.key, "amount": line.amount, "party": line.party}
+        except Exception as e:
+            frappe.db.rollback(save_point=CREATE_SAVEPOINT)
+            failed[str(line.row)] = {
+                "message": _message_of_create(e),
+                "error": type(e).__name__,
+                "amount": line.amount,
+                "party": line.party,
+            }
+        finally:
+            frappe.clear_messages()
+        if done % COMMIT_EVERY == 0 or done == total:
+            _keep(session_name, created, failed, done, total)
+            if commit and not frappe.flags.in_test:
+                frappe.db.commit()
+    _finish(session_name, total, failed)
+    if commit and not frappe.flags.in_test:
+        frappe.db.commit()
+
+
+def _finish(session_name: str, total: int, failed: Dict[str, Any]) -> None:
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    made = total - len(failed)
+    if not failed:
+        session.status = "Completed"
+    else:
+        session.status = "Partially Completed" if settings(session).get("created") else "Failed"
+    session.progress = _progress("done", total, total)
+    session.log_step(
+        "Import",
+        "Success" if not failed else ("Warning" if made else "Failed"),
+        _("{0} opening invoices created, {1} rows refused.").format(made, len(failed)),
+        rows_ok=made,
+        rows_failed=len(failed),
+    )
+    session.save()
+
+
+def _stopped(session_name: str, reason: str) -> None:
+    """A background import that stopped before its end: what it committed is in."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session.status = "Partially Completed" if settings(session).get("created") else "Failed"
+    session.log_step(
+        "Import",
+        "Failed",
+        _("The import stopped: {0} Check the file again to import the rest.").format(reason),
+    )
+    session.save()
+
+
+def report(session) -> Dict[str, Any]:
+    return {"status": session.status, "invoices": list(settings(session).get("created") or {})}
