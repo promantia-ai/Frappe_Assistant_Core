@@ -10,6 +10,7 @@ import frappe
 from frappe.utils import nowdate
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
+from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
 HEADER = "Item,Warehouse,Qty,Rate"
@@ -189,8 +190,6 @@ class TestOpeningStockSetup(OpeningStockCase):
         self.assertIn("warehouse", frappe.as_json(response))
 
     def test_a_user_who_cannot_submit_stock_reconciliation_is_refused(self):
-        from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
-
         frappe.set_user(self.make_throwaway_user("clerk", roles=("Sales User",)))
 
         problem = opening_stock.setup_problem(self.company, self.date, self.temporary)
@@ -198,3 +197,30 @@ class TestOpeningStockSetup(OpeningStockCase):
         self.assertIn("can't do both", problem)
         frappe.set_user("Administrator")
         self.assertIsNone(opening_stock.setup_problem(self.company, self.date, self.temporary))
+
+
+class TestReadingLines(OpeningStockCase):
+    def test_numbers_are_read_the_accountants_way(self):
+        self.assertEqual(opening_stock.number("1,250.50"), 1250.5)
+        self.assertEqual(opening_stock.number("(12)"), -12)
+        self.assertEqual(opening_stock.number(" 7 "), 7)
+        self.assertIsNone(opening_stock.number(""))
+        with self.assertRaises(ValueError):
+            opening_stock.number("ten")
+
+    def test_a_totals_row_is_recognised(self):
+        self.assertTrue(opening_stock.is_totals_row({"item_code": "Grand Total", "qty": "40"}))
+        self.assertTrue(opening_stock.is_totals_row({"item_code": "", "qty": "40"}))
+        self.assertTrue(opening_stock.is_totals_row({"item_code": "Sub-total", "qty": "4"}))
+        self.assertFalse(opening_stock.is_totals_row({"item_code": "Total Care Kit", "qty": "4"}))
+        self.assertFalse(opening_stock.is_totals_row({"item_code": "", "qty": ""}))
+
+    def test_lines_keep_the_spreadsheet_row_numbers_and_skip_blank_lines(self):
+        session = self._session([f"{self.item},{self.stores},5,10", ",,,", f"{self.item2},{self.shop},3,4"])
+        self._setup(session)
+
+        lines = opening_stock.read_lines(self._doc(session))
+
+        self.assertEqual([line.row for line in lines], [2, 4])
+        self.assertEqual(lines[1].cells["item_code"], self.item2)
+        self.assertEqual(lines[1].cells["qty"], "3")

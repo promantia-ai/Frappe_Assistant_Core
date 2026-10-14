@@ -16,14 +16,18 @@ are the import's own; this module adds the setup, the row checks, the creation a
 An opening-stock session keeps its settings in ``template_options.opening_stock``.
 """
 
-from typing import Any, Dict, Optional
+import re
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from typing import Any, Dict, List, Optional
 
 import erpnext
 import frappe
 from frappe import _
-from frappe.utils import getdate
+from frappe.utils import cstr, getdate
 
 from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
+from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
 
 TARGET = "Stock Reconciliation"
 ITEM_TABLE = "Stock Reconciliation Item"
@@ -157,3 +161,50 @@ def setup(
         ),
     )
     return {"opening_stock": stock, "column_to_field_map": mapping}
+
+
+# -- reading the file ------------------------------------------------------------------------
+
+TOTALS = re.compile(r"^\s*(grand\s*|sub\s*-?\s*)?totals?\s*:?\s*$", re.IGNORECASE)
+
+
+@dataclass
+class Line:
+    row: int
+    cells: Dict[str, str] = dataclass_field(default_factory=dict)
+
+
+def number(text) -> Optional[float]:
+    """A number as accountants write it: '1,250.50', '(12)' for -12. None when blank."""
+    text = cstr(text).strip().replace(",", "").replace(" ", "")
+    if not text:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    value = float(text.strip("()"))
+    return -value if negative else value
+
+
+def is_totals_row(cells: Dict[str, str]) -> bool:
+    item = cstr(cells.get("item_code")).strip()
+    has_number = any(cstr(cells.get(f)).strip() for f in ("qty", "valuation_rate", "amount"))
+    return has_number and (not item or bool(TOTALS.match(item)))
+
+
+def read_lines(session) -> List[Line]:
+    """Every non-blank row of the session's sheet, as field → text, with value maps applied."""
+    from frappe_assistant_core.plugins.core.import_dry_run import column_to_field_map
+    from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
+
+    rows = apply_value_maps(session, read_sheet_rows(readable_session_file(session), session.sheet or None))
+    positions = {
+        int(position): target.split(".", 1)[1]
+        for position, target in column_to_field_map(session).items()
+        if str(position).isdigit() and target.startswith("items.")
+    }
+    positions.update({int(p): f for f, p in (settings(session).get("columns") or {}).items()})
+    lines = []
+    for index, row in enumerate(rows[1:], start=2):
+        cells = {f: cstr(row[p]).strip() if p < len(row) else "" for p, f in positions.items()}
+        if any(cells.values()):
+            lines.append(Line(index, cells))
+    return lines
