@@ -13,6 +13,7 @@ from frappe.utils import add_days, nowdate
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+from frappe_assistant_core.plugins.core import import_fixes
 from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
@@ -653,3 +654,88 @@ class TestParties(OpeningInvoicesCase):
         reply = self._create(session, [{"doctype": "Supplier", "data": entry["data"]}])
         self.assertTrue(reply["success"], reply)
         self.assertEqual(self._check(session)["ready"], 1)
+
+    def _set_default(self, field, value):
+        frappe.db.set_single_value("Selling Settings", field, value)
+
+    def test_plan_says_what_to_choose_when_a_default_is_a_group_node(self):
+        group = frappe.db.get_value("Customer Group", {"is_group": 1})
+        leaf = frappe.db.get_value("Customer Group", {"is_group": 0})
+        before = frappe.db.get_single_value("Selling Settings", "customer_group")
+        self._set_default("customer_group", group)
+        try:
+            session, result = self._missing(f"Pick Cust {self.tag}")
+            entry = result["masters_plan"][0]
+            self.assertNotIn("customer_group", entry["data"])
+            self.assertIn(leaf, entry["choose"]["customer_group"])
+            self.assertLessEqual(len(entry["choose"]["customer_group"]), 20)
+            self.assertEqual(
+                set(entry["choose"]), {"customer_group", "territory"} - set(entry["data"]), entry
+            )
+            for name in entry["choose"]["customer_group"]:
+                self.assertFalse(frappe.db.get_value("Customer Group", name, "is_group"))
+        finally:
+            self._set_default("customer_group", before)
+
+    def test_plan_has_no_choose_when_every_default_is_a_leaf(self):
+        group_leaf = frappe.db.get_value("Customer Group", {"is_group": 0})
+        territory_leaf = frappe.db.get_value("Territory", {"is_group": 0})
+        before = {
+            f: frappe.db.get_single_value("Selling Settings", f) for f in ("customer_group", "territory")
+        }
+        self._set_default("customer_group", group_leaf)
+        self._set_default("territory", territory_leaf)
+        try:
+            session, result = self._missing(f"Leaf Cust {self.tag}")
+            entry = result["masters_plan"][0]
+            self.assertEqual(entry["data"]["customer_group"], group_leaf)
+            self.assertEqual(entry["data"]["territory"], territory_leaf)
+            self.assertNotIn("choose", entry)
+            reply = self._run(
+                "create_document",
+                {"documents": [{"doctype": "Customer", "data": entry["data"]}], "import_session": session},
+            )
+            self.assertTrue(reply["success"], reply)
+        finally:
+            for field, value in before.items():
+                self._set_default(field, value)
+
+    def test_supplier_plan_chooses_only_the_supplier_group(self):
+        group = frappe.db.get_value("Supplier Group", {"is_group": 1})
+        before = frappe.db.get_single_value("Buying Settings", "supplier_group")
+        frappe.db.set_single_value("Buying Settings", "supplier_group", group)
+        try:
+            session, result = self._missing(f"Pick Supp {self.tag}", invoice_type="Purchase")
+            entry = result["masters_plan"][0]
+            self.assertNotIn("supplier_group", entry["data"])
+            self.assertEqual(set(entry["choose"]), {"supplier_group"})
+        finally:
+            frappe.db.set_single_value("Buying Settings", "supplier_group", before)
+
+    def test_cannot_create_a_party_without_permission_or_when_the_site_forbids_it(self):
+        session, _result = self._missing(f"New Cust {self.tag}")
+        doc = self._doc(session)
+        self.assertEqual(import_fixes.cannot_create("Customer", doc), "")
+        real = frappe.has_permission
+
+        def no_create(doctype=None, ptype="read", *args, **kwargs):
+            if doctype == "Customer" and ptype == "create":
+                return False
+            return real(doctype, ptype, *args, **kwargs)
+
+        with patch.object(opening_invoices.frappe, "has_permission", side_effect=no_create):
+            self.assertIn("aren't allowed", import_fixes.cannot_create("Customer", doc))
+        with patch.dict(frappe.conf, {"fac_import_never_create_doctypes": ["Customer"]}):
+            self.assertIn("doesn't allow", import_fixes.cannot_create("Customer", doc))
+
+    def test_a_party_not_in_the_plan_or_already_existing_is_refused(self):
+        session, result = self._missing(f"New Cust {self.tag}")
+        data = result["masters_plan"][0]["data"]
+        other = {**data, "customer_name": f"Other Cust {self.tag}"}
+        reply = self._create(session, [{"doctype": "Customer", "data": other}])
+        self.assertFalse(reply["success"])
+        self.assertIn("isn't one of the masters", str(reply))
+        self._party("Customer", f"New Cust {self.tag}")
+        reply = self._create(session, [{"doctype": "Customer", "data": data}])
+        self.assertFalse(reply["success"])
+        self.assertIn("already exists", str(reply))

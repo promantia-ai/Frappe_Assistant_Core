@@ -692,9 +692,19 @@ def party_data(doctype: str, value: str) -> Dict[str, Any]:
     data = {PARTY_NAME_FIELDS[doctype]: value, PARTY_KIND_FIELDS[doctype]: "Company"}
     for field, link in PARTY_LINKS[doctype].items():
         default = frappe.db.get_single_value(*DEFAULTS[field])
-        if _leaf(link, default):
+        if _leaf(link, default) and frappe.has_permission(link, "read", doc=default):
             data[field] = default
     return data
+
+
+def party_choices(doctype: str, data: Dict[str, Any]) -> Dict[str, List[str]]:
+    """For each group or territory ``data`` lacks (the Settings default is a group node, so
+    the plan can't propose it): the leaves the user may pick from, as far as they can read."""
+    return {
+        field: frappe.get_list(link, filters={"is_group": 0}, pluck="name", limit_page_length=20)
+        for field, link in PARTY_LINKS[doctype].items()
+        if field not in data
+    }
 
 
 def party_problem(doctype: str, data: Dict[str, Any]) -> Optional[str]:

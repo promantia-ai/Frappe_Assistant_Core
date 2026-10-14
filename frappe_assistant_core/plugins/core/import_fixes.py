@@ -517,6 +517,8 @@ def cannot_create(doctype: str, session=None) -> str:
     from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
 
     if opening_invoices.is_party(session, doctype):
+        if doctype in (frappe.conf.get("fac_import_never_create_doctypes") or []):
+            return _("this site doesn't allow creating it during an import")
         # A party may be named by a series: the rows find it by its customer or supplier name.
         if not frappe.has_permission(doctype, "create"):
             return _("you aren't allowed to create a {0}").format(_(doctype))
@@ -606,16 +608,18 @@ def masters_plan(session, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Every missing master the rows need that can be created: what FACO shows the user, as
     one table, before create_document creates them (documents, with import_session). One entry
     per record, with the rows it fixes and its ``data`` as create_document takes it."""
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
     plan: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for group in groups:
         group = _with_target(session, group)
         doctype = group.get("link_doctype")
         if group.get("cause") != dry_run.CAUSE_MISSING_LINK or not doctype or cannot_create(doctype, session):
             continue
-        from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
-
+        choose = {}
         if opening_invoices.is_party(session, doctype):
             parent, data = None, opening_invoices.party_data(doctype, group["value"])
+            choose = opening_invoices.party_choices(doctype, data)
         else:
             parent = default_parent(doctype)
             meta = frappe.get_meta(doctype)
@@ -633,6 +637,9 @@ def masters_plan(session, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "data": data,  # as create_document takes it in documents
             },
         )
+        if any(choose.values()):
+            # a group or territory the Settings default couldn't give: add one of these to data
+            entry["choose"] = choose
         entry["rows"] += group.get("count") or 0
     return list(plan.values())
 
