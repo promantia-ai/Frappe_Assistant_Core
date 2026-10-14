@@ -489,3 +489,49 @@ class TestReadingLines(OpeningInvoicesCase):
         self.assertEqual(first["invoice_number"], self._number(1))
         self.assertEqual(first["outstanding_amount"], "1,250.50")
         self.assertEqual(first["due_date"], "")
+
+
+class TestFixes(OpeningInvoicesCase):
+    def _fix(self, session, group, action, **extra):
+        return self._run(
+            "dry_run_import", {"session": session, "fixes": [{"group": group, "action": action, **extra}]}
+        )
+
+    def test_post_at_cutoff_moves_old_invoices_to_the_cut_off(self):
+        session, result = self._ready([f"{self.customer},{self._number(1)},1990-01-15,1990-02-15,10"])
+        group = self._groups(result)[opening_invoices.CAUSE_NO_FISCAL_YEAR]
+        fixes = [f["action"] for f in group["fixes"]]
+        self.assertEqual(fixes, ["post_at_cutoff", "leave_out"])
+        result = self._fix(session, group["id"], "post_at_cutoff")["result"]
+        self.assertEqual(result["ready"], 1, result)
+        line = opening_invoices.ready_lines(self._doc(session))[0]
+        self.assertEqual(
+            (line.posting_date, line.due_date, line.original_date), (self.date, self.date, "1990-01-15")
+        )
+
+    def test_post_at_cutoff_only_for_that_group(self):
+        session, result = self._ready([f"{self.customer},{self._number(1)},{self.date},,0"])
+        group = self._groups(result)[opening_invoices.CAUSE_NOT_POSITIVE]
+        reply = self._fix(session, group["id"], "post_at_cutoff")
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("no fiscal year", frappe.as_json(reply))
+
+    def test_disabled_party_can_be_mapped(self):
+        disabled = self._party("Customer", f"OI Off {self.tag}", disabled=1)
+        session, result = self._ready([f"{disabled},{self._number(1)},{self.date},,10"])
+        group = self._groups(result)[opening_invoices.CAUSE_PARTY_DISABLED]
+        self.assertEqual(group["fixes"][0]["action"], "map")
+        result = self._fix(session, group["id"], "map", to=self.customer)["result"]
+        self.assertEqual(result["ready"], 1, result)
+
+    def test_every_new_cause_has_a_plain_explanation(self):
+        session, result = self._ready(
+            [
+                f"{self.customer},{self._number(1)},{self.date},,0",
+                f"{self.customer},{self._number(2)},{self.date},{add_days(self.date, -3)},10",
+            ]
+        )
+        for group in result["groups"]:
+            self.assertTrue(group["explanation"].startswith("1 row"), group)
+            self.assertIn("leave_out", [f["action"] for f in group["fixes"]])
+            self.assertTrue(group["fix_in_file"])
