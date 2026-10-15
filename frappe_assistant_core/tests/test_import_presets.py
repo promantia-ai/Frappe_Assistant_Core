@@ -177,6 +177,89 @@ class TestValidate(BaseAssistantTest):
             self.assertIsNotNone(problem, bad)
             self.assertIn(text, problem)
 
+    def test_shapes_that_matching_would_crash_on_are_named(self):
+        cases = [
+            (preset(columns={"Client": {"from": "Client"}}), "column 'Client': from"),
+            (preset(columns={"Client": {"from": [""]}}), "column 'Client': from"),
+            (
+                preset(columns={"Client": {"from": ["Client"], "from_index": "3"}}),
+                "column 'Client': from_index",
+            ),
+            (
+                preset(columns={"Client": {"from": ["Client"], "from_index": [1, "2"]}}),
+                "column 'Client': from_index",
+            ),
+            (preset(header={"search_rows": 0}), "header.search_rows"),
+            (preset(header={"search_rows": "5"}), "header.search_rows"),
+            (
+                preset(
+                    targets=[
+                        {
+                            "name": "X",
+                            "doctype": "Customer",
+                            "when": {"column": "Client", "in": "Group"},
+                            "mapping": {},
+                        }
+                    ]
+                ),
+                "when 'in'",
+            ),
+            (
+                preset(
+                    targets=[
+                        {
+                            "name": "X",
+                            "doctype": "Customer",
+                            "when": {"column": "Client", "not_in": [1]},
+                            "mapping": {},
+                        }
+                    ]
+                ),
+                "when 'not_in'",
+            ),
+            (
+                preset(targets=[{"name": "X", "doctype": "Customer", "mapping": {"Client": 5}}]),
+                "'Client' must map to a field",
+            ),
+            (
+                preset(targets=[{"name": "X", "doctype": "Customer", "mapping": {"Client": []}}]),
+                "'Client' must map to a field",
+            ),
+            (
+                preset(targets=[{"name": "X", "engine": "opening_stock", "columns": {"Client": ["qty", 3]}}]),
+                "'Client' must map to a field",
+            ),
+            (preset(groups={"method": "indent", "column": "Client", "names": "Group"}), "groups.names"),
+            (preset(skip={"totals": "Total"}), "skip.totals"),
+            (preset(skip={"footer": [1]}), "skip.footer"),
+            (preset(distinct_by="Client"), "distinct_by must be a list"),
+        ]
+        for bad, text in cases:
+            problem = presets.validate_preset(bad)
+            self.assertIsNotNone(problem, bad)
+            self.assertIn(text, problem)
+
+    def test_the_shapes_matching_accepts_are_valid(self):
+        full = preset(
+            header={"search_rows": 5},
+            columns={
+                "Client": {"from": [], "from_index": [1, 2]},
+                "Code": {"from": ["Client Code"], "from_index": 0},
+            },
+            targets=[
+                {
+                    "name": "Customers",
+                    "doctype": "Customer",
+                    "when": {"column": "Client", "in": ["Group"]},
+                    "mapping": {"Client": ["customer_name", "name"]},
+                }
+            ],
+            groups={"method": "indent", "column": "Client", "names": ["Group"]},
+            skip={"totals": ["Total"], "footer": []},
+            distinct_by=["Client"],
+        )
+        self.assertIsNone(presets.validate_preset(full))
+
     def test_target_mapping_adds_constants_and_inputs(self):
         target = {
             "name": "Accounts",

@@ -217,6 +217,21 @@ def _alias_groups(value, allow_empty=False) -> bool:
     )
 
 
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(s, str) for s in value)
+
+
+def _field_spec(value: Any) -> bool:
+    """A field name, or a non-empty list of candidate field names."""
+    if isinstance(value, str):
+        return True
+    return isinstance(value, list) and bool(value) and _string_list(value)
+
+
 def validate_preset(preset: Any) -> Optional[str]:
     """Why ``preset`` can't be used, or None."""
     if not isinstance(preset, dict):
@@ -231,8 +246,15 @@ def validate_preset(preset: Any) -> Optional[str]:
         return "signature.optional must be a list of alias lists"
     if signature.get("title") is not None and not _alias_groups([signature["title"]]):
         return "signature.title must be a list of patterns"
-    if (preset.get("header") or {}).get("rows", 1) not in (1, 2):
+    header = preset.get("header") or {}
+    if not isinstance(header, dict):
+        return "header must be an object"
+    if header.get("rows", 1) not in (1, 2):
         return "header.rows must be 1 or 2"
+    if header.get("search_rows") is not None and not (
+        _is_int(header["search_rows"]) and header["search_rows"] > 0
+    ):
+        return "header.search_rows must be a positive integer"
 
     columns = preset.get("columns")
     if not isinstance(columns, dict) or not columns:
@@ -250,9 +272,20 @@ def validate_preset(preset: Any) -> Optional[str]:
             return f"column '{name}': parse 'map' needs 'values'"
         if spec.get("fallback") and spec["fallback"] not in columns:
             return f"column '{name}': fallback '{spec['fallback']}' is not a column"
+        if "from" in spec and not (
+            isinstance(spec["from"], list) and all(isinstance(a, str) and a.strip() for a in spec["from"])
+        ):
+            return f"column '{name}': from must be a list of non-empty column names"
+        index = spec.get("from_index")
+        if index is not None and not (
+            _is_int(index) or (isinstance(index, list) and all(_is_int(i) for i in index))
+        ):
+            return f"column '{name}': from_index must be an int or a list of ints"
 
     groups = preset.get("groups")
     if groups:
+        if not isinstance(groups, dict):
+            return "groups must be an object"
         methods = groups.get("method")
         methods = methods if isinstance(methods, list) else [methods]
         if not methods or any(m not in GROUP_METHODS for m in methods):
@@ -261,7 +294,18 @@ def validate_preset(preset: Any) -> Optional[str]:
             return "groups.column must be a column"
         if groups.get("carry_to") and groups["carry_to"] not in columns:
             return "groups.carry_to must be a column"
-    for key in preset.get("distinct_by") or []:
+        if groups.get("names") is not None and not _string_list(groups["names"]):
+            return "groups.names must be a list of strings"
+    skip = preset.get("skip") or {}
+    if not isinstance(skip, dict):
+        return "skip must be an object"
+    for key in ("totals", "footer"):
+        if skip.get(key) is not None and not _string_list(skip[key]):
+            return f"skip.{key} must be a list of strings"
+    distinct = preset.get("distinct_by")
+    if distinct is not None and not isinstance(distinct, list):
+        return "distinct_by must be a list"
+    for key in distinct or []:
         if key not in columns:
             return f"distinct_by '{key}' is not a column"
 
@@ -279,14 +323,25 @@ def validate_preset(preset: Any) -> Optional[str]:
         if bool(target.get("doctype")) == bool(target.get("engine")):
             return f"target '{name}' needs exactly one of doctype or engine"
         when = target.get("when")
+        if when is not None and not isinstance(when, dict):
+            return f"target '{name}': when must be an object"
         if when and (when.get("column") not in columns or not any(k in when for k in WHEN_KEYS)):
             return f"target '{name}': when needs a column and one of {', '.join(WHEN_KEYS)}"
+        for key in ("in", "not_in"):
+            if when and key in when and not _string_list(when[key]):
+                return f"target '{name}': when '{key}' must be a list of strings"
         for constant in target.get("constants") or []:
             if not all(isinstance(constant.get(k), str) for k in ("column", "field", "value")):
                 return f"target '{name}': a constant needs column, field and value"
         for item in target.get("inputs") or []:
             if not all(isinstance(item.get(k), str) and item[k] for k in ("name", "column", "field", "ask")):
                 return f"target '{name}': an input needs name, column, field and ask"
+        base = target.get("mapping") or target.get("columns") or {}
+        if not isinstance(base, dict):
+            return f"target '{name}': mapping must be an object"
+        for column, value in base.items():
+            if not _field_spec(value):
+                return f"target '{name}': '{column}' must map to a field or a list of fields"
         known = set(columns) | {
             e["column"] for e in (target.get("constants") or []) + (target.get("inputs") or [])
         }
@@ -300,9 +355,10 @@ def validate_preset(preset: Any) -> Optional[str]:
             if engine == "opening_invoices" and target.get("invoice_type") not in ("Sales", "Purchase"):
                 return f"target '{name}': invoice_type must be Sales or Purchase"
             allowed = _engine_fields(engine)
-            for field in target_mapping(target).values():
-                if field not in allowed:
-                    return f"target '{name}': '{field}' is not a field of {engine}"
+            for value in target_mapping(target).values():
+                for field in [value] if isinstance(value, str) else value:
+                    if field not in allowed:
+                        return f"target '{name}': '{field}' is not a field of {engine}"
     return None
 
 
@@ -342,7 +398,7 @@ def load_presets() -> List[Dict[str, Any]]:
                 problem = validate_preset(preset)
             except Exception as e:
                 # A shape validate_preset does not expect is this preset's problem only.
-                problem = str(e) or type(e).__name__
+                problem = f"{type(e).__name__}: {e}"
             if problem:
                 ident = preset.get("id") if isinstance(preset, dict) else None
                 frappe.log_error(title="Import preset skipped", message=f"{path}: {ident}: {problem}")
