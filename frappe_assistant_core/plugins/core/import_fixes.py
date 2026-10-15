@@ -326,6 +326,23 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
             fixes.insert(0, {"action": MAP, "closest": closest_names(party_type, value)})
         return {"explanation": explanation, "fixes": fixes, "fix_in_file": True}
 
+    from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
+
+    if cause == opening_balances.CAUSE_NOT_BALANCED:
+        # Attached to one row only, so leaving it out or mapping it would drop an unrelated row.
+        explanation = _(
+            "{0} The file's debits and credits must be made to balance in the file; "
+            "it is then checked again."
+        ).format(group.get("message") or _(cause))
+        return {"explanation": explanation, "fixes": [], "fix_in_file": True}
+
+    if cause in opening_balances.NEW_CAUSES:
+        explanation = _("{0}: {1}").format(rows, group.get("message") or _(cause))
+        fixes = [leave_out]
+        if cause in opening_balances.BY_VALUE:
+            fixes.insert(0, {"action": MAP, "closest": closest_names("Account", value)})
+        return {"explanation": explanation, "fixes": fixes, "fix_in_file": True}
+
     explanations = {
         dry_run.CAUSE_BAD_DATE: _("{0}: {1} isn't a date ERPNext can read. {2}"),
         dry_run.CAUSE_BAD_VALUE: _("{0}: a value ERPNext can't use. {2}"),
@@ -374,6 +391,12 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
                 )
             group = _with_target(session, group)
             action = fix.get("action")
+            from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
+
+            if group.get("cause") == opening_balances.CAUSE_NOT_BALANCED:
+                raise FixProblem(
+                    _("Debits and credits that don't balance can only be corrected in the file.")
+                )
             if action == MAP:
                 maps = _map(session, group, fix, maps)
                 done.append(
@@ -452,6 +475,7 @@ def forget_left_out(session) -> str:
 
 
 def _map(session, group, fix, maps):
+    from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
     from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
     from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 
@@ -460,6 +484,9 @@ def _map(session, group, fix, maps):
         opening_stock.CAUSE_OTHER_COMPANY: "Warehouse",
         opening_stock.CAUSE_GROUP_WAREHOUSE: "Warehouse",
         opening_invoices.CAUSE_PARTY_DISABLED: opening_invoices.settings(session).get("party_type"),
+        opening_balances.CAUSE_NOT_THIS_COMPANY: "Account",
+        opening_balances.CAUSE_GROUP_ACCOUNT: "Account",
+        opening_balances.CAUSE_DISABLED_ACCOUNT: "Account",
     }
     if group["cause"] not in (dry_run.CAUSE_MISSING_LINK, dry_run.CAUSE_BAD_OPTION, *other_records):
         raise FixProblem(
@@ -483,6 +510,8 @@ def _map(session, group, fix, maps):
                 _("There is no {0} called '{1}'.").format(_(doctype or group["label"]), to)
                 + (" " + _("Closest: {0}.").format(", ".join(closest)) if closest else "")
             )
+        if doctype == "Account":
+            _check_account(session, to)
     elif to not in _select_options(session, group):
         raise FixProblem(
             _("'{0}' isn't one of the choices for {1}: {2}.").format(
@@ -502,6 +531,18 @@ def _map(session, group, fix, maps):
 
 
 # -- creating the missing masters (#33992) -------------------------------------------------
+
+
+def _check_account(session, name: str) -> None:
+    """An account that can take the entry: a ledger, enabled, of the session's company."""
+    from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
+
+    account = frappe.db.get_value("Account", name, ["is_group", "disabled", "company"], as_dict=True)
+    company = opening_balances.settings(session).get("company")
+    if account.is_group or account.disabled or (company and account.company != company):
+        raise FixProblem(
+            _("{0} can't take entries: it must be an enabled ledger account of {1}.").format(name, company)
+        )
 
 
 def cannot_create(doctype: str, session=None) -> str:

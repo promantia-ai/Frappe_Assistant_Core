@@ -827,3 +827,191 @@ class TestCheck(OpeningBalancesCase):
         self.assertEqual(len(groups), 1, result)
         self.assertEqual(groups[0]["count"], 1)
         self.assertEqual(result["failed"], 2)  # the two rows, each counted once
+
+
+class TestFixes(OpeningBalancesCase):
+    """Plain explanations, mapping an account, and the unbalanced group that has no fixes."""
+
+    def setUp(self):
+        super().setUp()
+        self.stock = self._account("Stock", "Asset", "Stock")
+
+    def _check(self, session):
+        reply = self._run("dry_run_import", {"session": session})
+        self.assertTrue(reply["success"], reply)
+        return reply["result"]
+
+    def _ready(self, lines, **setup):
+        session = self._session(lines)
+        self.assertTrue(self._setup(session, **setup)["success"])
+        return session, self._check(session)
+
+    def _groups(self, result):
+        return {g["cause"]: g for g in result["groups"]}
+
+    def _fix(self, session, group, action, **extra):
+        return self._run(
+            "dry_run_import", {"session": session, "fixes": [{"group": group, "action": action, **extra}]}
+        )
+
+    def _missing(self, lines=None):
+        lines = lines or [f"No such {self.tag},100,,", f"{self.capital},,100,"]
+        session, result = self._ready(lines)
+        return session, self._groups(result)[dry_run.CAUSE_MISSING_LINK]
+
+    def _elsewhere(self, name):
+        """A find_account that says ``name`` belongs to another company."""
+        real = opening_balances.find_account
+
+        def find(company, abbr, text):
+            found = real(company, abbr, text)
+            if found and found.name == name:
+                found["company"] = "Another Company"
+            return found
+
+        return patch.object(opening_balances, "find_account", side_effect=find)
+
+    # -- every cause has its own explanation and fixes -----------------------------------
+
+    def test_every_new_cause_has_its_own_explanation_and_fixes(self):
+        company_currency = frappe.get_cached_value("Company", self.company, "default_currency")
+        other = "USD" if company_currency != "USD" else "EUR"
+        foreign = self._account("Foreign", "Asset", "Bank", account_currency=other)
+        elsewhere = self._account("Elsewhere", "Asset", "Bank")
+        off = self._account("Off", "Asset", "Bank")
+        frappe.db.set_value("Account", off, "disabled", 1)
+        session = self._session(
+            [
+                f"{self.equity_group},10,,",
+                f"{off},10,,",
+                f"{elsewhere},10,,",
+                f"{self.expense},10,,",
+                f"{self.temporary},10,,",
+                f"{foreign},10,,",
+                f"{self.bank},10,5,",
+                f"{self.capital},-10,,",
+                f"{self.debtors},5,,",
+                f"{self.debtors},5,,",
+                f"No such {self.tag},10,,",
+                "Total,10,10,",
+                f"{self.bank},ten,,",
+            ]
+        )
+        self.assertTrue(self._setup(session)["success"])
+        with self._elsewhere(elsewhere):
+            groups = self._groups(self._check(session))
+        expected = {
+            opening_balances.CAUSE_NOT_THIS_COMPANY: ["map", "leave_out"],
+            opening_balances.CAUSE_GROUP_ACCOUNT: ["map", "leave_out"],
+            opening_balances.CAUSE_DISABLED_ACCOUNT: ["map", "leave_out"],
+            opening_balances.CAUSE_NOT_BALANCED: [],
+        }
+        self.assertEqual(set(opening_balances.NEW_CAUSES) - set(groups), set(), "every new cause is produced")
+        for cause in opening_balances.NEW_CAUSES:
+            group = groups[cause]
+            self.assertTrue(group["message"], group)
+            self.assertNotIn("would fail", group["explanation"])
+            self.assertTrue(group["fix_in_file"], group)
+            self.assertEqual([f["action"] for f in group["fixes"]], expected.get(cause, ["leave_out"]), cause)
+            if cause != opening_balances.CAUSE_NOT_BALANCED:
+                self.assertRegex(group["explanation"], r"^(1 row|\d+ rows)", group)
+                self.assertIn(group["message"], group["explanation"])
+        for cause in (
+            opening_balances.CAUSE_NOT_THIS_COMPANY,
+            opening_balances.CAUSE_GROUP_ACCOUNT,
+            opening_balances.CAUSE_DISABLED_ACCOUNT,
+        ):
+            self.assertIn("closest", groups[cause]["fixes"][0])
+        self.assertEqual([f["action"] for f in groups[dry_run.CAUSE_MISSING_LINK]["fixes"][:1]], ["map"])
+        self.assertNotIn("create", [f["action"] for f in groups[dry_run.CAUSE_MISSING_LINK]["fixes"]])
+
+    # -- the unbalanced group has no fixes ---------------------------------------------------
+
+    def test_unbalanced_group_has_no_fixes_and_says_to_correct_the_file(self):
+        _, result = self._ready([f"{self.bank},100,,", f"{self.capital},,90,"])
+        group = self._groups(result)[opening_balances.CAUSE_NOT_BALANCED]
+        self.assertEqual(group["fixes"], [])
+        self.assertTrue(group["fix_in_file"])
+        self.assertIn("in the file", group["explanation"])
+        self.assertIn("checked again", group["explanation"])
+
+    def test_a_fix_aimed_at_the_unbalanced_group_is_refused(self):
+        session, result = self._ready([f"{self.bank},100,,", f"{self.capital},,90,"])
+        group = self._groups(result)[opening_balances.CAUSE_NOT_BALANCED]
+        before = self._doc(session).transformation_rules
+        for action, extra in (("leave_out", {}), ("map", {"to": self.bank})):
+            reply = self._fix(session, group["id"], action, **extra)
+            self.assertFalse(reply["success"], reply)
+            self.assertIn("can only be corrected in the file", frappe.as_json(reply))
+        self.assertEqual(self._doc(session).transformation_rules, before)
+
+    def test_profit_and_loss_keeps_leave_out_as_its_fix(self):
+        _, result = self._ready([f"{self.bank},100,,", f"{self.expense},30,,", f"{self.capital},,130,"])
+        group = self._groups(result)[opening_balances.CAUSE_PROFIT_AND_LOSS]
+        self.assertEqual([f["action"] for f in group["fixes"]], ["leave_out"])
+
+    # -- mapping an account --------------------------------------------------------------------
+
+    def test_a_missing_account_is_mapped_to_an_account_and_is_ready(self):
+        session, group = self._missing()
+        self.assertEqual(group["fixes"][0]["action"], "map")
+        result = self._fix(session, group["id"], "map", to=self.bank)["result"]
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result)
+
+    def test_a_disabled_account_is_mapped_to_a_good_one(self):
+        frappe.db.set_value("Account", self.bank, "disabled", 1)
+        other = self._account("Cash", "Asset", "Cash")
+        session, result = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
+        group = self._groups(result)[opening_balances.CAUSE_DISABLED_ACCOUNT]
+        result = self._fix(session, group["id"], "map", to=other)["result"]
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result)
+
+    def test_a_group_account_is_mapped_to_a_good_one(self):
+        session, result = self._ready([f"{self.equity_group},,100,", f"{self.bank},100,,"])
+        group = self._groups(result)[opening_balances.CAUSE_GROUP_ACCOUNT]
+        result = self._fix(session, group["id"], "map", to=self.capital)["result"]
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result)
+
+    def test_an_account_of_another_company_is_mapped_to_a_good_one(self):
+        cash = self._account("Cash", "Asset", "Cash")
+        with self._elsewhere(self.bank):
+            session, result = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
+            group = self._groups(result)[opening_balances.CAUSE_NOT_THIS_COMPANY]
+            result = self._fix(session, group["id"], "map", to=cash)["result"]
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result)
+
+    def _refused(self, to, message):
+        session, group = self._missing()
+        before = self._doc(session).transformation_rules
+        reply = self._fix(session, group["id"], "map", to=to)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn(message, frappe.as_json(reply))
+        self.assertEqual(self._doc(session).transformation_rules, before)
+
+    def test_mapping_to_an_account_that_does_not_exist_is_refused(self):
+        self._refused(f"Nobody {self.tag}", "There is no Account called")
+
+    def test_mapping_to_a_group_account_is_refused(self):
+        self._refused(self.equity_group, "can't take entries")
+
+    def test_mapping_to_a_disabled_account_is_refused(self):
+        off = self._account("Off", "Asset", "Bank")
+        frappe.db.set_value("Account", off, "disabled", 1)
+        self._refused(off, "can't take entries")
+
+    def test_mapping_to_an_account_of_another_company_is_refused(self):
+        other = frappe.db.get_value(
+            "Account", {"company": ["!=", self.company], "is_group": 0, "disabled": 0}
+        )
+        if not other:
+            self.skipTest("the site has no other company with accounts")
+        self._refused(other, "can't take entries")
+
+    # -- masters_plan never proposes an Account ----------------------------------------------
+
+    def test_masters_plan_is_empty_for_a_missing_account(self):
+        from frappe_assistant_core.plugins.core import import_fixes as fixes
+
+        session, group = self._missing()
+        self.assertIn("ERPNext names it itself", fixes.cannot_create("Account", self._doc(session)))
+        self.assertEqual(fixes.masters_plan(self._doc(session), [group]), [])
