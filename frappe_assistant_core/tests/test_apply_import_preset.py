@@ -12,10 +12,12 @@ import frappe
 from openpyxl import Workbook
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
+from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
 from frappe_assistant_core.plugins.core import import_presets as presets
 from frappe_assistant_core.plugins.core.import_session import import_target_problem
 from frappe_assistant_core.plugins.core.tools import apply_import_preset as tool_module
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.tests.test_import_opening_balances import OpeningBalancesCase
 from frappe_assistant_core.tests.test_import_presets import LEDGERS, TB
 
 
@@ -313,3 +315,303 @@ class TestApply(PresetToolCase):
             "No target 'Nope'. Targets of test.ledgers: Customers, Suppliers, Accounts.", reply["error"]
         )
         self.assertEqual((frappe.db.count("FAC Import Session"), frappe.db.count("File")), before)
+
+
+# Each fixture follows the layout in the spec's section 7 / the research notes: (rows, {target: rows}).
+SHIPPED = {
+    "tally_prime.ledgers": (
+        [
+            ["Acme Pvt Ltd"],
+            ["List of Ledgers"],
+            [],
+            ["Name", "Group Name", "GST Registration -GSTIN/UIN", "E-mail", "Ledger – Opening Balance"],
+            ["Ravi Traders", "Sundry Debtors", "29ABCDE1234F1Z5", "ravi@example.com", "1,000.00 Dr"],
+            ["Mehta Supplies", "Sundry Creditors", "", "", "500.00 Cr"],
+            ["Rent", "Indirect Expenses", "", "", ""],
+        ],
+        {"Customers": 1, "Suppliers": 1},  # Accounts waits for the company (needs)
+    ),
+    "tally_prime.stock_items": (
+        [
+            ["Acme Pvt Ltd"],
+            [],
+            ["Name", "Group Name", "Units", "HSN/SAC", "Opening Balance – Quantity"],
+            ["Steel Rod 10mm", "Raw Material", "Nos", "7214", "10 Nos"],
+            ["Paint 1L", "Finished Goods", "Ltr", "3208", ""],
+        ],
+        {"Items": 2},
+    ),
+    "tally_prime.trial_balance": (
+        [
+            ["Acme Pvt Ltd"],
+            ["1-Apr-24 to 31-Mar-25"],
+            [],
+            ["Particulars", "Debit", "Credit"],
+            ["Current Assets", "1,500.00", ""],
+            ["  Cash", "500.00", ""],
+            ["  HDFC Bank", "1,000.00", ""],
+            ["Capital Account", "", "1,500.00"],
+            ["  Owner Capital", "", "1,500.00"],
+            ["Grand Total", "1,500.00", "1,500.00"],
+        ],
+        {"Trial balance": 3},
+    ),
+    "tally_prime.stock_summary": (
+        [
+            ["Acme Pvt Ltd"],
+            ["Stock Summary"],
+            ["1-Apr-24 to 31-Mar-25"],
+            ["Particulars", "Quantity", "Rate", "Value"],
+            ["Raw Material", "", "", "1,200.00"],
+            ["  Steel Rod 10mm", "10 Nos", "100.00/Nos", "1,000.00"],
+            ["  Paint 1L", "4 Ltr", "50.00/Ltr", "200.00"],
+            ["Grand Total", "", "", "1,200.00"],
+        ],
+        {},  # needs a warehouse first
+    ),
+    "tally_prime.bills_receivable": (
+        [
+            ["Acme Pvt Ltd"],
+            ["Bills Receivable"],
+            ["1-Apr-24 to 31-Mar-25"],
+            ["Date", "Ref. No.", "Party's Name", "Pending Amount", "Due on"],
+            ["1-Mar-25", "S-101", "Ravi Traders", "1,000.00 Dr", "31-Mar-25"],
+            ["Grand Total", "", "", "1,000.00 Dr", ""],
+        ],
+        {"Open invoices": 1},
+    ),
+    "tally_prime.bills_payable": (
+        [
+            ["Acme Pvt Ltd"],
+            ["Bills Payable"],
+            ["1-Apr-24 to 31-Mar-25"],
+            ["Date", "Ref. No.", "Party's Name", "Pending Amount", "Due on"],
+            ["2-Mar-25", "P-77", "Mehta Supplies", "500.00 Cr", "1-Apr-25"],
+        ],
+        {"Open bills": 1},
+    ),
+    "quickbooks_online.account_list": (
+        [
+            ["Account List"],
+            ["Sandbox Company_US_2"],
+            [],
+            ["Full name", "Type", "Detail type", "Description", "Total balance"],
+            ["Checking", "Bank", "Checking", "", "1,201.00"],
+            ["Truck", "Fixed Assets", "Vehicles", "", ""],
+            ["Truck:Depreciation", "Fixed Assets", "Accumulated Depreciation", "", "-500.00"],
+            ["TOTAL", "", "", "", "$701.00"],
+            [],
+            [],
+            [],
+            [" Wednesday, March 04, 2026 10:53 PM GMTZ"],
+        ],
+        {},  # needs the company first
+    ),
+    "quickbooks_online.trial_balance": (
+        [
+            ["Trial Balance"],
+            ["Sandbox Company_US_2"],
+            ["As of December 31, 2025"],
+            [],
+            ["", "Debit", "Credit"],
+            ["Checking", "1,201.00", ""],
+            ["Opening Balance Equity", "", "1,201.00"],
+            ["TOTAL", "$1,201.00", "$1,201.00"],
+            [],
+            [],
+            [],
+            ["Accrual Basis Wednesday, March 04, 2026 11:09 PM GMTZ"],
+        ],
+        {"Trial balance": 2},
+    ),
+    "quickbooks_online.ar_aging_summary": (
+        [
+            ["A/R Aging Summary Report"],
+            ["Sandbox Company_US_2"],
+            ["As of March 4, 2026"],
+            [],
+            ["Customer", "CURRENT", "1 - 30", "31 - 60", "61 - 90", "91 AND OVER", "Total"],
+            ["Amy's Bird Sanctuary", "", "", "239.00", "", "", "239.00"],
+            ["Freeman Sporting Goods", "", "", "", "", "", ""],
+            ["0969 Ocean View Road", "", "", "477.50", "", "", "477.50"],
+            ["Total for Freeman Sporting Goods", "", "", "477.50", "", "", "$477.50"],
+            ["TOTAL", "", "", "716.50", "", "", "$716.50"],
+        ],
+        {"Open invoices": 2},
+    ),
+    "quickbooks_online.ap_aging_summary": (
+        [
+            ["A/P Aging Summary Report"],
+            ["Sandbox Company_US_2"],
+            ["As of March 4, 2026"],
+            [],
+            ["Vendor", "CURRENT", "1 - 30", "31 - 60", "61 - 90", "91 AND OVER", "Total"],
+            ["Brosnahan Insurance Agency", "241.23", "", "", "", "", "241.23"],
+        ],
+        {"Open bills": 1},
+    ),
+    "quickbooks_online.customer_contact_list": (
+        [
+            ["Customer Contact List"],
+            ["Sandbox Company_US_2"],
+            ["All Dates"],
+            [],
+            ["Customer", "Phone Numbers", "Email", "Full Name", "Billing Address", "Shipping Address"],
+            [
+                "Test Contact Echo",
+                "Phone: 555-010-0011",
+                "echo.test@example.com",
+                "Echo Tester",
+                "400 Mock Lane",
+                "",
+            ],
+        ],
+        {"Customers": 1},
+    ),
+    "quickbooks_online.vendor_contact_list": (
+        [
+            ["Vendor Contact List"],
+            ["Sandbox Company_US_2"],
+            ["All Dates"],
+            [],
+            ["Vendor", "Phone Numbers", "Email", "Full Name", "Address", "Account #"],
+            ["Brosnahan Insurance Agency", "Phone: (650) 555-9912", "", "Nick Brosnahan", "P.O. Box 5", ""],
+        ],
+        {"Suppliers": 1},
+    ),
+    "quickbooks_online.products_services": (
+        [
+            ["Product/Service", "Type", "Description", "Price", "Cost", "Qty on hand"],
+            ["Garden Rocks", "Inventory", "Decorative rocks", "35.00", "20.00", "12"],
+            ["Design", "Service", "Custom design", "75.00", "", ""],
+        ],
+        {"Items": 2},
+    ),
+}
+
+
+def as_xlsx_file(case, name, rows):
+    return case._upload(name, xlsx([[str(c) for c in row] for row in rows]))
+
+
+class TestShippedPresets(PresetToolCase):
+    """Each shipped preset recognises its own layout and splits it as expected."""
+
+    def _check(self, preset_id, rows, expected):
+        file_doc = as_xlsx_file(self, f"{preset_id}-{self.tag}.xlsx", rows)
+        reply = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})
+        self.assertTrue(reply["success"], (preset_id, reply))
+        result = reply["result"]
+        self.assertTrue(result["matched"], (preset_id, result))
+        self.assertEqual(result["preset"]["id"], preset_id, result)
+        self.assertEqual({s["target"]: s["rows"] for s in result["sessions"]}, expected, (preset_id, result))
+        return result, file_doc
+
+    def test_every_shipped_fixture(self):
+        for preset_id, (rows, expected) in SHIPPED.items():
+            with self.subTest(preset_id):
+                presets.clear_cache()
+                self._check(preset_id, rows, expected)
+
+    def test_every_shipped_preset_has_a_fixture(self):
+        self.assertEqual(
+            sorted(p["id"] for p in presets.load_presets()),
+            sorted(SHIPPED),
+        )
+
+    def test_tally_ledgers_ac1(self):
+        rows, expected = SHIPPED["tally_prime.ledgers"]
+        result, _ = self._check("tally_prime.ledgers", rows, expected)
+        self.assertIn("Tally Prime", result["message"])
+        self.assertFalse(result["preset"]["verified"])
+        customers = next(s for s in result["sessions"] if s["target"] == "Customers")
+        mapped = {row["column"]: row["field"] for row in customers["mapping"]["mapping"]}
+        self.assertEqual(mapped["Name"], "customer_name")
+        self.assertEqual(mapped["GSTIN"], "tax_id")
+        self.assertEqual(mapped["Email"], "email_id")
+        self.assertEqual(result["needs"][0]["name"], "company")
+
+    def test_tally_trial_balance_drops_group_subtotals(self):
+        rows, expected = SHIPPED["tally_prime.trial_balance"]
+        result, _ = self._check("tally_prime.trial_balance", rows, expected)
+        self.assertEqual(result["dropped"]["groups"], 2)
+        self.assertEqual(
+            [r[0] for r in result["sessions"][0]["sample_rows"]], ["Cash", "HDFC Bank", "Owner Capital"]
+        )
+
+    def test_tally_stock_summary_asks_for_the_warehouse_then_opens(self):
+        rows, _ = SHIPPED["tally_prime.stock_summary"]
+        result, file_doc = self._check("tally_prime.stock_summary", rows, {})
+        self.assertEqual(result["needs"][0]["name"], "warehouse")
+        again = self.registry.get_tool("apply_import_preset")._safe_execute(
+            {"file_id": file_doc.name, "values": {"warehouse": "Stores - X"}}
+        )["result"]
+        session = again["sessions"][0]
+        self.assertEqual(session["engine"], "opening_stock")
+        self.assertEqual(session["sample_rows"][0][:5], ["Steel Rod 10mm", "10", "Nos", "100", "1000"])
+        self.assertEqual(session["columns"]["Warehouse"], "warehouse")
+
+    def test_quickbooks_aging_columns_are_accepted_by_set_opening_invoices(self):
+        if not opening_invoices.in_fiscal_year(frappe.utils.nowdate(), self._company()):
+            self.skipTest("today is in no fiscal year of the test company")
+        result, _ = self._check(
+            "quickbooks_online.ar_aging_summary", *SHIPPED["quickbooks_online.ar_aging_summary"]
+        )
+        session = result["sessions"][0]
+        reply = self.registry.get_tool("set_opening_invoices")._safe_execute(
+            {
+                "session": session["session_id"],
+                "company": self._company(),
+                "invoice_type": session["invoice_type"],
+                "cut_off": frappe.utils.nowdate(),
+                "columns": session["columns"],
+            }
+        )
+        self.assertTrue(reply["success"], reply)
+
+    def _company(self):
+        return frappe.get_all("Company", pluck="name", order_by="creation", limit=1)[0]
+
+    def test_a_plain_file_is_not_claimed_by_any_preset(self):
+        for content in (
+            b"Account,Debit,Credit,Balance\nCash,100,,\n",
+            b"Customer Name,Customer Group,Territory\nA,B,C\n",
+        ):
+            file_doc = self._upload(f"plain-{self.tag}.csv", content)
+            result = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})[
+                "result"
+            ]
+            self.assertFalse(result["matched"], result)
+
+
+class TestPresetIntoTheEngines(OpeningBalancesCase):
+    """A cleaned trial balance goes through set_opening_balances and the dry run unchanged."""
+
+    def test_quickbooks_trial_balance_balances_in_the_engine(self):
+        rows = [
+            ["Trial Balance"],
+            ["Test Co"],
+            ["As of December 31, 2025"],
+            [],
+            ["", "Debit", "Credit"],
+            [self.bank, "1,201.00", ""],
+            [self.capital, "", "1,201.00"],
+            ["TOTAL", "$1,201.00", "$1,201.00"],
+        ]
+        file_doc = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": f"qbo-tb-{self.tag}.xlsx",
+                "content": xlsx(rows),
+                "is_private": 1,
+            }
+        ).insert()
+        presets.clear_cache()
+        result = self._run("apply_import_preset", {"file_id": file_doc.name})["result"]
+        session = result["sessions"][0]
+        self.assertEqual(result["preset"]["id"], "quickbooks_online.trial_balance")
+        setup = self._setup(session["session_id"], columns=session["columns"])
+        self.assertTrue(setup["success"], setup)
+        checked = self._run("dry_run_import", {"session": session["session_id"]})
+        self.assertTrue(checked["success"], checked)
+        self.assertEqual(checked["result"]["groups"], [], checked)
