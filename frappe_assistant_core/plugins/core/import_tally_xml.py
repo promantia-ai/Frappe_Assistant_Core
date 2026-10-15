@@ -72,7 +72,8 @@ FLIP_SIGN = {
 TAGS = {part: tag for tag, part in PARTS.items()}
 LABELS = {"ledgers": "ledgers", "stock_items": "stock items", "groups": "groups"}
 
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")  # every control character but tab, newline, return
+# every control character but tab, newline, return: C0, DEL and C1
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]+")
 
 
 @dataclass
