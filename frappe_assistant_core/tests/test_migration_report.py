@@ -113,6 +113,30 @@ class TestDataImportSession(run_tests.ImportRunCase):
             (cards["Rows in the Files"], cards["Failed"], cards["Ready to Sign Off"]), (4, 1, "No")
         )
 
+    def test_with_document_the_message_is_the_whole_report_for_the_pdf(self):
+        session, _checked, _result = self._partly_imported()
+
+        result = self._report(import_session=session, document=1)
+
+        text = result["message"]
+        self.assertIn("4 rows in the files, 2 imported, 1 left out, 1 failed", text)
+        self.assertIn("| Item | Rows in the Files | Imported | Left Out | Failed | Not Imported |", text)
+        self.assertIn("| Customer | 4 | 2 | 1 | 1 | 0 |", text)
+        self.assertIn("Closed shop (rows 3", text)
+        self.assertIn(GROUP_NODE, text)
+        self.assertIn("## Open Points", text)
+        self.assertIn("Name: ______", text)
+        # every row of the report is in the document, so nothing has to be typed out again
+        for row in result["data"]:
+            self.assertIn(row["item"].replace("|", "\\|"), text)
+
+    def test_without_document_the_message_is_the_headline(self):
+        session, _checked, _result = self._partly_imported()
+
+        result = self._report(import_session=session)
+
+        self.assertNotIn("##", result["message"])
+
     def test_without_sessions_it_covers_the_users_own_sessions(self):
         session, _checked, _result = self._partly_imported()
 
@@ -171,6 +195,10 @@ class TestOpeningInvoicesInTheReport(invoices_tests.OpeningInvoicesCase):
         self.assertTrue(trial["temporary_opening"]["balance"])
         self.assertTrue(any("Temporary Opening" in p for p in report["open_points"]), report["open_points"])
 
+        self.assertIn(
+            "| Receivables | Promantia | 30.50 |",
+            import_signoff.document(report).replace(self.company, "Promantia"),
+        )
         [row] = section(import_signoff.rows(report), "Opening Balances")
         self.assertEqual(
             (row["item"], row["in_files"], row["in_erpnext"], row["difference"]),
@@ -195,7 +223,7 @@ class TestOpeningInvoicesInTheReport(invoices_tests.OpeningInvoicesCase):
         report = import_signoff.build([self._doc(session)])
 
         self.assertEqual(report["opening_balances"][self.company]["receivables"]["difference"], -1)
-        self.assertTrue(any("differs from the file's rows by -1" in p for p in report["open_points"]))
+        self.assertTrue(any("differs from the file's rows by -1.00" in p for p in report["open_points"]))
 
     def test_a_user_who_cannot_read_the_books_sees_their_rows_but_not_erpnexts_totals(self):
         session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])

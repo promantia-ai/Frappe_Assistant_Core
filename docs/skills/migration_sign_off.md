@@ -6,23 +6,30 @@ and make the PDF (steps 1 to 3), without waiting to be asked for it.
 
 ## 1. Run the report
 
-Call `generate_report` with `report_name: "Migration Sign-off"` and **no `import_session`**: a
-migration is every file the user imported (master data, opening stock, opening invoices, opening
-balances), and sessions from other chats count too. Without it, the report covers all of the
-user's sessions. Filters, all optional:
+Call `generate_report` with `report_name: "Migration Sign-off"`, `filters` with `document: 1`, and
+**no `import_session`**: a migration is every file the user imported (master data, opening stock,
+opening invoices, opening balances), and sessions from other chats count too. Without it, the
+report covers all of the user's sessions. Filters:
 
 - `from_date` / `to_date`: the sessions started between these dates. Left out, the current fiscal
   year is used.
 - `import_session`: session ids, comma separated. Only when the user names the sessions themselves;
   never just the ones in this chat.
 - `user`: whose sessions; the user's own by default.
+- `document`: always 1. The report's `message` is then the whole report written as a document, for
+  the PDF in step 3.
+
+**Which period is the migration?** Look at the **Sessions** section. If its sessions started on
+different days (earlier test runs or attempts, say), ask the user from which date the migration
+counts, then run the report again with that `from_date`, before telling the user anything else or
+making the PDF. If the user already said, pass it the first time.
 
 Every number in the report is counted by ERPNext from the files and from the books. Never add up,
 round or change a number yourself: quote the report's values.
 
 ## 2. Tell the user
 
-Start with the report's `message` and its `report_summary` cards (rows in the files, imported, left out,
+Start with the report's `report_summary` cards (rows in the files, imported, left out,
 failed, not imported, ready to sign off). Then each `section` of the rows:
 
 - **Records**: per DocType, the rows in the files, imported, left out, failed and not imported. They
@@ -46,8 +53,8 @@ with:
 
 - `title`: "Data migration sign-off report"; `filename`: "Migration sign-off" and today's date;
   `orientation`: "landscape".
-- `content`: the report as markdown: the message, then one table per section with the report's own
-  columns, each value copied exactly as the report gives it. Leave out no row. End with a sign-off
-  block: "Name:" and "Date:" lines.
+- `content`: the report's `message`, exactly as it came (the report run with `document: 1`). It is
+  already the whole report, every row and number, with the sign-off block. Don't rewrite, shorten
+  or reformat it, and never rebuild it with run_python_code.
 
 Share the `download_link` exactly as `generate_document` returns it.

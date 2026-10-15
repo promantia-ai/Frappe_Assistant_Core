@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, cstr, flt, getdate, now_datetime
+from frappe.utils import add_days, cint, cstr, flt, fmt_money, getdate, now_datetime
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 from frappe_assistant_core.plugins.core import import_failures, import_fixes
@@ -384,6 +384,11 @@ def trial_balance(company: str, as_of: str) -> Dict[str, Any]:
     return out
 
 
+def _amount(value) -> str:
+    """An amount in a sentence, written the site's way: 1,96,850.00 rather than 196850.0."""
+    return fmt_money(flt(value), precision=_precision())
+
+
 def open_points(report: Dict[str, Any]) -> List[str]:
     """What stands in the way of signing off, each a sentence."""
     points = []
@@ -404,7 +409,9 @@ def open_points(report: Dict[str, Any]) -> List[str]:
             points.append(_("{0}: {1}").format(name, erpnext["problem"]))
         if erpnext.get("difference"):
             points.append(
-                _("{0}: ERPNext differs from the file's rows by {1}.").format(name, erpnext["difference"])
+                _("{0}: ERPNext differs from the file's rows by {1}.").format(
+                    name, _amount(erpnext["difference"])
+                )
             )
         if erpnext.get("no_longer_submitted"):
             points.append(
@@ -419,7 +426,7 @@ def open_points(report: Dict[str, Any]) -> List[str]:
         if trial.get("difference"):
             points.append(
                 _("{0}: the trial balance at {1} doesn't balance (debit {2}, credit {3}).").format(
-                    company, trial["as_of"], trial["debit"], trial["credit"]
+                    company, trial["as_of"], _amount(trial["debit"]), _amount(trial["credit"])
                 )
             )
         source = trial.get("source") or {}
@@ -434,7 +441,7 @@ def open_points(report: Dict[str, Any]) -> List[str]:
                 _(
                     "{0}: {1} is {2} in ERPNext but {3} in the opening balances file; the opening "
                     "invoices or opening stock don't add up to it."
-                ).format(company, row["account"], row["erpnext_net"], row["file_net"])
+                ).format(company, row["account"], _amount(row["erpnext_net"]), _amount(row["file_net"]))
             )
         temporary = (trial.get("temporary_opening") or {}).get("balance")
         if temporary:
@@ -442,7 +449,7 @@ def open_points(report: Dict[str, Any]) -> List[str]:
                 _(
                     "{0}: {1} is left on the Temporary Opening account at {2}; it is zero once every "
                     "opening balance is in."
-                ).format(company, temporary, trial["as_of"])
+                ).format(company, _amount(temporary), trial["as_of"])
             )
     return points
 
@@ -601,12 +608,11 @@ def _trial_balance_rows(company: str, trial: Dict[str, Any]) -> List[Dict[str, A
         out.append(
             {
                 "section": section,
-                "item": _("Accounts that differ from the file"),
+                "item": _("Accounts that differ from the file: {0}").format(len(differing)),
                 "company": company,
-                "difference": len(differing),
                 "details": "; ".join(
                     _("{0}: file {1}, ERPNext {2}").format(
-                        row["account"], row["file_net"], row["erpnext_net"]
+                        row["account"], _amount(row["file_net"]), _amount(row["erpnext_net"])
                     )
                     for row in differing[:20]
                 )
@@ -629,7 +635,7 @@ def _trial_balance_rows(company: str, trial: Dict[str, Any]) -> List[Dict[str, A
             "company": company,
             "in_erpnext": trial["debit"],
             "difference": trial["difference"],
-            "details": _("Debit {0}, credit {1}.").format(trial["debit"], trial["credit"]),
+            "details": _("Debit {0}, credit {1}.").format(_amount(trial["debit"]), _amount(trial["credit"])),
         }
     )
     if "temporary_opening" in trial:
@@ -673,12 +679,67 @@ def summary_cards(report: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+SECTIONS = ("Records", "Why Not Imported", "Opening Balances", "Trial Balance", "Open Points", "Sessions")
+
+
+def _value(column: Dict[str, Any], value) -> str:
+    if value is None or value == "":
+        return ""
+    if column["fieldtype"] == "Float":
+        return fmt_money(flt(value), precision=column.get("precision", 2))
+    return cstr(value).replace("|", "\\|").replace("\n", " ")
+
+
+def document(report: Dict[str, Any]) -> str:
+    """The whole report as a markdown document, for generate_document to make the PDF: the same
+    rows and numbers as the report, so nothing is typed out again."""
+    cols, table = columns(), rows(report)
+    cards = summary_cards(report)
+    out = [
+        "**"
+        + _("Generated on {0} by {1}.").format(report["generated_on"][:16], report["generated_by"])
+        + "**",
+        "",
+        report["message"],
+        "",
+        " · ".join(f"{card['label']}: {card['value']}" for card in cards),
+    ]
+    for title in SECTIONS:
+        section_rows = [row for row in table if row.get("section") == _(title)]
+        if not section_rows:
+            continue
+        shown = [
+            c
+            for c in cols
+            if c["fieldname"] != "section"
+            and any(r.get(c["fieldname"]) not in (None, "") for r in section_rows)
+        ]
+        out += ["", f"## {_(title)}", ""]
+        out.append("| " + " | ".join(c["label"] for c in shown) + " |")
+        out.append(
+            "|" + "|".join("---:" if c["fieldtype"] in ("Int", "Float") else "---" for c in shown) + "|"
+        )
+        for row in section_rows:
+            out.append("| " + " | ".join(_value(c, row.get(c["fieldname"])) for c in shown) + " |")
+    out += [
+        "",
+        "## " + _("Sign-off"),
+        "",
+        _("Name:") + " ______________________",
+        "",
+        _("Date:") + " ______________________",
+    ]
+    return "\n".join(out) + "\n"
+
+
 def execute(filters: Optional[Dict[str, Any]] = None):
-    """The Migration Sign-off report: columns, rows, the headline and the summary cards."""
+    """The Migration Sign-off report: columns, rows, the headline and the summary cards. With the
+    ``document`` filter, the message is the whole report as a document, for the PDF."""
     filters = frappe._dict(filters or {})
     names = [name.strip() for name in cstr(filters.get("import_session")).split(",") if name.strip()]
     sessions = sessions_of(
         names or None, filters.get("user"), filters.get("from_date"), filters.get("to_date")
     )
     report = build(sessions)
-    return columns(), rows(report), report["message"], None, summary_cards(report)
+    message = document(report) if cint(filters.get("document")) else report["message"]
+    return columns(), rows(report), message, None, summary_cards(report)

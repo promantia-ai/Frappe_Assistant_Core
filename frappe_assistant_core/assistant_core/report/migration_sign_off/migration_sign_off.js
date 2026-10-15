@@ -27,5 +27,10 @@ frappe.query_reports["Migration Sign-off"] = {
 			options: "User",
 			default: frappe.session.user,
 		},
+		{
+			fieldname: "document",
+			label: __("Message as a Document (for the PDF)"),
+			fieldtype: "Check",
+		},
 	],
 };
