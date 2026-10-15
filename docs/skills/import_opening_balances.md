@@ -1,0 +1,62 @@
+# How to Use import_opening_balances
+
+## Overview
+
+Creates and submits the checked opening Journal Entry (voucher type Opening Entry, dated the
+cut-off) after the user approves: all or nothing. Use it only after `dry_run_import` said the sheet
+is ready, and only when the user asks to import. Called again with the same values, it creates
+nothing more and reports. Entries of more than 100 lines are still submitted in the same request.
+
+## Parameters
+
+Pass exactly what the last check reported, so the approval card shows it: `session`, `company`,
+`cut_off`, `rows` (the check's `ready`), `total_debit` and `total_credit` (the check's
+`opening_balances`). If they differ from the last check, it refuses.
+
+## What goes in the entry
+
+- Each ready row that is not Receivable, Payable or Stock becomes a line as the file has it.
+- Receivable, Payable and Stock rows ("covered") are left out of the entry: the opening invoices
+  and opening stock imports bring those in, and posting them here as well would count them twice.
+- One balancing line to the Temporary Opening account carries the net of the left-out rows.
+- With `profit_and_loss = "retained_earnings"`, the Profit and Loss accounts are folded into one
+  line on the retained-earnings account. They are not compared one by one in the report.
+
+## Order with opening stock and opening invoices
+
+Any order. Temporary Opening holds the balance until all three are in, and nets to zero when they
+are. If everything is in and it still isn't zero, the report says how much is unaccounted for.
+
+## The reply
+
+- `status`: Completed, Failed, or Importing.
+- `journal_entry`: the entry made. `lines`: its line count. `balancing`: the Temporary Opening line
+  (account, debit, credit), if any.
+- `accounts`: each account whose ERPNext balance at the cut-off differs from the file (account,
+  `file_net`, `erpnext_net`, `difference`), at most 50; `differences_count` is the full number.
+- `covered`: the Receivable, Payable and Stock accounts, with the file's net, ERPNext's net and
+  `source` (the opening invoices or opening stock imports). Differences here are normal until those
+  are imported.
+- `temporary_opening`: the account and its balance. Say whether it is expected to be non-zero yet.
+- `not_brought_in`: rows the user left out, with the reason, count and the file's debit and credit.
+- `totals`: `file_debit`, `file_credit`, `erpnext_debit`, `erpnext_credit` over the accounts
+  compared (not the covered ones or Temporary Opening).
+- `message`: a sentence to relay.
+
+## When it stops
+
+- Debits and credits of the file that don't balance, a Period Closing Voucher, or an existing opening
+  entry at that date: it refuses and nothing is created.
+- If ERPNext refuses the entry, nothing is left, the session shows Failed, and the reason is in
+  the reply.
+- If the sheet changed after the check, it refuses: check again first.
+- A session that already made its entry never makes a second one.
+
+## Things to tell the user
+
+- That the entry matches the file account by account, or which accounts differ.
+- That Receivable, Payable and Stock rows are not in it and why, and the Temporary Opening balance.
+- The rows left out and their amounts.
+- Foreign-currency accounts aren't brought in here.
+- Replacing the chart of accounts is possible only before any transaction, with ERPNext's Chart of
+  Accounts Importer; this tool doesn't do it.
