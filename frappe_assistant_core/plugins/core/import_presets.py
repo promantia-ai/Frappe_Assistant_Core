@@ -351,6 +351,11 @@ def validate_preset(preset: Any) -> Optional[str]:
         for item in target.get("inputs") or []:
             if not all(isinstance(item.get(k), str) and item[k] for k in ("name", "column", "field", "ask")):
                 return f"target '{name}': an input needs name, column, field and ask"
+        extra_columns: List[str] = []
+        for entry in (target.get("constants") or []) + (target.get("inputs") or []):
+            if entry["column"] in columns or entry["column"] in extra_columns:
+                return f"target '{name}': column '{entry['column']}' appears twice"
+            extra_columns.append(entry["column"])
         base = target.get("mapping") or target.get("columns") or {}
         if not isinstance(base, dict):
             return f"target '{name}': mapping must be an object"

@@ -237,3 +237,79 @@ class TestApply(PresetToolCase):
         options = json.loads(frappe.get_doc("FAC Import Session", session["session_id"]).template_options)
         self.assertEqual(options["column_to_field_map"]["1"], "customer_group")
         self.assertEqual(options["column_to_field_map"]["0"], "customer_name")
+
+    def test_two_columns_with_the_same_fallback_do_not_take_the_same_field(self):
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        preset = json.loads(json.dumps(LEDGERS))
+        preset["targets"][0]["mapping"]["GSTIN"] = ["gstin_not_here", "tax_id"]
+        preset["targets"][0]["mapping"]["Opening"] = ["gstin_not_here", "tax_id"]
+        result = self._apply({"file_id": file_doc.name}, use=(preset,))
+        customers = next(s for s in result["sessions"] if s["target"] == "Customers")
+        self.assertNotIn("mapping_problems", customers)
+        self.assertEqual(customers["next"], "dry_run_import")
+        options = json.loads(frappe.get_doc("FAC Import Session", customers["session_id"]).template_options)
+        self.assertEqual(options["column_to_field_map"]["2"], "tax_id")
+        self.assertEqual(options["column_to_field_map"]["3"], "Don't Import")
+        self.assertIn("Opening (gstin_not_here / tax_id)", result["not_on_this_site"])
+
+    def test_a_mapping_that_cannot_be_saved_points_to_set_column_mapping(self):
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        with (
+            patch.object(tool_module, "resolve_mapping", return_value=({}, ["Column X has no field"])),
+            patch.object(tool_module, "duplicate_targets", return_value=[]),
+        ):
+            result = self._apply({"file_id": file_doc.name})
+        customers = next(s for s in result["sessions"] if s["target"] == "Customers")
+        self.assertEqual(customers["mapping_problems"], ["Column X has no field"])
+        self.assertNotIn("mapping", customers)
+        self.assertEqual(customers["next"], "set_column_mapping")
+
+    def test_a_failure_opening_one_target_leaves_the_others_and_no_half_writes(self):
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        real_save = tool_module.save_mapping
+
+        def save_unless_supplier(session, doctype, *args, **kwargs):
+            if doctype == "Supplier":
+                raise ValueError("cannot save the Supplier mapping")
+            return real_save(session, doctype, *args, **kwargs)
+
+        with patch.object(tool_module, "save_mapping", side_effect=save_unless_supplier):
+            result = self._apply({"file_id": file_doc.name})
+        self.assertEqual([s["target"] for s in result["sessions"]], ["Customers"])
+        self.assertEqual(
+            result["skipped_targets"],
+            [{"target": "Suppliers", "rows": 1, "reason": "cannot save the Supplier mapping"}],
+        )
+        self.assertEqual(frappe.db.count("FAC Import Session", {"target_doctype": "Supplier"}), 0)
+        self.assertEqual(
+            frappe.db.count("File", {"file_name": ["like", f"ledgers-{self.tag} - Suppliers%"]}), 0
+        )
+        self.assertEqual(
+            frappe.db.count("File", {"file_name": ["like", f"ledgers-{self.tag} - Customers%"]}), 1
+        )
+
+    def test_an_engine_doctype_missing_from_the_site_is_skipped(self):
+        rows = [
+            ["Acme"],
+            ["Trial Balance"],
+            ["Particulars", "Debit", "Credit"],
+            ["Cash", "100", ""],
+            ["Capital", "", "100"],
+        ]
+        file_doc = self._upload(f"tb-{self.tag}.csv", "\n".join(",".join(r) for r in rows).encode())
+        with patch.object(presets, "engine_doctype", return_value="No Such Doctype"):
+            result = self._apply({"file_id": file_doc.name}, use=(TB,))
+        self.assertEqual(result["sessions"], [])
+        self.assertEqual(
+            result["skipped_targets"][0]["reason"], "No Such Doctype isn't available on this site."
+        )
+
+    def test_an_unknown_target_name_is_refused_and_writes_nothing(self):
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        before = frappe.db.count("FAC Import Session"), frappe.db.count("File")
+        reply = self._run({"file_id": file_doc.name, "targets": ["Nope"]})
+        self.assertFalse(reply["success"])
+        self.assertIn(
+            "No target 'Nope'. Targets of test.ledgers: Customers, Suppliers, Accounts.", reply["error"]
+        )
+        self.assertEqual((frappe.db.count("FAC Import Session"), frappe.db.count("File")), before)

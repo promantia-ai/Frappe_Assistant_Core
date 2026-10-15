@@ -255,6 +255,33 @@ class TestValidate(BaseAssistantTest):
             (preset(skip={"totals": "Total"}), "skip.totals"),
             (preset(skip={"footer": [1]}), "skip.footer"),
             (preset(distinct_by="Client"), "distinct_by must be a list"),
+            (
+                preset(
+                    targets=[
+                        {
+                            "name": "X",
+                            "doctype": "Customer",
+                            "mapping": {"Client": "customer_name"},
+                            "constants": [{"column": "Client", "field": "customer_type", "value": "x"}],
+                        }
+                    ]
+                ),
+                "target 'X': column 'Client' appears twice",
+            ),
+            (
+                preset(
+                    targets=[
+                        {
+                            "name": "X",
+                            "doctype": "Customer",
+                            "mapping": {"Client": "customer_name"},
+                            "constants": [{"column": "Kind", "field": "customer_type", "value": "x"}],
+                            "inputs": [{"name": "k", "column": "Kind", "field": "territory", "ask": "?"}],
+                        }
+                    ]
+                ),
+                "target 'X': column 'Kind' appears twice",
+            ),
         ]
         for bad, text in cases:
             problem = presets.validate_preset(bad)
