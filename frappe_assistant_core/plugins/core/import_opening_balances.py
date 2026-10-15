@@ -19,11 +19,12 @@ through ``import_dry_run.special_engine``. An opening-balances session keeps its
 checks, creation and report are added on top.
 """
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, getdate
+from frappe.utils import cstr, flt, getdate
 
 from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
 from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
@@ -328,5 +329,432 @@ def find_account(company: str, abbr: str, text: str) -> Optional[frappe._dict]:
     return found
 
 
+# -- checking the rows -----------------------------------------------------------------------
+
+CAUSE_NOT_THIS_COMPANY = "Account of another company"
+CAUSE_GROUP_ACCOUNT = "Group account"
+CAUSE_DISABLED_ACCOUNT = "Disabled account"
+CAUSE_PROFIT_AND_LOSS = "Profit and Loss account"
+CAUSE_TEMPORARY = "Temporary Opening account"
+CAUSE_FOREIGN_CURRENCY = "Account in another currency"
+CAUSE_BOTH_SIDES = "Debit and credit both"
+CAUSE_NEGATIVE = "Negative amount"
+CAUSE_ACCOUNT_TWICE = "Account twice"
+CAUSE_NOT_BALANCED = "Debits and credits don't balance"
+NEW_CAUSES = (
+    CAUSE_NOT_THIS_COMPANY,
+    CAUSE_GROUP_ACCOUNT,
+    CAUSE_DISABLED_ACCOUNT,
+    CAUSE_PROFIT_AND_LOSS,
+    CAUSE_TEMPORARY,
+    CAUSE_FOREIGN_CURRENCY,
+    CAUSE_BOTH_SIDES,
+    CAUSE_NEGATIVE,
+    CAUSE_ACCOUNT_TWICE,
+    CAUSE_NOT_BALANCED,
+)
+# One group per cause, so "4 rows are Profit and Loss accounts" is one decision. An account that
+# can't be used is one group per account, because the fix (an account to map to) depends on which.
+BY_VALUE = (CAUSE_NOT_THIS_COMPANY, CAUSE_GROUP_ACCOUNT, CAUSE_DISABLED_ACCOUNT)
+CHILD = "Journal Entry Account"
+LABELS = {
+    "account": "Account",
+    "debit_in_account_currency": "Debit",
+    "credit_in_account_currency": "Credit",
+    "balance": "Balance",
+}
+AMOUNT_FIELDS = (
+    ("debit", "debit_in_account_currency"),
+    ("credit", "credit_in_account_currency"),
+    ("balance", "balance"),
+)
+
+
+@dataclass
+class Ready:
+    row: int
+    account: str
+    debit: float
+    credit: float
+    covered: bool
+    report_type: str = ""
+    account_type: str = ""
+
+
+class _AccountChecker(opening_stock._StockChecker):
+    """Groups failures the dry run's way, so its results file, fixes and reply are reused."""
+
+    def __init__(self):
+        super().__init__()
+        self.doctype = TARGET
+
+
+def _precision() -> int:
+    return frappe.get_precision(CHILD, "debit_in_account_currency") or 2
+
+
+def _problem(cause: str, field: str, value: str, message: str):
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    by_value = cause in BY_VALUE or cause == dry_run.CAUSE_MISSING_LINK
+    key = (cause, CHILD, field) + ((value,) if by_value else ())
+    info = {
+        "cause": cause,
+        "parent": CHILD,
+        "field": field,
+        "label": _(LABELS[field]),
+        "value": value if by_value else None,
+        "message": message,
+    }
+    return key, info
+
+
+def _line_problem(line: opening_stock.Line, balances: Dict[str, Any], find, seen: Dict[str, int]):
+    """The line's problem as (key, info), or the Ready line. ``seen`` holds the accounts of the
+    rows before it, as account -> row."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    cells = line.cells
+    if is_totals_row(cells):
+        return (opening_stock.CAUSE_TOTALS_ROW,), {
+            "cause": opening_stock.CAUSE_TOTALS_ROW,
+            "message": _("A totals row, not an account."),
+        }
+    for name, field in AMOUNT_FIELDS:
+        try:
+            opening_stock.number(cells.get(name))
+        except ValueError:
+            return _problem(
+                dry_run.CAUSE_BAD_VALUE, field, cells[name], _("'{0}' isn't a number.").format(cells[name])
+            )
+    debit, credit = balance_of(cells)
+    if debit and credit:
+        return _problem(
+            CAUSE_BOTH_SIDES,
+            "debit_in_account_currency",
+            cells.get("debit", ""),
+            _("The row has both a debit and a credit."),
+        )
+    if debit < 0 or credit < 0:
+        field = "debit_in_account_currency" if debit < 0 else "credit_in_account_currency"
+        return _problem(
+            CAUSE_NEGATIVE,
+            field,
+            cells.get("debit" if debit < 0 else "credit", ""),
+            _("A debit or credit can't be negative. Put the amount on the other side."),
+        )
+
+    text = cells.get("account", "")
+    account = find(balances["company"], frappe.get_cached_value("Company", balances["company"], "abbr"), text)
+    if not account:
+        return _problem(
+            dry_run.CAUSE_MISSING_LINK,
+            "account",
+            text,
+            _("Account '{0}' isn't in the chart of accounts.").format(text),
+        )
+    name = account.name
+    if account.company != balances["company"]:
+        return _problem(
+            CAUSE_NOT_THIS_COMPANY,
+            "account",
+            text,
+            _("{0} belongs to {1}, not {2}.").format(name, account.company, balances["company"]),
+        )
+    if account.is_group:
+        return _problem(
+            CAUSE_GROUP_ACCOUNT,
+            "account",
+            text,
+            _("{0} is a group account. Entries go to ledger accounts.").format(name),
+        )
+    if account.disabled:
+        return _problem(CAUSE_DISABLED_ACCOUNT, "account", text, _("{0} is disabled.").format(name))
+    if name == balances.get("temporary_opening_account"):
+        return _problem(
+            CAUSE_TEMPORARY,
+            "account",
+            text,
+            _(
+                "{0} is the Temporary Opening account: it takes the balancing line, not a row of the file."
+            ).format(name),
+        )
+    if (account.account_currency or balances.get("currency")) != balances.get("currency"):
+        return _problem(
+            CAUSE_FOREIGN_CURRENCY,
+            "account",
+            text,
+            _("{0} is in {1}, not {2}. Foreign-currency accounts aren't brought in here.").format(
+                name, account.account_currency, balances.get("currency")
+            ),
+        )
+    if account.report_type == "Profit and Loss" and balances.get("profit_and_loss") != "retained_earnings":
+        return _problem(
+            CAUSE_PROFIT_AND_LOSS,
+            "account",
+            text,
+            _("{0} is a Profit and Loss account, which ERPNext doesn't take in an opening entry.").format(
+                name
+            ),
+        )
+    if name in seen:
+        return _problem(
+            CAUSE_ACCOUNT_TWICE,
+            "account",
+            text,
+            _("{0} is in row {1} too.").format(name, seen[name]),
+        )
+    return Ready(
+        line.row,
+        name,
+        flt(debit, _precision()),
+        flt(credit, _precision()),
+        account.account_type in COVERED_TYPES,
+        account.report_type or "",
+        account.account_type or "",
+    )
+
+
+def _check_lines(
+    session, checker: _AccountChecker, lines: Optional[List[opening_stock.Line]] = None
+) -> List[Ready]:
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    balances, excluded = settings(session), dry_run._excluded_rows(session)
+    ready, seen = [], {}
+    for line in read_lines(session) if lines is None else lines:
+        if line.row in excluded:
+            checker.mark(line.row, "excluded")
+            continue
+        outcome = _line_problem(line, balances, find_account, seen)
+        if not isinstance(outcome, Ready):
+            checker.fail(line.row, *outcome)
+            continue
+        seen[outcome.account] = line.row
+        ready.append(outcome)
+    return ready
+
+
+def ready_lines(session) -> List[Ready]:
+    """The lines that pass the row checks now (ERPNext's own validation is not run)."""
+    return _check_lines(session, _AccountChecker())
+
+
+# -- the balance check -----------------------------------------------------------------------
+
+
+def _file_totals(session, lines: Optional[List[opening_stock.Line]] = None) -> Tuple[float, float, int]:
+    """(debit, credit, rows) over every readable row, whatever happens to it later."""
+    debit = credit = 0.0
+    rows = 0
+    for line in read_lines(session) if lines is None else lines:
+        if is_totals_row(line.cells):
+            continue
+        try:
+            row_debit, row_credit = balance_of(line.cells)
+        except ValueError:
+            continue
+        debit, credit, rows = debit + row_debit, credit + row_credit, rows + 1
+    return debit, credit, rows
+
+
+def file_balance(session, lines: Optional[List[opening_stock.Line]] = None) -> Dict[str, float]:
+    """Total debit, total credit and their difference over every row of the file that can be
+    read: before leave-outs and before the account checks."""
+    precision = _precision()
+    debit, credit, _rows = _file_totals(session, lines)
+    return {
+        "debit": flt(debit, precision),
+        "credit": flt(credit, precision),
+        "difference": flt(debit - credit, precision),
+    }
+
+
+def is_balanced(session, lines: Optional[List[opening_stock.Line]] = None) -> bool:
+    """Half a unit of the currency's smallest digit per row is allowed for rounding."""
+    debit, credit, rows = _file_totals(session, lines)
+    return abs(debit - credit) <= 0.5 * 10 ** -_precision() * max(rows, 1)
+
+
+# -- the entry -------------------------------------------------------------------------------
+
+
+def entry_lines(balances: Dict[str, Any], ready: List[Ready]) -> List[Dict[str, Any]]:
+    """The Journal Entry Account rows: each ready row that isn't covered, as the file has it;
+    Profit and Loss rows folded into one line on the retained-earnings account when that is
+    chosen; then one line to the Temporary Opening account when the others don't balance."""
+    precision = _precision()
+    fold = balances.get("profit_and_loss") == "retained_earnings"
+    lines, folded = [], 0.0
+    for row in ready:
+        if row.covered:
+            continue
+        if fold and row.report_type == "Profit and Loss":
+            folded += row.debit - row.credit
+        elif row.debit or row.credit:
+            lines.append(
+                {
+                    "account": row.account,
+                    "debit_in_account_currency": flt(row.debit, precision),
+                    "credit_in_account_currency": flt(row.credit, precision),
+                }
+            )
+    folded = flt(folded, precision)
+    if folded:
+        lines.append(
+            {
+                "account": balances["retained_earnings_account"],
+                "debit_in_account_currency": folded if folded > 0 else 0,
+                "credit_in_account_currency": -folded if folded < 0 else 0,
+            }
+        )
+    if not lines:
+        return []
+    difference = flt(
+        sum(line["debit_in_account_currency"] for line in lines)
+        - sum(line["credit_in_account_currency"] for line in lines),
+        precision,
+    )
+    if difference:
+        lines.append(
+            {
+                "account": balances["temporary_opening_account"],
+                "debit_in_account_currency": -difference if difference < 0 else 0,
+                "credit_in_account_currency": difference if difference > 0 else 0,
+            }
+        )
+    return lines
+
+
+def balancing_line(balances: Dict[str, Any], lines: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The line to the Temporary Opening account among ``lines``, as {account, debit, credit}."""
+    if lines and lines[-1]["account"] == balances.get("temporary_opening_account"):
+        last = lines[-1]
+        return {
+            "account": last["account"],
+            "debit": last["debit_in_account_currency"],
+            "credit": last["credit_in_account_currency"],
+        }
+    return None
+
+
+def build_entry(balances: Dict[str, Any], ready: List[Ready]):
+    """An unsaved opening Journal Entry of the ready rows."""
+    return frappe.get_doc(
+        {
+            "doctype": TARGET,
+            "voucher_type": VOUCHER_TYPE,
+            "is_opening": "Yes",
+            "company": balances["company"],
+            "posting_date": balances["cut_off"],
+            "user_remark": _("Opening balances imported from the old system, cut-off {0}.").format(
+                balances["cut_off"]
+            ),
+            "accounts": entry_lines(balances, ready),
+        }
+    )
+
+
+SAVEPOINT = "fac_opening_balances_check"
+
+
+def _entry_error(balances: Dict[str, Any], ready: List[Ready]) -> Optional[Exception]:
+    """None when ERPNext accepts the entry, inserted and submitted, else why not. Rolled back."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    frappe.clear_messages()
+    with dry_run.held_back():
+        frappe.db.savepoint(SAVEPOINT)
+        try:
+            entry = build_entry(balances, ready)
+            entry.insert()
+            entry.submit()
+            return None
+        except Exception as e:
+            return e
+        finally:
+            frappe.db.rollback(save_point=SAVEPOINT)
+            frappe.clear_messages()
+
+
+def _erpnext_check(
+    session, ready: List[Ready], checker: _AccountChecker, balances: Optional[Dict[str, Any]] = None
+) -> List[Ready]:
+    """ERPNext's own validation of the entry as a whole, inside a savepoint that is rolled back.
+    When it refuses, every ready row fails with its message. With no line to post (only covered
+    rows) there is nothing to ask ERPNext."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    balances = balances or settings(session)
+    if not ready or not entry_lines(balances, ready):
+        return ready
+    error = _entry_error(balances, ready)
+    if error is None:
+        return ready
+    message, kind = dry_run._message_of(error), type(error).__name__
+    for row in ready:
+        checker.fail(
+            row.row,
+            (dry_run.CAUSE_REJECTED, kind, message),
+            {"cause": dry_run.CAUSE_REJECTED, "error": kind, "message": message},
+        )
+    return []
+
+
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
-    raise NotImplementedError("The opening-balances check is added with the row checks.")
+    """The dry run of an opening-balances session: the file's balance, every row checked, ERPNext's
+    own validation of the entry, the result stored the dry run's way, with the totals."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    balances = settings(session)
+    file_doc = readable_session_file(session)
+    lines = read_lines(session)
+    balance = file_balance(session, lines)
+    checker = _AccountChecker()
+    ready = _check_lines(session, checker, lines)
+    precision = _precision()
+    balanced = is_balanced(session, lines)
+    if not balanced:
+        # the file itself is wrong, so nothing is ready: every row that passed fails together
+        message = _(
+            "Debits total {0} and credits total {1}: they differ by {2}. Nothing can be imported until "
+            "the file balances."
+        ).format(
+            frappe.format_value(balance["debit"], {"fieldtype": "Float", "precision": precision}),
+            frappe.format_value(balance["credit"], {"fieldtype": "Float", "precision": precision}),
+            frappe.format_value(abs(balance["difference"]), {"fieldtype": "Float", "precision": precision}),
+        )
+        for row in ready:
+            checker.fail(
+                row.row,
+                (CAUSE_NOT_BALANCED,),
+                {"cause": CAUSE_NOT_BALANCED, "message": message, "fix_in_file": True},
+            )
+        ready = []
+    else:
+        ready = _erpnext_check(session, ready, checker, balances)
+    for row in ready:
+        checker.mark(row.row, "ready")
+    checker.rows.sort(key=lambda r: r["row"])
+    summary = dry_run._store(session_name, file_doc, checker, len(checker.rows))
+    lines_of_entry = entry_lines(balances, ready)
+    summary["opening_balances"] = {
+        "cut_off": balances["cut_off"],
+        "rows": len(ready),
+        "lines": len(lines_of_entry),
+        "total_debit": balance["debit"],
+        "total_credit": balance["credit"],
+        "covered": len([row for row in ready if row.covered]),
+        "balancing": balancing_line(balances, lines_of_entry),
+        "profit_and_loss": balances.get("profit_and_loss", "stop"),
+    }
+    summary["balance"] = balance
+    frappe.db.set_value(
+        dry_run.SESSION_DOCTYPE,
+        session_name,
+        "validation_summary",
+        frappe.as_json(summary),
+        update_modified=False,
+    )
+    return summary

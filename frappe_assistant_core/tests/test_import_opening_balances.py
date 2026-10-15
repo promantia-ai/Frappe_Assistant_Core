@@ -451,3 +451,316 @@ class TestReadingLines(OpeningBalancesCase):
     def test_nothing_found(self):
         self.assertIsNone(self._find(f"No such account {self.tag}"))
         self.assertIsNone(self._find(""))
+
+
+class TestCheck(OpeningBalancesCase):
+    def setUp(self):
+        super().setUp()
+        self.stock = self._account("Stock", "Asset", "Stock")
+        self.retained = self._account("Retained", "Equity")
+
+    # -- helpers -------------------------------------------------------------------------
+
+    def _check(self, session):
+        reply = self._run("dry_run_import", {"session": session})
+        self.assertTrue(reply["success"], reply)
+        return reply["result"]
+
+    def _ready(self, lines, **setup):
+        session = self._session(lines)
+        self.assertTrue(self._setup(session, **setup)["success"])
+        return session, self._check(session)
+
+    def _groups(self, result):
+        return {g["cause"]: g for g in result["groups"]}
+
+    def _counts(self):
+        return frappe.db.count("Journal Entry"), frappe.db.count("GL Entry")
+
+    def _ready_lines(self, session):
+        """The Ready rows the engine finds, for entry_lines."""
+        checker = opening_balances._AccountChecker()
+        return opening_balances._check_lines(self._doc(session), checker)
+
+    def _lines_of(self, session):
+        return opening_balances.entry_lines(
+            opening_balances.settings(self._doc(session)), self._ready_lines(session)
+        )
+
+    def _simple(self, line):
+        """A file with one row in question plus a capital row."""
+        return [line, f"{self.capital},,100,"]
+
+    # -- ready rows ----------------------------------------------------------------------
+
+    def test_ready_rows_and_totals_write_nothing(self):
+        before = self._counts()
+        session, result = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result)
+        totals = result["opening_balances"]
+        self.assertEqual(totals["cut_off"], self.date)
+        self.assertEqual((totals["rows"], totals["lines"], totals["covered"]), (2, 2, 0))
+        self.assertEqual((totals["total_debit"], totals["total_credit"]), (100, 100))
+        self.assertIsNone(totals["balancing"])
+        self.assertEqual(totals["profit_and_loss"], "stop")
+        self.assertEqual(result["balance"], {"debit": 100, "credit": 100, "difference": 0})
+        self.assertEqual(self._doc(session).status, "Ready to Import")
+        self.assertEqual(self._counts(), before)
+
+    def test_account_found_without_the_company_suffix(self):
+        short = self.bank[: -len(f" - {self.abbr}")]
+        _, result = self._ready([f"{short},100,,", f"{self.capital},,100,"])
+        self.assertEqual(result["ready"], 2, result)
+
+    def test_balance_column_rows(self):
+        session = self._session([f"{self.bank},,,100", f"{self.capital},,,(100)"])
+        self.assertTrue(self._setup(session, columns={"Account": "account", "Balance": "balance"})["success"])
+        self.assertEqual(self._check(session)["ready"], 2)
+
+    def test_an_all_zero_row_is_ready_and_adds_no_line(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.capital},,100,", f"{self.retained},0,0,"]
+        )
+        self.assertEqual((result["ready"], result["failed"]), (3, 0), result)
+        self.assertEqual(result["opening_balances"]["lines"], 2)
+        self.assertEqual(len(self._lines_of(session)), 2)
+
+    # -- each cause is one group -----------------------------------------------------------
+
+    def _one_group(self, cause, line, **setup):
+        _, result = self._ready(self._simple(line), **setup)
+        groups = self._groups(result)
+        self.assertIn(cause, groups, result)
+        self.assertEqual(groups[cause]["count"], 1)
+        self.assertEqual(groups[cause]["examples"][0]["row"], 2)
+        return result, groups[cause]
+
+    def test_missing_account(self):
+        result, group = self._one_group(dry_run.CAUSE_MISSING_LINK, f"No such {self.tag},100,,")
+        self.assertEqual(group["value"], f"No such {self.tag}")
+        self.assertEqual(group["parent"], "Journal Entry Account")
+        self.assertEqual(group["field"], "account")
+
+    def test_account_of_another_company(self):
+        real = opening_balances.find_account
+
+        def find(company, abbr, text):
+            found = real(company, abbr, text)
+            if found and found.name == self.bank:
+                found["company"] = "Another Company"
+            return found
+
+        with patch.object(opening_balances, "find_account", side_effect=find):
+            self._one_group(opening_balances.CAUSE_NOT_THIS_COMPANY, f"{self.bank},100,,")
+
+    def test_group_account(self):
+        self._one_group(opening_balances.CAUSE_GROUP_ACCOUNT, f"{self.equity_group},100,,")
+
+    def test_disabled_account(self):
+        frappe.db.set_value("Account", self.bank, "disabled", 1)
+        self._one_group(opening_balances.CAUSE_DISABLED_ACCOUNT, f"{self.bank},100,,")
+
+    def test_two_disabled_accounts_are_two_groups(self):
+        frappe.db.set_value("Account", self.bank, "disabled", 1)
+        frappe.db.set_value("Account", self.expense, "disabled", 1)
+        _, result = self._ready([f"{self.bank},100,,", f"{self.expense},50,,", f"{self.capital},,150,"])
+        disabled = [g for g in result["groups"] if g["cause"] == opening_balances.CAUSE_DISABLED_ACCOUNT]
+        self.assertEqual(sorted(g["value"] for g in disabled), sorted([self.bank, self.expense]))
+
+    def test_temporary_opening_account(self):
+        self._one_group(opening_balances.CAUSE_TEMPORARY, f"{self.temporary},100,,")
+
+    def test_foreign_currency_account(self):
+        company_currency = frappe.get_cached_value("Company", self.company, "default_currency")
+        other = "USD" if company_currency != "USD" else "EUR"
+        name = self._account("Foreign", "Asset", "Bank", account_currency=other)
+        self._one_group(opening_balances.CAUSE_FOREIGN_CURRENCY, f"{name},100,,")
+
+    def test_debit_and_credit_both(self):
+        self._one_group(opening_balances.CAUSE_BOTH_SIDES, f"{self.bank},100,30,")
+
+    def test_negative_amount(self):
+        self._one_group(opening_balances.CAUSE_NEGATIVE, f"{self.bank},-100,,")
+
+    def test_not_a_number(self):
+        _, group = self._one_group(dry_run.CAUSE_BAD_VALUE, f"{self.bank},ten,,")
+        self.assertIn("ten", group["message"])
+
+    def test_totals_row(self):
+        self._one_group(opening_stock.CAUSE_TOTALS_ROW, "Total,100,100,")
+
+    def test_account_twice_names_the_earlier_row(self):
+        _, result = self._ready([f"{self.bank},60,,", f"{self.bank},40,,", f"{self.capital},,100,"])
+        group = self._groups(result)[opening_balances.CAUSE_ACCOUNT_TWICE]
+        self.assertEqual([e["row"] for e in group["examples"]], [3])
+        self.assertIn("2", group["message"])
+        self.assertEqual(result["ready"], 2)
+
+    def test_profit_and_loss_stops_by_default(self):
+        _, result = self._ready([f"{self.bank},100,,", f"{self.expense},30,,", f"{self.capital},,130,"])
+        group = self._groups(result)[opening_balances.CAUSE_PROFIT_AND_LOSS]
+        self.assertEqual(group["count"], 1)
+
+    def test_profit_and_loss_folds_into_retained_earnings(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.expense},30,,", f"{self.capital},,130,"],
+            profit_and_loss="retained_earnings",
+            retained_earnings_account=self.retained,
+        )
+        self.assertEqual((result["ready"], result["failed"]), (3, 0), result)
+        self.assertEqual(result["opening_balances"]["lines"], 3)  # bank, capital, the folded line
+        lines = self._lines_of(session)
+        folded = [line for line in lines if line["account"] == self.retained]
+        self.assertEqual(len(folded), 1)
+        self.assertEqual(folded[0]["debit_in_account_currency"], 30)
+        self.assertNotIn(self.expense, [line["account"] for line in lines])
+
+    # -- covered rows and the balancing line ---------------------------------------------
+
+    def test_covered_rows_are_ready_counted_and_not_in_the_entry(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.stock},20,,", f"{self.capital},,170,"]
+        )
+        self.assertEqual((result["ready"], result["failed"]), (4, 0), result)
+        self.assertEqual(result["opening_balances"]["covered"], 2)
+        accounts = [line["account"] for line in self._lines_of(session)]
+        self.assertNotIn(self.debtors, accounts)
+        self.assertNotIn(self.stock, accounts)
+
+    def test_balancing_line_for_receivable_and_stock(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.stock},20,,", f"{self.capital},,170,"]
+        )
+        # the entry has debit 100 and credit 170: Temporary Opening takes the 70 debit
+        last = self._lines_of(session)[-1]
+        self.assertEqual(last["account"], self.temporary)
+        self.assertEqual(last["debit_in_account_currency"], 70)
+        self.assertEqual(last["credit_in_account_currency"], 0)
+        self.assertEqual(
+            result["opening_balances"]["balancing"], {"account": self.temporary, "debit": 70, "credit": 0}
+        )
+        self.assertEqual(result["opening_balances"]["lines"], 3)
+
+    def test_balancing_line_for_payable_is_a_credit(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.creditors},,40,", f"{self.capital},,60,"]
+        )
+        last = self._lines_of(session)[-1]
+        self.assertEqual(last["account"], self.temporary)
+        self.assertEqual(last["debit_in_account_currency"], 0)
+        self.assertEqual(last["credit_in_account_currency"], 40)
+        self.assertEqual(result["ready"], 3, result)
+
+    def test_balancing_line_mixed(self):
+        _, result = self._ready(
+            [f"{self.bank},100,,", f"{self.debtors},80,,", f"{self.creditors},,30,", f"{self.capital},,150,"]
+        )
+        # the entry has debit 100 and credit 150; the covered net is a debit of 50
+        self.assertEqual(
+            result["opening_balances"]["balancing"], {"account": self.temporary, "debit": 50, "credit": 0}
+        )
+
+    def test_only_covered_rows_means_no_lines_and_no_erpnext_call(self):
+        with patch.object(opening_balances, "_entry_error") as entry_error:
+            _, result = self._ready([f"{self.debtors},50,,", f"{self.creditors},,50,"])
+        entry_error.assert_not_called()
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result)
+        self.assertEqual(result["opening_balances"]["lines"], 0)
+        self.assertEqual(result["opening_balances"]["covered"], 2)
+
+    def test_build_entry(self):
+        session, _ = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
+        entry = opening_balances.build_entry(
+            opening_balances.settings(self._doc(session)), self._ready_lines(session)
+        )
+        self.assertEqual(entry.doctype, "Journal Entry")
+        self.assertEqual(entry.voucher_type, "Opening Entry")
+        self.assertEqual(entry.is_opening, "Yes")
+        self.assertEqual(entry.company, self.company)
+        self.assertEqual(str(entry.posting_date), self.date)
+        self.assertIn(self.date, entry.user_remark)
+        self.assertEqual(len(entry.accounts), 2)
+        self.assertFalse(entry.name)
+
+    # -- the balance check ---------------------------------------------------------------
+
+    def test_a_file_that_does_not_balance_stops_everything(self):
+        before = self._counts()
+        session, result = self._ready([f"{self.bank},100,,", f"{self.capital},,90,"])
+        self.assertEqual(result["ready"], 0, result)
+        self.assertEqual(result["balance"], {"debit": 100, "credit": 90, "difference": 10})
+        group = self._groups(result)[opening_balances.CAUSE_NOT_BALANCED]
+        self.assertEqual(group["count"], 2)
+        self.assertIn("10", group["message"])
+        self.assertEqual(
+            len([g for g in result["groups"] if g["cause"] == opening_balances.CAUSE_NOT_BALANCED]), 1
+        )
+        self.assertEqual(self._doc(session).status, "Dry Run Failed")
+        self.assertEqual(self._counts(), before)
+
+    def test_balance_counts_rows_that_fail_for_another_reason(self):
+        _, result = self._ready([f"{self.bank},100,,", f"Nowhere {self.tag},,100,"])
+        self.assertEqual(result["balance"]["difference"], 0)
+        self.assertNotIn(opening_balances.CAUSE_NOT_BALANCED, self._groups(result))
+
+    def test_balance_includes_covered_rows(self):
+        _, result = self._ready([f"{self.debtors},100,,", f"{self.capital},,100,"])
+        self.assertEqual(result["balance"]["difference"], 0)
+        self.assertEqual(result["ready"], 2)
+
+    def test_tolerance_passes_a_rounding_difference(self):
+        _, result = self._ready([f"{self.bank},100,,", f"{self.capital},,99.996,"])
+        self.assertEqual(result["ready"], 2, result)
+        self.assertNotIn(opening_balances.CAUSE_NOT_BALANCED, self._groups(result))
+
+    def test_file_balance_ignores_totals_rows(self):
+        session = self._session([f"{self.bank},100,,", f"{self.capital},,100,", "Total,100,100,"])
+        self._setup(session)
+        self.assertEqual(
+            opening_balances.file_balance(self._doc(session)), {"debit": 100, "credit": 100, "difference": 0}
+        )
+
+    def test_file_balance_skips_unreadable_numbers(self):
+        session = self._session([f"{self.bank},100,,", f"{self.capital},ten,,"])
+        self._setup(session)
+        self.assertEqual(opening_balances.file_balance(self._doc(session))["debit"], 100)
+
+    # -- the validation ERPNext does itself ------------------------------------------------
+
+    def test_rejected_by_erpnext_fails_every_row_together_and_rolls_back(self):
+        period = frappe.get_doc(
+            {
+                "doctype": "Accounting Period",
+                "period_name": f"OB Closed {self.tag}",
+                "company": self.company,
+                "start_date": self.date,
+                "end_date": self.date,
+                "closed_documents": [{"document_type": "Journal Entry", "closed": 1}],
+            }
+        ).insert()
+        self.addCleanup(frappe.delete_doc, "Accounting Period", period.name, force=True)
+        before = self._counts()
+        _, result = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
+        rejected = self._groups(result)[dry_run.CAUSE_REJECTED]
+        self.assertEqual(rejected["count"], 2)
+        self.assertEqual(result["ready"], 0)
+        self.assertEqual(self._counts(), before)
+
+    def test_a_rejection_patched_in(self):
+        error = frappe.ValidationError("No way")
+        before = self._counts()
+        with patch.object(opening_balances, "_entry_error", return_value=error):
+            _, result = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
+        rejected = self._groups(result)[dry_run.CAUSE_REJECTED]
+        self.assertEqual(rejected["count"], 2)
+        self.assertIn("No way", rejected["message"])
+        self.assertEqual(self._counts(), before)
+
+    def test_erpnext_accepts_the_entry_and_it_is_rolled_back(self):
+        session, _ = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
+        before = self._counts()
+        error = opening_balances._entry_error(
+            opening_balances.settings(self._doc(session)), self._ready_lines(session)
+        )
+        self.assertIsNone(error)
+        self.assertEqual(self._counts(), before)
