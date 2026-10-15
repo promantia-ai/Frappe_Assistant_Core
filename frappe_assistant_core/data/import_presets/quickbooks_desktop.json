@@ -96,9 +96,9 @@
         "values": {"Bank": "Bank", "Accounts Receivable": "Receivable", "Accounts Payable": "Payable", "Fixed Asset": "Fixed Asset",
                    "Equity": "Equity", "Income": "Income Account", "Other Income": "Income Account", "Expense": "Expense Account",
                    "Other Expense": "Expense Account", "Cost of Goods Sold": "Cost of Goods Sold",
-                   "Other Current Asset": "Current Asset", "Other Asset": "Current Asset",
-                   "Other Current Liability": "Current Liability", "Long Term Liability": "Current Liability",
-                   "Credit Card": "Payable"}},
+                   "Other Current Asset": "Current Asset", "Other Asset": "",
+                   "Other Current Liability": "Current Liability", "Long Term Liability": "Liability",
+                   "Credit Card": ""}},
       "Number": {"from": ["Accnt. #"]},
       "Is Group": {"from": []}
     },

@@ -669,6 +669,32 @@ def missing_groups(rows: List[List[str]], preset: Dict[str, Any]) -> List[List[s
     return [g for g in preset["signature"]["required"] if not _found(g, names)]
 
 
+def why_not(rows: List[List[str]], preset: Dict[str, Any]) -> Dict[str, Any]:
+    """Why a preset the user named does not match: ``missing_headers`` (the required groups not
+    found), and ``missing_title`` (the title patterns, when none is above any row that has the
+    required groups) or ``needs_optional`` (when no such row has min_optional optional groups)."""
+    out: Dict[str, Any] = {"missing_headers": missing_groups(rows, preset)}
+    header = preset.get("header") or {}
+    signature = preset["signature"]
+    optional = signature.get("optional") or []
+    min_optional = signature.get("min_optional") or 0
+    candidates, enough = [], []
+    for index in range(min(header.get("search_rows", SEARCH_ROWS), len(rows))):
+        names = {normalise(h) for h in _header_cells(rows, index, header.get("rows", 1)) if h.strip()}
+        if not all(_found(g, names) for g in signature["required"]):
+            continue
+        candidates.append(index)
+        if sum(_found(g, names) for g in optional) >= min_optional:
+            enough.append(index)
+    if not candidates:
+        return out
+    if not enough:
+        out["needs_optional"] = {"min": min_optional, "groups": optional}
+    if signature.get("title") and not any(_title_ok(signature, rows, i) for i in enough or candidates):
+        out["missing_title"] = signature["title"]
+    return out
+
+
 # -- cleaning --------------------------------------------------------------------------------
 
 
@@ -760,8 +786,12 @@ def _when(when: Optional[Dict[str, Any]], values: Dict[str, str]) -> bool:
         return normalise(value) in {normalise(v) for v in when["in"]}
     if "not_in" in when:
         return normalise(value) not in {normalise(v) for v in when["not_in"]}
-    number = _number(value) if value else None
-    return number is not None and number != 0
+    # Only blank and a number equal to zero fail: text that isn't a number ("n/a") goes on to the
+    # dry run, which reports it, instead of being dropped here as fitting no target.
+    if not value.strip():
+        return False
+    number = _number(value)
+    return number is None or not number.is_zero()
 
 
 def clean(sheet: Sheet, match: Match) -> Cleaned:

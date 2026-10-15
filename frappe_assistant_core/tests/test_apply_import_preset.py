@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import frappe
 from openpyxl import Workbook
+from openpyxl.styles import Alignment
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
@@ -185,6 +186,22 @@ class TestApply(PresetToolCase):
         self.assertFalse(result["matched"])
         self.assertEqual(result["missing_headers"], [["Under", "Group Name"]])
 
+    def test_a_named_preset_without_its_title_says_so(self):
+        rows = [["Particulars", "Debit", "Credit"], ["Cash", "100", ""]]
+        file_doc = self._upload(f"tb-{self.tag}.csv", "\n".join(",".join(r) for r in rows).encode())
+        result = self._apply({"file_id": file_doc.name, "preset": "test.tb"}, use=(TB,))
+        self.assertFalse(result["matched"])
+        self.assertEqual(result["missing_headers"], [])
+        self.assertEqual(result["missing_title"], ["*trial balance*"])
+
+    def test_a_named_preset_short_of_optional_groups_says_how_many(self):
+        strict = {**LEDGERS, "signature": {**LEDGERS["signature"], "min_optional": 1}}
+        file_doc = self._upload(f"plain-{self.tag}.csv", b"Name,Under\nA,B\n")
+        result = self._apply({"file_id": file_doc.name, "preset": "test.ledgers"}, use=(strict,))
+        self.assertFalse(result["matched"])
+        self.assertEqual(result["missing_headers"], [])
+        self.assertEqual(result["needs_optional"], {"min": 1, "groups": [["GSTIN"], ["Missing"]]})
+
     def test_an_unknown_preset_is_refused_with_the_list(self):
         file_doc = self._upload(f"plain-{self.tag}.csv", b"Name,Under\nA,B\n")
         reply = self._run({"file_id": file_doc.name, "preset": "test.nothing"})
@@ -289,9 +306,21 @@ class TestApply(PresetToolCase):
 
     def test_a_wrong_file_type_gets_the_usual_refusal(self):
         file_doc = self._upload(f"notes-{self.tag}.txt", b"Name,Under\n")
+        before = frappe.db.count("FAC Import Session"), frappe.db.count("File")
         reply = self._run({"file_id": file_doc.name})
         self.assertFalse(reply["success"])
         self.assertIn("Only .csv, .xlsx or .xls", reply["error"])
+        self.assertEqual((frappe.db.count("FAC Import Session"), frappe.db.count("File")), before)
+
+    def test_a_file_over_50_mb_gets_the_usual_refusal_and_writes_nothing(self):
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        # The size Frappe recorded at upload is what both tools check; 50 MB is not written.
+        frappe.db.set_value("File", file_doc.name, "file_size", 51 * 1024 * 1024)
+        before = frappe.db.count("FAC Import Session"), frappe.db.count("File")
+        reply = self._run({"file_id": file_doc.name})
+        self.assertFalse(reply["success"])
+        self.assertIn("The file is larger than 50 MB.", reply["error"])
+        self.assertEqual((frappe.db.count("FAC Import Session"), frappe.db.count("File")), before)
 
     def test_a_target_the_user_cannot_import_is_skipped_with_the_reason(self):
         file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
@@ -332,7 +361,9 @@ class TestApply(PresetToolCase):
         options = json.loads(frappe.get_doc("FAC Import Session", customers["session_id"]).template_options)
         self.assertEqual(options["column_to_field_map"]["2"], "tax_id")
         self.assertEqual(options["column_to_field_map"]["3"], "Don't Import")
-        self.assertIn("Opening (gstin_not_here / tax_id)", result["not_on_this_site"])
+        # tax_id is on this site, taken by GSTIN: Opening is already mapped, not missing here.
+        self.assertEqual(result["already_mapped"], ["Opening (gstin_not_here / tax_id)"])
+        self.assertNotIn("Opening (gstin_not_here / tax_id)", result.get("not_on_this_site", []))
 
     def test_a_mapping_that_cannot_be_saved_points_to_set_column_mapping(self):
         file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
@@ -901,7 +932,12 @@ class TestShippedPresets(PresetToolCase):
         for preset_id, (rows, expected) in SHIPPED.items():
             with self.subTest(preset_id):
                 presets.clear_cache()
-                self._check(preset_id, rows, expected)
+                result, _ = self._check(preset_id, rows, expected)
+                # AC1: a doctype session is mapped, not only counted.
+                for session in result["sessions"]:
+                    if session.get("doctype"):
+                        self.assertIn("mapping", session, (preset_id, session))
+                        self.assertNotIn("mapping_problems", session, (preset_id, session))
 
     def test_every_shipped_preset_has_a_fixture(self):
         self.assertEqual(
@@ -939,6 +975,38 @@ class TestShippedPresets(PresetToolCase):
             [["Cash", "500", ""], ["HDFC Bank", "1000", ""], ["Owner Capital", "", "1500"]],
         )
         self.assertNotIn("Debit", [r[0] for r in sample])
+
+    def test_tally_trial_balance_groups_found_by_xlsx_cell_indent(self):
+        # Group names Tally doesn't ship, and ledgers indented by the cell's alignment, not spaces:
+        # only read_indents can tell the groups apart.
+        rows = [
+            (["Acme Pvt Ltd"], 0),
+            (["1-Apr-24 to 31-Mar-25"], 0),
+            (["Particulars", "Debit", "Credit"], 0),
+            (["Office Group", "1,500.00", ""], 0),
+            (["Cash", "500.00", ""], 1),
+            (["HDFC Bank", "1,000.00", ""], 1),
+            (["Owner Group", "", "1,500.00"], 0),
+            (["Owner Capital", "", "1,500.00"], 1),
+            (["Grand Total", "1,500.00", "1,500.00"], 0),
+        ]
+        workbook = Workbook()
+        worksheet = workbook.active
+        for values, indent in rows:
+            worksheet.append(values)
+            if indent:
+                worksheet.cell(row=worksheet.max_row, column=1).alignment = Alignment(indent=indent)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        file_doc = self._upload(f"tb-indent-{self.tag}.xlsx", buffer.getvalue())
+        reply = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})
+        self.assertTrue(reply["success"], reply)
+        result = reply["result"]
+        self.assertEqual(result["preset"]["id"], "tally_prime.trial_balance")
+        self.assertEqual(result["dropped"]["groups"], 2)
+        self.assertEqual(
+            [r[0] for r in result["sessions"][0]["sample_rows"]], ["Cash", "HDFC Bank", "Owner Capital"]
+        )
 
     def test_a_tally_trial_balance_is_not_claimed_by_quickbooks(self):
         rows = [
@@ -1003,6 +1071,22 @@ class TestShippedPresets(PresetToolCase):
         self.assertEqual(result["preset"]["id"], "zoho_books.customers")
         self.assertIn("zoho_books.vendors", result["also_matched"])
 
+    def test_a_named_preset_settles_the_zoho_contacts_tie(self):
+        rows = [["Display Name", "EmailID", "Status"], ["Ravi Traders", "", "Active"]]
+        file_doc = as_xlsx_file(self, f"zoho-contacts-{self.tag}.xlsx", rows)
+        reply = self.registry.get_tool("apply_import_preset")._safe_execute(
+            {"file_id": file_doc.name, "preset": "zoho_books.vendors"}
+        )
+        self.assertTrue(reply["success"], reply)
+        result = reply["result"]
+        self.assertEqual(result["preset"]["id"], "zoho_books.vendors")
+        self.assertEqual(result["also_matched"], [])
+        self.assertEqual([s["doctype"] for s in result["sessions"]], ["Supplier"])
+        self.assertEqual(
+            frappe.db.get_value("FAC Import Session", result["sessions"][0]["session_id"], "target_doctype"),
+            "Supplier",
+        )
+
     def _cleaned_rows(self, preset_id, rows):
         presets.clear_cache()
         found = next(
@@ -1018,12 +1102,17 @@ class TestShippedPresets(PresetToolCase):
             ["1500 · Truck:1510 · Depreciation", "Fixed Asset", "-2,500.00", "", "1510", ""],
             ["2100 · Visa", "Credit Card", "0.00", "", "2100", ""],
             ["2200 · Loan", "Long Term Liability", "0.00", "", "2200", ""],
+            ["1800 · Deposits", "Other Asset", "0.00", "", "1800", ""],
+            ["1200 · Prepaid", "Other Current Asset", "0.00", "", "1200", ""],
         ]
         by_name = {r["Account"]: r for r in self._cleaned_rows("quickbooks_desktop.account_listing", rows)}
         self.assertEqual(by_name["Truck"]["Is Group"], "1")
         self.assertEqual(by_name["Depreciation"]["Is Group"], "0")
-        self.assertEqual(by_name["Visa"]["Account Type"], "Payable")
-        self.assertEqual(by_name["Loan"]["Account Type"], "Current Liability")
+        # Credit Card is not Payable: the opening journal leaves Payable to the opening invoices.
+        self.assertEqual(by_name["Visa"]["Account Type"], "")
+        self.assertEqual(by_name["Loan"]["Account Type"], "Liability")
+        self.assertEqual(by_name["Deposits"]["Account Type"], "")
+        self.assertEqual(by_name["Prepaid"]["Account Type"], "Current Asset")
 
     def test_zoho_chart_of_accounts_are_flagged_as_groups_and_typed(self):
         rows = [
@@ -1032,12 +1121,18 @@ class TestShippedPresets(PresetToolCase):
             ["Office Rent", "Expense", "6001", "Rent"],
             ["Other Receivables", "Other Current Asset", "1200", ""],
             ["Deferred Tax", "Deferred Tax Asset", "1300", ""],
+            ["Corporate Card", "Credit Card", "2100", ""],
+            ["Term Loan", "Long Term Liability", "2200", ""],
+            ["Security Deposit", "Other Asset", "1400", ""],
         ]
         by_name = {r["Account"]: r for r in self._cleaned_rows("zoho_books.chart_of_accounts", rows)}
         self.assertEqual(by_name["Rent"]["Is Group"], "1")
         self.assertEqual(by_name["Office Rent"]["Is Group"], "0")
         self.assertEqual(by_name["Other Receivables"]["Account Type"], "Current Asset")
-        self.assertEqual(by_name["Deferred Tax"]["Account Type"], "Current Asset")
+        self.assertEqual(by_name["Deferred Tax"]["Account Type"], "")
+        self.assertEqual(by_name["Corporate Card"]["Account Type"], "")
+        self.assertEqual(by_name["Term Loan"]["Account Type"], "Liability")
+        self.assertEqual(by_name["Security Deposit"]["Account Type"], "")
 
     def test_a_busy_trial_balance_titled_as_on_is_still_busy(self):
         rows = [

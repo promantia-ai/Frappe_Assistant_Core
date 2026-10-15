@@ -154,9 +154,8 @@ class ApplyImportPreset(BaseTool):
                 ),
             }
             if wanted:
-                result["missing_headers"] = presets.missing_groups(
-                    heads[0].rows if heads else [], available[0]
-                )
+                # missing_headers, and missing_title or needs_optional when those are why it failed.
+                result.update(presets.why_not(heads[0].rows if heads else [], available[0]))
             return result
 
         try:
@@ -190,7 +189,7 @@ class ApplyImportPreset(BaseTool):
                     unknown[0], best.preset["id"], ", ".join(known)
                 ),
             }
-        sessions, needs, skipped, not_on_site = [], [], [], []
+        sessions, needs, skipped, not_on_site, already = [], [], [], [], []
         for rows in cleaned.targets:
             target = rows.target
             if not rows.rows or (only and target["name"] not in only):
@@ -209,9 +208,16 @@ class ApplyImportPreset(BaseTool):
             savepoint = "apply_import_preset_target"
             frappe.db.savepoint(savepoint)
             target_not_on_site: List[str] = []
+            target_already: List[str] = []
             try:
                 session = self._open(
-                    file_doc, sheet, best, cleaned, presets.finish(rows, values), target_not_on_site
+                    file_doc,
+                    sheet,
+                    best,
+                    cleaned,
+                    presets.finish(rows, values),
+                    target_not_on_site,
+                    target_already,
                 )
             except Exception as e:
                 frappe.db.rollback(save_point=savepoint)
@@ -222,6 +228,7 @@ class ApplyImportPreset(BaseTool):
                 continue
             sessions.append(session)
             not_on_site += target_not_on_site
+            already += target_already
 
         preset = best.preset
         result: Dict[str, Any] = {
@@ -255,6 +262,8 @@ class ApplyImportPreset(BaseTool):
             result["skipped_targets"] = skipped
         if not_on_site:
             result["not_on_this_site"] = list(dict.fromkeys(not_on_site))
+        if already:
+            result["already_mapped"] = list(dict.fromkeys(already))
         result["warnings"] = [] if preset.get("verified") else [_(UNVERIFIED).format(preset["system"])]
         return result
 
@@ -268,7 +277,7 @@ class ApplyImportPreset(BaseTool):
             return _("You don't have permission to create {0} records.").format(doctype)
         return None
 
-    def _open(self, file_doc, sheet, match, cleaned, rows, not_on_site) -> Dict[str, Any]:
+    def _open(self, file_doc, sheet, match, cleaned, rows, not_on_site, already) -> Dict[str, Any]:
         name = f"{os.path.splitext(file_doc.file_name)[0]} - {rows.target['name']}.csv"
         buffer = io.StringIO()
         csv.writer(buffer, lineterminator="\n").writerows([rows.header, *rows.rows])
@@ -281,14 +290,16 @@ class ApplyImportPreset(BaseTool):
             }
         ).insert()
         try:
-            return self._open_session(file_doc, sheet, match, cleaned, rows, not_on_site, cleaned_file, name)
+            return self._open_session(
+                file_doc, sheet, match, cleaned, rows, not_on_site, already, cleaned_file, name
+            )
         except Exception:
             # The savepoint rollback undoes the database rows, but not the file written to disk.
             frappe.delete_doc("File", cleaned_file.name, force=True, ignore_permissions=True)
             raise
 
     def _open_session(
-        self, file_doc, sheet, match, cleaned, rows, not_on_site, cleaned_file, name
+        self, file_doc, sheet, match, cleaned, rows, not_on_site, already, cleaned_file, name
     ) -> Dict[str, Any]:
         target = rows.target
         session = frappe.get_doc(
@@ -334,7 +345,7 @@ class ApplyImportPreset(BaseTool):
         mapping = presets.target_mapping(target)
         if target.get("doctype"):
             out["doctype"] = target["doctype"]
-            out.update(self._map(session, target["doctype"], rows.header, mapping, not_on_site))
+            out.update(self._map(session, target["doctype"], rows.header, mapping, not_on_site, already))
             # A mapping that could not be saved is not dry-run material: the model fixes it first.
             out["next"] = "set_column_mapping" if "mapping_problems" in out else "dry_run_import"
         else:
@@ -345,7 +356,7 @@ class ApplyImportPreset(BaseTool):
             out["next"] = presets.ENGINES[target["engine"]]
         return out
 
-    def _map(self, session, doctype, header, mapping, not_on_site) -> Dict[str, Any]:
+    def _map(self, session, doctype, header, mapping, not_on_site, already) -> Dict[str, Any]:
         schema = build_import_schema(doctype)
         fields = {"name"} | {f["fieldname"] for f in schema["fields"]}
         fields |= {
@@ -360,7 +371,9 @@ class ApplyImportPreset(BaseTool):
             if pick is not None:
                 taken.add(pick)
             if pick is None:
-                not_on_site.append(f"{column} ({' / '.join(candidates)})")
+                # A field this site has but an earlier column took is not missing from the site.
+                taken_here = any(c in fields for c in candidates)
+                (already if taken_here else not_on_site).append(f"{column} ({' / '.join(candidates)})")
                 pick = DONT_IMPORT
             chosen[column] = pick
         resolved, problems = resolve_mapping(doctype, schema, header, chosen)

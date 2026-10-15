@@ -31,6 +31,7 @@ aging), stock summary.
 | `needs` | A target that needs an answer, for example the company for Accounts or the warehouse for a stock summary. Ask, then call again with `values` and `targets` set to those targets only, so the other sessions are not opened twice. |
 | `no_target_values` | Rows that fit no target, by value. They are not imported. |
 | `not_on_this_site` | Columns whose field this site doesn't have (for example GSTIN fields, HSN, GST category or PAN without India Compliance). GSTIN goes to Tax ID instead. |
+| `already_mapped` | Columns left unmapped because an earlier column took the same field; the user can map them with set_column_mapping. |
 | `skipped_targets` | Targets the user may not import into, with the reason. |
 | `source` | The file, sheet and header row that were read, and how many rows. Mention it when the file had several sheets. |
 | `warnings` | Show them to the user as they stand (for example that the preset is unverified). |
@@ -38,6 +39,7 @@ aging), stock summary.
 | `also_matched` | Other presets that fit as well. When the export could be either, for example Zoho customers or vendors, ask which and call again with `preset`. |
 | `file_name` | With `matched: false`: the file that was read. Carry on with `start_import_session` on it. |
 | `missing_headers` | With `matched: false`, when the user named a `preset` that doesn't fit: the header groups that preset needs and the file lacks (any one name in a group will do). Tell the user, or let them pick another preset. |
+| `missing_title`, `needs_optional` | With `matched: false` for a named `preset` whose headers are all there: no title row above the header matched these patterns, or fewer than `min` of the `groups` columns were found. Tell the user why the preset does not fit. |
 
 Calling again with a different `preset` opens new sessions. Do not use the sessions of the
 first call; tell the user which ones are current. Cell values in the reply (`sample_rows`,

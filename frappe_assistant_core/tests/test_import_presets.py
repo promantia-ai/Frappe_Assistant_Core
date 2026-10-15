@@ -568,6 +568,31 @@ class TestMatch(BaseAssistantTest):
         self.assertEqual(presets.match_sheet([["Name", "GSTIN"], ["A", "B"]], [LEDGERS]), [])
         self.assertEqual(presets.missing_groups([["Name", "GSTIN"]], LEDGERS), [["Under", "Group Name"]])
 
+    def test_why_not_names_the_missing_required_groups(self):
+        self.assertEqual(
+            presets.why_not([["Name", "GSTIN"], ["A", "B"]], LEDGERS),
+            {"missing_headers": [["Under", "Group Name"]]},
+        )
+
+    def test_why_not_names_the_title_when_no_header_row_has_it_above(self):
+        rows = [["Particulars", "Debit", "Credit"], ["Cash", "10", ""]]
+        self.assertEqual(
+            presets.why_not(rows, TB), {"missing_headers": [], "missing_title": ["*trial balance*"]}
+        )
+        # With the title above, nothing is missing.
+        self.assertEqual(presets.why_not([["Trial Balance"], *rows], TB), {"missing_headers": []})
+
+    def test_why_not_says_how_many_optional_groups_are_needed(self):
+        strict = {**LEDGERS, "signature": {**LEDGERS["signature"], "min_optional": 1}}
+        self.assertEqual(
+            presets.why_not([["Name", "Under"], ["A", "B"]], strict),
+            {"missing_headers": [], "needs_optional": {"min": 1, "groups": [["GSTIN"], ["Missing"]]}},
+        )
+        # Required groups missing: only missing_headers, no optional count.
+        self.assertEqual(
+            presets.why_not([["Name"], ["A"]], strict), {"missing_headers": [["Under", "Group Name"]]}
+        )
+
     def test_a_title_pattern_is_required_above_the_header(self):
         rows = [["Particulars", "Debit", "Credit"], ["Cash", "10", ""]]
         self.assertEqual(presets.match_sheet(rows, [TB]), [])
@@ -705,6 +730,37 @@ class TestClean(BaseAssistantTest):
         )
         self.assertEqual(cleaned.dropped["groups"], 1)
         self.assertEqual(cleaned.dropped["no_target"], 1)  # Zero Co: nonzero filter
+
+    def test_nonzero_keeps_text_that_is_not_a_number_for_the_dry_run(self):
+        preset = {
+            "id": "test.nonzero",
+            "system": "Test",
+            "export": "Aging",
+            "signature": {"required": [["Customer"], ["Total"]]},
+            "columns": {
+                "Customer": {"from": ["Customer"]},
+                "Total": {"from": ["Total"], "parse": "amount"},
+            },
+            "targets": [
+                {
+                    "name": "Open",
+                    "engine": "opening_invoices",
+                    "invoice_type": "Sales",
+                    "when": {"column": "Total", "nonzero": True},
+                    "columns": {"Customer": "party", "Total": "outstanding_amount"},
+                }
+            ],
+        }
+        rows = [
+            ["Customer", "Total"],
+            ["Amy", "239.00"],
+            ["Bob", "n/a"],
+            ["Zero Co", "0.00"],
+            ["Blank Co", ""],
+        ]
+        cleaned = self._clean(rows, preset)
+        self.assertEqual(cleaned.targets[0].rows, [["Amy", "239"], ["Bob", "n/a"]])
+        self.assertEqual(cleaned.dropped["no_target"], 2)  # only numeric zero and blank fail nonzero
 
     def test_join_builds_a_column_from_the_non_blank_values_of_others(self):
         aging = {
