@@ -110,7 +110,10 @@
         "values": {"Bank": "Bank", "Cash": "Cash", "Accounts Receivable": "Receivable", "Accounts Payable": "Payable",
                    "Fixed Asset": "Fixed Asset", "Stock": "Stock", "Equity": "Equity", "Income": "Income Account",
                    "Other Income": "Income Account", "Expense": "Expense Account", "Other Expense": "Expense Account",
-                   "Cost Of Goods Sold": "Cost of Goods Sold"}},
+                   "Cost Of Goods Sold": "Cost of Goods Sold",
+                   "Other Current Asset": "Current Asset", "Other Asset": "Current Asset",
+                   "Other Current Liability": "Current Liability", "Long Term Liability": "Current Liability",
+                   "Credit Card": "Payable", "Deferred Tax Asset": "Current Asset"}},
       "Parent": {"from": ["Parent Account"], "fallback": "Type"},
       "Disabled": {"from": ["Account Status"], "parse": "map", "default": "0", "values": {"Active": "0", "Inactive": "1"}},
       "Is Group": {"from": []}

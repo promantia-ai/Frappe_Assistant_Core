@@ -61,7 +61,7 @@
     "signature": {
       "required": [["Account Name", "Particulars", "Account"], ["Debit", "Credit", "Balance", "Closing Balance"]],
       "optional": [["Debit"], ["Credit"]],
-      "title": ["*trial balance as on*"]
+      "title": ["*trial balance as on*", "as on *"]
     },
     "skip": {"totals": ["Total", "Grand Total"]},
     "groups": {"method": "indent", "column": "Account"},

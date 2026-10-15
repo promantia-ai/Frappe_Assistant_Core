@@ -496,7 +496,15 @@ SHIPPED.update(
         "quickbooks_desktop.customer_list": (
             [
                 ["Active Status", "Customer", "Balance", "Company", "Main Phone", "Main Email", "Bill to 1"],
-                ["Active", "Abercrombie, Kristy", "0.00", "", "415-555-6579", "kristy@example.com", "Kristy Abercrombie"],
+                [
+                    "Active",
+                    "Abercrombie, Kristy",
+                    "0.00",
+                    "",
+                    "415-555-6579",
+                    "kristy@example.com",
+                    "Kristy Abercrombie",
+                ],
                 ["Inactive", "Old Co", "0.00", "Old Co", "", "", ""],
             ],
             {"Customers": 2},
@@ -511,7 +519,15 @@ SHIPPED.update(
         "quickbooks_desktop.item_list": (
             [
                 ["Item", "Description", "Type", "Account", "On Hand", "Price", "Cost"],
-                ["Cabinets:Cabinet Pulls", "Cabinet Pulls", "Inventory Part", "Construction Income", "423", "0.00", "3.00"],
+                [
+                    "Cabinets:Cabinet Pulls",
+                    "Cabinet Pulls",
+                    "Inventory Part",
+                    "Construction Income",
+                    "423",
+                    "0.00",
+                    "3.00",
+                ],
                 ["Framing", "Framing labor", "Service", "Construction Income", "", "55.00", ""],
                 ["Subtotal", "", "Subtotal", "", "", "", ""],
             ],
@@ -570,13 +586,33 @@ SHIPPED.update(
                     "Vendor ID",
                     "Bank Account Number",
                 ],
-                ["Mehta Supplies", "Mehta Supplies", "", "", "business_none", "", "Active", "4600000000002", ""],
+                [
+                    "Mehta Supplies",
+                    "Mehta Supplies",
+                    "",
+                    "",
+                    "business_none",
+                    "",
+                    "Active",
+                    "4600000000002",
+                    "",
+                ],
             ],
             {"Suppliers": 1},
         ),
         "zoho_books.items": (
             [
-                ["Item ID", "Item Name", "SKU", "HSN/SAC", "Description", "Rate", "Usage unit", "Product Type", "Status"],
+                [
+                    "Item ID",
+                    "Item Name",
+                    "SKU",
+                    "HSN/SAC",
+                    "Description",
+                    "Rate",
+                    "Usage unit",
+                    "Product Type",
+                    "Status",
+                ],
                 ["46000001", "Steel Rod 10mm", "SR10", "7214", "", "INR 100.00", "pcs", "goods", "Active"],
                 ["46000002", "Design", "", "998391", "", "75", "", "service", "Inactive"],
             ],
@@ -630,15 +666,57 @@ SHIPPED.update(
                     "Item Name",
                     "Quantity",
                 ],
-                ["2025-03-01", "1", "INV-001", "Overdue", "9", "Ravi Traders", "2025-03-31", "1180.00", "Steel Rod", "10"],
-                ["2025-03-01", "1", "INV-001", "Overdue", "9", "Ravi Traders", "2025-03-31", "1180.00", "Paint", "2"],
-                ["2025-03-05", "2", "INV-002", "Paid", "9", "Ravi Traders", "2025-04-04", "0.00", "Paint", "1"],
+                [
+                    "2025-03-01",
+                    "1",
+                    "INV-001",
+                    "Overdue",
+                    "9",
+                    "Ravi Traders",
+                    "2025-03-31",
+                    "1180.00",
+                    "Steel Rod",
+                    "10",
+                ],
+                [
+                    "2025-03-01",
+                    "1",
+                    "INV-001",
+                    "Overdue",
+                    "9",
+                    "Ravi Traders",
+                    "2025-03-31",
+                    "1180.00",
+                    "Paint",
+                    "2",
+                ],
+                [
+                    "2025-03-05",
+                    "2",
+                    "INV-002",
+                    "Paid",
+                    "9",
+                    "Ravi Traders",
+                    "2025-04-04",
+                    "0.00",
+                    "Paint",
+                    "1",
+                ],
             ],
             {"Open invoices": 1},
         ),
         "zoho_books.bills": (
             [
-                ["Bill Date", "Bill ID", "Bill Number", "Bill Status", "Vendor Name", "Due Date", "Balance", "Item Name"],
+                [
+                    "Bill Date",
+                    "Bill ID",
+                    "Bill Number",
+                    "Bill Status",
+                    "Vendor Name",
+                    "Due Date",
+                    "Balance",
+                    "Item Name",
+                ],
                 ["2025-03-02", "7", "B-77", "Open", "Mehta Supplies", "2025-04-01", "500.00", "Steel"],
             ],
             {"Open bills": 1},
@@ -677,7 +755,15 @@ SHIPPED.update(
                 ["Acme Pharma"],
                 ["All Ledgers"],
                 ["Ledger Name", "Station", "Group", "GSTIN", "Mobile", "Balance", "Dr/Cr"],
-                ["Ravi Medicals", "Bengaluru", "Sundry Debtors", "29ABCDE1234F1Z5", "9876543210", "1000", "Dr"],
+                [
+                    "Ravi Medicals",
+                    "Bengaluru",
+                    "Sundry Debtors",
+                    "29ABCDE1234F1Z5",
+                    "9876543210",
+                    "1000",
+                    "Dr",
+                ],
                 ["Cipla Distributor", "Mumbai", "Sundry Creditors", "", "", "500", "Cr"],
             ],
             {"Customers": 1, "Suppliers": 1},
@@ -826,9 +912,58 @@ class TestShippedPresets(PresetToolCase):
         # Both Zoho contact presets have 2 required and 5 optional groups, so headers common to both tie.
         rows = [["Display Name", "EmailID", "Status"], ["Ravi Traders", "", "Active"]]
         file_doc = as_xlsx_file(self, f"zoho-contacts-{self.tag}.xlsx", rows)
-        result = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})["result"]
+        result = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})[
+            "result"
+        ]
         self.assertEqual(result["preset"]["id"], "zoho_books.customers")
         self.assertIn("zoho_books.vendors", result["also_matched"])
+
+    def _cleaned_rows(self, preset_id, rows):
+        presets.clear_cache()
+        found = next(
+            m for m in presets.match_sheet(rows, presets.load_presets()) if m.preset["id"] == preset_id
+        )
+        target = presets.clean(presets.Sheet(None, rows), found).targets[0]
+        return [dict(zip(target.header, row)) for row in target.rows]
+
+    def test_quickbooks_desktop_accounts_are_flagged_as_groups_and_typed(self):
+        rows = [
+            ["Account", "Type", "Balance Total", "Description", "Accnt. #", "Tax Line"],
+            ["1500 · Truck", "Fixed Asset", "0.00", "", "1500", ""],
+            ["1500 · Truck:1510 · Depreciation", "Fixed Asset", "-2,500.00", "", "1510", ""],
+            ["2100 · Visa", "Credit Card", "0.00", "", "2100", ""],
+            ["2200 · Loan", "Long Term Liability", "0.00", "", "2200", ""],
+        ]
+        by_name = {r["Account"]: r for r in self._cleaned_rows("quickbooks_desktop.account_listing", rows)}
+        self.assertEqual(by_name["Truck"]["Is Group"], "1")
+        self.assertEqual(by_name["Depreciation"]["Is Group"], "0")
+        self.assertEqual(by_name["Visa"]["Account Type"], "Payable")
+        self.assertEqual(by_name["Loan"]["Account Type"], "Current Liability")
+
+    def test_zoho_chart_of_accounts_are_flagged_as_groups_and_typed(self):
+        rows = [
+            ["Account Name", "Account Type", "Account Code", "Parent Account"],
+            ["Rent", "Expense", "6000", ""],
+            ["Office Rent", "Expense", "6001", "Rent"],
+            ["Other Receivables", "Other Current Asset", "1200", ""],
+            ["Deferred Tax", "Deferred Tax Asset", "1300", ""],
+        ]
+        by_name = {r["Account"]: r for r in self._cleaned_rows("zoho_books.chart_of_accounts", rows)}
+        self.assertEqual(by_name["Rent"]["Is Group"], "1")
+        self.assertEqual(by_name["Office Rent"]["Is Group"], "0")
+        self.assertEqual(by_name["Other Receivables"]["Account Type"], "Current Asset")
+        self.assertEqual(by_name["Deferred Tax"]["Account Type"], "Current Asset")
+
+    def test_a_busy_trial_balance_titled_as_on_is_still_busy(self):
+        rows = [
+            ["Acme Pvt Ltd"],
+            ["As on 31-03-2025"],
+            ["Account Name", "Debit", "Credit"],
+            ["Cash", "200.00", ""],
+            ["Capital", "", "200.00"],
+            ["Total", "200.00", "200.00"],
+        ]
+        self._check("busy.trial_balance", rows, {"Trial balance": 2})
 
     def test_a_plain_file_is_not_claimed_by_any_preset(self):
         for content in (
