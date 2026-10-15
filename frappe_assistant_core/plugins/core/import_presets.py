@@ -49,7 +49,9 @@ def normalise(text: Any) -> str:
 
 _SIDE = re.compile(r"(?<![A-Za-z])(dr|cr)\.?\s*$", re.I)
 _CURRENCY = re.compile(r"^[A-Z]{3}\s+|[₹$€£¥]")
-_QUANTITY = re.compile(r"^(\(-\)|-)?\s*([\d,]*\.?\d+)\s*(.*)$")
+# A quantity is a number followed by nothing, or by a unit that starts with a letter or "/".
+# Anything else ("1.2.3", "2024-04-01", "10-20") is not a quantity and is kept as written.
+_QUANTITY = re.compile(r"^(\(-\)|-)?\s*([\d,]*\.?\d+)\s*(?=$|[A-Za-z/])(.*)$")
 _DATE_TOKENS = re.compile(r"yyyy|yy|MMM|MM|M|dd|d")
 _STRPTIME = {"yyyy": "%Y", "yy": "%y", "MMM": "%b", "MM": "%m", "M": "%m", "dd": "%d", "d": "%d"}
 _NUMBERED = re.compile(r"^\s*(\S+)\s+·\s+(.+)$")

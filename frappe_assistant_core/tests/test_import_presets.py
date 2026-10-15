@@ -64,6 +64,18 @@ class TestParse(BaseAssistantTest):
         self.assertEqual(self.p("100.00/Nos", "rate"), "100")
         self.assertEqual(self.p("lots", "quantity"), "lots")
 
+    def test_quantity_and_unit_keep_text_that_is_not_a_quantity(self):
+        for text in ("1.2.3", "2024-04-01", "10-20"):
+            self.assertEqual(self.p(text, "quantity"), text, text)
+            self.assertEqual(self.p(text, "unit"), text, text)
+
+    def test_amount_edge_cases(self):
+        self.assertEqual(self.p("Dr", "amount"), "Dr")
+        self.assertEqual(self.p("(  )", "amount"), "(  )")
+        self.assertEqual(self.p("1.2.3", "amount"), "1.2.3")
+        self.assertEqual(self.p("-", "amount"), "-")
+        self.assertEqual(self.p("1,000.50 Dr.", "amount"), "1000.5")
+
     def test_dates(self):
         formats = ["d-MMM-yy", "d-MMM-yyyy", "dd/MM/yyyy"]
         self.assertEqual(self.p("1-Apr-24", "date", formats=formats), "2024-04-01")
