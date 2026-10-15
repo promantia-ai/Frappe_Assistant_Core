@@ -202,7 +202,7 @@
   {
     "skill_id": "migration-sign-off",
     "title": "Migration Sign-off",
-    "description": "Use when asked what a data migration brought in, for a migration or sign-off report, whether the business can go live, or for a PDF of it: run the Migration Sign-off report, relay its numbers as they are, and make the PDF with generate_document.",
+    "description": "Use when asked what a data migration brought in, for a migration or sign-off report, whether the business can go live, or for a PDF of it: run the Migration Sign-off report over all of the user's sessions, relay its numbers as they are, and always make its PDF with generate_document.",
     "skill_type": "Workflow",
     "status": "Published",
     "visibility": "Public",

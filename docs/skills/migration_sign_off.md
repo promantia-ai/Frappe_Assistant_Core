@@ -1,15 +1,20 @@
 # Migration Sign-off
 
 Use when the user asks what a data migration brought in, for a migration or sign-off report, whether
-they can go live, or for a copy of the report to keep.
+they can go live, or for a copy of the report to keep. Every time: run the report, tell the user,
+and make the PDF (steps 1 to 3), without waiting to be asked for it.
 
 ## 1. Run the report
 
-Call `generate_report` with `report_name: "Migration Sign-off"`. Filters, all optional:
+Call `generate_report` with `report_name: "Migration Sign-off"` and **no `import_session`**: a
+migration is every file the user imported (master data, opening stock, opening invoices, opening
+balances), and sessions from other chats count too. Without it, the report covers all of the
+user's sessions. Filters, all optional:
 
-- `import_session`: the session ids of the migration, comma separated.
-- `from_date` / `to_date`: without sessions, the sessions started between these dates. Leave them out
-  and the current fiscal year is used.
+- `from_date` / `to_date`: the sessions started between these dates. Left out, the current fiscal
+  year is used.
+- `import_session`: session ids, comma separated. Only when the user names the sessions themselves;
+  never just the ones in this chat.
 - `user`: whose sessions; the user's own by default.
 
 Every number in the report is counted by ERPNext from the files and from the books. Never add up,
@@ -34,9 +39,10 @@ failed, not imported, ready to sign off). Then each `section` of the rows:
 
 The same report opens in Desk: **Migration Sign-off**, for the accountant to check or print.
 
-## 3. The PDF, when the user wants a copy
+## 3. The PDF, every time
 
-Call `generate_document` with:
+The report is what the business signs, so make its PDF in the same reply: call `generate_document`
+with:
 
 - `title`: "Data migration sign-off report"; `filename`: "Migration sign-off" and today's date;
   `orientation`: "landscape".
