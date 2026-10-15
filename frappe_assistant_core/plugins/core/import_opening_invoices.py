@@ -123,6 +123,12 @@ def setup(session, company: str, invoice_type: str, cut_off: str, columns: Dict[
                 _(earlier["invoice_type"])
             )
         )
+    if earlier.get("created") and earlier.get("company") != company:
+        raise OpeningInvoicesProblem(
+            _(
+                "This session already made invoices for {0}. Start a new session for the other company."
+            ).format(earlier["company"])
+        )
     problem = setup_problem(company, invoice_type, cut_off)
     if problem:
         raise OpeningInvoicesProblem(problem)
@@ -202,7 +208,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     invoices = settings(session)
     file_doc = readable_session_file(session)
     checker = _InvoiceChecker(invoices["doctype"])
-    ready = _erpnext_check(session, _check_lines(session, checker), checker)
+    ready = _erpnext_check(session, _check_lines(session, checker), checker, commit_progress)
     for line in ready:
         checker.mark(line.row, "ready")
     checker.rows.sort(key=lambda r: r["row"])
@@ -648,23 +654,34 @@ def _invoice_error(invoices: Dict[str, Any], line: Ready) -> Optional[Exception]
             frappe.clear_messages()
 
 
-def _erpnext_check(session, ready: List[Ready], checker: _InvoiceChecker) -> List[Ready]:
+def _erpnext_check(
+    session, ready: List[Ready], checker: _InvoiceChecker, commit_progress: bool = False
+) -> List[Ready]:
     """Each ready row's invoice, inserted and submitted inside a savepoint and rolled back:
     ERPNext's own validation, GL entries included. One group per message ERPNext gives."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
-    invoices, passed = settings(session), []
-    for line in ready:
+    invoices, passed, total = settings(session), [], len(ready)
+    for done, line in enumerate(ready, start=1):
         error = _invoice_error(invoices, line)
         if error is None:
             passed.append(line)
-            continue
-        message, kind = dry_run._message_of(error), type(error).__name__
-        checker.fail(
-            line.row,
-            (dry_run.CAUSE_REJECTED, kind, message),
-            {"cause": dry_run.CAUSE_REJECTED, "error": kind, "message": message},
-        )
+        else:
+            message, kind = dry_run._message_of(error), type(error).__name__
+            checker.fail(
+                line.row,
+                (dry_run.CAUSE_REJECTED, kind, message),
+                {"cause": dry_run.CAUSE_REJECTED, "error": kind, "message": message},
+            )
+        if commit_progress and done % dry_run.PROGRESS_EVERY == 0:
+            frappe.db.set_value(
+                dry_run.SESSION_DOCTYPE,
+                session.name,
+                "progress",
+                dry_run._progress("running", done, total),
+                update_modified=False,
+            )
+            frappe.db.commit()  # each row is already rolled back, so this keeps only the progress
     return passed
 
 
@@ -797,6 +814,8 @@ def create(session) -> None:
         )
     lines = ready_lines(session)
     expected = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
+    if not lines:
+        raise OpeningInvoicesProblem(_("Nothing to import: every row is already imported or left out."))
     if len(lines) != expected:
         raise OpeningInvoicesProblem(
             _(
@@ -1010,6 +1029,7 @@ def _failed_groups(failed: Dict[str, Any], precision: int) -> List[Dict[str, Any
 def report(session) -> Dict[str, Any]:
     """The total outstanding of the invoices made, per party type, against the file's amounts for
     the same rows, and each row whose invoice differs; the rows refused and left out."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
     from frappe_assistant_core.plugins.core.import_fixes import left_out_report
 
     _settle(session)
@@ -1041,7 +1061,11 @@ def report(session) -> Dict[str, Any]:
         ),
         key=lambda d: d["row"],
     )
-    failed = _failed_groups(invoices.get("failed") or {}, precision)
+    left_out = dry_run._excluded_rows(session)  # refused, then left out: shown under left_out only
+    failed = _failed_groups(
+        {row: entry for row, entry in (invoices.get("failed") or {}).items() if int(row) not in left_out},
+        precision,
+    )
     progress = frappe.parse_json(session.progress or "{}") or {}
     gone = [n for n in created if n not in submitted]  # cancelled or deleted since
     refused = sum(g["count"] for g in failed)

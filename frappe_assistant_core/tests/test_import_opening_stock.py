@@ -917,3 +917,28 @@ class TestSecondReview(OpeningStockCase):
         self.assertIn(name, response["error"])
         self.assertTrue(frappe.db.exists("Stock Reconciliation", name))
         self.assertFalse(self._qty(self.item, self.stores))
+
+
+class TestSessionIsOneKind(OpeningStockCase):
+    def _with_invoices(self, session, **kept):
+        doc = self._doc(session)
+        options = frappe.parse_json(doc.template_options or "{}") or {}
+        options["opening_invoices"] = {"company": self.company, **kept}
+        doc.db_set("template_options", frappe.as_json(options))
+
+    def test_a_stale_invoices_setting_is_dropped(self):
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._with_invoices(session)
+        self.assertTrue(self._setup(session)["success"])
+        options = frappe.parse_json(self._doc(session).template_options)
+        self.assertNotIn("opening_invoices", options)
+        self.assertIn("opening_stock", options)
+
+    def test_invoices_already_made_refuse_the_stock_setup(self):
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._with_invoices(session, created={"SINV-1": {"row": 2, "amount": 10}})
+        before = self._doc(session).template_options
+        reply = self._setup(session)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Start a new session for the stock", reply["error"])
+        self.assertEqual(self._doc(session).template_options, before)

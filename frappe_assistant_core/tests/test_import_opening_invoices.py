@@ -1124,3 +1124,97 @@ class TestReportEdges(OpeningInvoicesCase):
         )
         report = opening_invoices.report(self._doc(session))
         self.assertEqual(report["failed"][0]["amount"], 0.3)
+
+
+class TestFinalFixes(OpeningInvoicesCase):
+    def _lines(self, n):
+        return [f"{self.customer},{self._number(i)},{self.date},,{10 * i}" for i in range(1, n + 1)]
+
+    def _leave_out(self, session, rows):
+        doc = self._doc(session)
+        doc.excluded_rows = frappe.as_json(rows)
+        doc.save()
+
+    def test_refused_rows_that_were_left_out_show_only_under_left_out(self):
+        session, result = self._ready(self._lines(3))
+        real = opening_invoices.make_invoice
+
+        def refuse_after_the_first(invoices, line):
+            if line.invoice_number != self._number(1):
+                frappe.throw("Refused for the test")
+            return real(invoices, line)
+
+        with patch.object(opening_invoices, "make_invoice", side_effect=refuse_after_the_first):
+            reply = self._run("import_opening_invoices", self._card(session, result))
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(self._doc(session).status, "Partially Completed")
+        self.assertEqual(sum(g["count"] for g in reply["result"]["failed"]), 2)
+
+        self._leave_out(session, [3, 4])
+        result = self._check(session)
+        self.assertEqual((result["ready"], self._doc(session).status), (0, "Completed"), result)
+        reply = self._run("import_opening_invoices", self._card(session, result))
+        self.assertTrue(reply["success"], reply)
+        report = reply["result"]
+        self.assertEqual(report["failed"], [])
+        self.assertNotIn("refused", report["message"])
+        self.assertEqual([(g["count"], g["rows"]) for g in report["left_out"]], [(2, "3-4")])
+
+    def test_the_company_cannot_change_once_invoices_were_made(self):
+        session, result = self._ready(self._lines(2))
+        real = opening_invoices.make_invoice
+
+        def refuse_second(invoices, line):
+            if line.invoice_number == self._number(2):
+                frappe.throw("Refused for the test")
+            return real(invoices, line)
+
+        with patch.object(opening_invoices, "make_invoice", side_effect=refuse_second):
+            self.assertTrue(self._run("import_opening_invoices", self._card(session, result))["success"])
+        self._check(session)  # one invoice made, one row still to import: the session can be set up again
+        before = self._doc(session).template_options
+        reply = self._setup(session, company=f"Another {self.tag}")
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Start a new session for the other company", reply["error"])
+        self.assertEqual(self._doc(session).template_options, before)
+        # the same company is still fine
+        self.assertTrue(self._setup(session)["success"])
+
+    def test_importing_nothing_is_refused_and_changes_nothing(self):
+        session, result = self._ready(self._lines(2))
+        self._leave_out(session, [2, 3])
+        result = self._check(session)
+        self.assertEqual(result["ready"], 0, result)
+        status = self._doc(session).status
+        reply = self._run("import_opening_invoices", self._card(session, result))
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Nothing to import", reply["error"])
+        self.assertEqual(self._doc(session).status, status)
+
+    def _count_commits(self, session, commit_progress):
+        commits = []
+
+        def spy():
+            progress = frappe.db.get_value("FAC Import Session", session, "progress")
+            commits.append(frappe.parse_json(progress))
+
+        # on the class: held_back() sets and deletes the instance's own commit while a row is tried.
+        # The spy only records, so the test transaction stays open.
+        with (
+            patch.object(dry_run, "PROGRESS_EVERY", 2),
+            patch.object(frappe.db.__class__, "commit", lambda self: spy()),
+        ):
+            opening_invoices.run(session, commit_progress=commit_progress)
+        return commits
+
+    def test_the_check_commits_its_progress_when_asked_to(self):
+        session, _ = self._ready(self._lines(5))
+        commits = self._count_commits(session, True)
+        self.assertEqual(
+            [(c["state"], c["done"], c["total"]) for c in commits], [("running", 2, 5), ("running", 4, 5)]
+        )
+        self.assertEqual(self._doc(session).status, "Ready to Import")
+
+    def test_the_check_never_commits_when_not_asked_to(self):
+        session, _ = self._ready(self._lines(5))
+        self.assertEqual(self._count_commits(session, False), [])

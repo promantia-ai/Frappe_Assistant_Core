@@ -204,18 +204,19 @@ A warehouse of another company, or a group warehouse, can be mapped to a real on
 ## Opening invoices
 
 For a session set up with `set_opening_invoices`, the check also covers: a party that doesn't exist
-(`map` it, `create` it, or `leave_out` the rows); a disabled party (`map`); a party in another currency,
+(`map` it, or `leave_out` the rows; or create it with `create_document`, see below); a disabled party (`map`); a party in another currency,
 an amount that isn't positive, a due date before the invoice date, the same invoice number twice, an
 invoice number ERPNext already has (`leave_out`, or fix in the file); an invoice dated in no fiscal year
 (`post_at_cutoff` posts it at the cut-off date, its old date kept in the remarks, or `leave_out`). Each
-ready row's invoice is created and submitted inside the check and rolled back, so ERPNext's own refusals
-show here, not during the import.
+ready row's invoice is created and submitted inside the check and rolled back, so the check catches
+most of ERPNext's own refusals. A few rows can still be refused during the import; they are reported
+row by row.
 
 The reply's `opening_invoices` has `invoice_type`, `party_type`, `rows`, `parties` and `total_amount`;
 pass `rows` and `total_amount` to `import_opening_invoices`.
 
-To `create` a missing party, call `create_document` with the documents in `masters_plan`, passing
-`import_session`. For a missing customer or supplier, `masters_plan` proposes its name, type and the
+Missing parties are created with `create_document`: pass the documents in `masters_plan` as `documents`,
+with `import_session`. For a missing customer or supplier, `masters_plan` proposes its name, type and the
 group and territory from the Settings defaults. Where a default could not fill a field (it is unset or
 is a group node), the entry has a sibling `choose` key: `{field: leaf names}`. Have the user pick one
 of those names and add it to the entry's `data` before calling `create_document`.

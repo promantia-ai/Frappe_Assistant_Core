@@ -44,5 +44,5 @@ with that check's values.
 
 - The totals, and that every invoice matches, or which rows differ.
 - Credit notes, advances and foreign-currency parties aren't brought in here.
-- Opening invoices post against the Temporary Opening account, which the opening balances (trial
-  balance) import clears later.
+- Opening invoices post against the Temporary Opening account; the offsetting opening balances are
+  posted separately.
