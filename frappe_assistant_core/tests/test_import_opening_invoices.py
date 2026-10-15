@@ -924,3 +924,84 @@ class TestCreating(OpeningInvoicesCase):
         self.assertIn("stopped", doc.steps[-1].message)
         self.assertEqual(frappe.parse_json(doc.progress)["state"], "stopped")
         self.assertEqual(frappe.parse_json(doc.progress)["done"], 2)
+
+
+class TestReport(OpeningInvoicesCase):
+    def _imported(self, lines, **setup):
+        session, result = self._ready(lines, **setup)
+        reply = self._run("import_opening_invoices", self._card(session, result))
+        self.assertTrue(reply["success"], reply)
+        return session, reply["result"]
+
+    def test_totals_match_the_file(self):
+        session, report = self._imported(
+            [
+                f"{self.customer},{self._number(1)},{self.date},,10.5",
+                f"{self.customer2},{self._number(2)},{self.date},,20",
+            ]
+        )
+        self.assertEqual(report["totals"]["Customer"], {"file": 30.5, "erpnext": 30.5, "difference": 0})
+        self.assertEqual(report["differences"], [])
+        self.assertIn("matches", report["message"])
+
+    def test_a_row_that_differs_is_listed(self):
+        session, _ = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        frappe.db.set_value("Sales Invoice", self._number(1), "outstanding_amount", 7)
+        report = opening_invoices.report(self._doc(session))
+        self.assertEqual(
+            report["differences"],
+            [
+                {
+                    "row": 2,
+                    "invoice": self._number(1),
+                    "party": self.customer,
+                    "file_amount": 10,
+                    "erpnext_amount": 7,
+                }
+            ],
+        )
+        self.assertEqual(report["totals"]["Customer"]["difference"], -3)
+
+    def test_failed_rows_are_grouped_and_left_out_rows_listed(self):
+        session, result = self._ready(
+            [
+                f"{self.customer},{self._number(1)},{self.date},,10",
+                f"{self.customer},{self._number(2)},{self.date},,20",
+                f"{self.customer},{self._number(3)},{self.date},,0",
+            ]
+        )
+        group = self._groups(result)[opening_invoices.CAUSE_NOT_POSITIVE]
+        result = self._run(
+            "dry_run_import", {"session": session, "fixes": [{"group": group["id"], "action": "leave_out"}]}
+        )["result"]
+
+        def refuse_all(invoices, line):
+            frappe.throw("Refused for the test")
+
+        with patch.object(opening_invoices, "make_invoice", side_effect=refuse_all):
+            report = self._run("import_opening_invoices", self._card(session, result))["result"]
+        self.assertEqual(report["status"], "Failed")
+        self.assertEqual(len(report["failed"]), 1)
+        self.assertEqual((report["failed"][0]["count"], report["failed"][0]["amount"]), (2, 30))
+        self.assertEqual([(entry["count"], entry["rows"]) for entry in report["left_out"]], [(1, "4")])
+
+    def test_a_stopped_job_is_marked_from_the_report(self):
+        session, _ = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        doc = self._doc(session)
+        doc.db_set("status", "Importing")
+        doc.db_set(
+            "progress",
+            frappe.as_json(
+                {
+                    "step": "Import",
+                    "state": "running",
+                    "done": 1,
+                    "total": 5,
+                    "updated_on": "2000-01-01 00:00:00",
+                }
+            ),
+        )
+        with patch.object(opening_invoices, "_job_running", return_value=False):
+            report = opening_invoices.report(self._doc(session))
+        self.assertEqual(report["status"], "Partially Completed")
+        self.assertIn("stopped", report["message"])

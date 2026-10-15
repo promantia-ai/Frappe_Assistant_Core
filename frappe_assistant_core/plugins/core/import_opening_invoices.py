@@ -960,5 +960,121 @@ def _stopped(session_name: str, reason: str) -> None:
     session.save()
 
 
+# -- the report ------------------------------------------------------------------------------
+
+STALL_SECONDS = 600  # a background import silent this long, with no job, has stopped
+DIFFERENCES_SHOWN = 50
+
+
+def _job_running(session) -> bool:
+    from frappe.utils.background_jobs import is_job_enqueued
+
+    return bool(is_job_enqueued(JOB.format(session.name)))
+
+
+def _settle(session) -> None:
+    """An import still Importing with no job behind it and no progress for a while has stopped
+    (the worker was restarted, say): say so, keeping what it committed."""
+    if session.status != "Importing" or _job_running(session):
+        return
+    progress = frappe.parse_json(session.progress or "{}") or {}
+    updated = progress.get("updated_on")
+    if updated and frappe.utils.time_diff_in_seconds(frappe.utils.now_datetime(), updated) <= STALL_SECONDS:
+        return
+    _stopped(session.name, _("the background job stopped."))
+    session.reload()
+
+
+def _failed_groups(failed: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from frappe_assistant_core.plugins.core.import_fixes import row_ranges
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for row, entry in sorted(failed.items(), key=lambda item: int(item[0])):
+        group = groups.setdefault(
+            entry["message"],
+            {"message": entry["message"], "error": entry.get("error"), "rows": [], "amount": 0},
+        )
+        group["rows"].append(int(row))
+        group["amount"] += flt(entry.get("amount"))
+    return [{**g, "count": len(g["rows"]), "rows": row_ranges(g["rows"])} for g in groups.values()]
+
+
 def report(session) -> Dict[str, Any]:
-    return {"status": session.status, "invoices": list(settings(session).get("created") or {})}
+    """The total outstanding of the invoices made, per party type, against the file's amounts for
+    the same rows, and each row whose invoice differs; the rows refused and left out."""
+    from frappe_assistant_core.plugins.core.import_fixes import left_out_report
+
+    _settle(session)
+    invoices = settings(session)
+    doctype, party_type, precision = invoices["doctype"], invoices["party_type"], _precision(invoices)
+    created = invoices.get("created") or {}
+    found = {
+        r.name: r
+        for r in frappe.get_all(
+            doctype,
+            filters={"name": ["in", list(created) or [""]]},
+            fields=["name", "docstatus", "outstanding_amount"],
+        )
+    }
+    submitted = [n for n in created if n in found and found[n].docstatus == 1]
+    file_total = flt(sum(flt(created[n]["amount"]) for n in submitted), precision)
+    erpnext_total = flt(sum(flt(found[n].outstanding_amount) for n in submitted), precision)
+    differences = sorted(
+        (
+            {
+                "row": created[n]["row"],
+                "invoice": n,
+                "party": created[n].get("party"),
+                "file_amount": flt(created[n]["amount"], precision),
+                "erpnext_amount": flt(found[n].outstanding_amount, precision),
+            }
+            for n in submitted
+            if flt(found[n].outstanding_amount, precision) != flt(created[n]["amount"], precision)
+        ),
+        key=lambda d: d["row"],
+    )
+    failed = _failed_groups(invoices.get("failed") or {})
+    progress = frappe.parse_json(session.progress or "{}") or {}
+
+    if session.status == "Importing":
+        message = _("Creating the invoices in the background: {0} of {1} done.").format(
+            progress.get("done", 0), progress.get("total", "?")
+        )
+    elif session.status in ("Partially Completed", "Failed") and not failed:
+        message = _("The import stopped before its end. Check the file again to import the rest.")
+    else:
+        message = _("{0} opening {1} invoices in ERPNext, outstanding {2} against {3} in the file.").format(
+            len(submitted), _(invoices["invoice_type"]), erpnext_total, file_total
+        )
+        if differences:
+            message += " " + _("{0} differ from the file; they are listed row by row.").format(
+                len(differences)
+            )
+        elif submitted:
+            message += " " + _("Every invoice matches the file.")
+        if failed:
+            message += " " + _("{0} rows were refused by ERPNext: fix them and check the file again.").format(
+                sum(g["count"] for g in failed)
+            )
+    out = {
+        "status": session.status,
+        "invoice_type": invoices["invoice_type"],
+        "doctype": doctype,
+        "invoices": len(submitted),
+        "totals": {
+            party_type: {
+                "file": file_total,
+                "erpnext": erpnext_total,
+                "difference": flt(erpnext_total - file_total, precision),
+            }
+        },
+        "differences": differences[:DIFFERENCES_SHOWN],
+        "differences_count": len(differences),
+        "no_longer_submitted": [n for n in created if n not in submitted],  # cancelled or deleted since
+        "failed": failed,
+        "left_out": left_out_report(session),
+        "message": message,
+    }
+    if session.status == "Importing":
+        out["progress"] = progress
+    return out
