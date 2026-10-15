@@ -1455,3 +1455,183 @@ class TestCreating(OpeningBalancesCase):
         self.assertIn("changed since the last check", reply["error"])
         self.assertEqual(self._entries(), before)
         self.assertEqual(self._doc(session).status, "Ready to Import")
+
+
+class TestReport(OpeningBalancesCase):
+    def setUp(self):
+        super().setUp()
+        self.stock = self._account("Stock", "Asset", "Stock")
+
+    def _temporary_net(self):
+        row = frappe.db.sql(
+            "select coalesce(sum(debit - credit), 0) from `tabGL Entry` where account=%s "
+            "and is_cancelled=0 and posting_date<=%s",
+            (self.temporary, self.date),
+        )
+        return row[0][0]
+
+    def _imported(self, lines, **setup):
+        session = self._session(lines)
+        self.assertTrue(self._setup(session, **setup)["success"])
+        result = self._run("dry_run_import", {"session": session})["result"]
+        card = {
+            "session": session,
+            "company": self.company,
+            "cut_off": result["opening_balances"]["cut_off"],
+            "rows": result["ready"],
+            "total_debit": result["opening_balances"]["total_debit"],
+            "total_credit": result["opening_balances"]["total_credit"],
+        }
+        reply = self._run("import_opening_balances", card)
+        for record in self._doc(session).created_records or []:
+            if record.record_doctype == "Journal Entry" and record.record_name not in self.made_entries:
+                self.made_entries.append(record.record_name)
+        self.assertTrue(reply["success"], reply)
+        return session, reply["result"]
+
+    def _second_entry(self, account, amount, party=None):
+        """An ordinary Journal Entry debiting ``account`` and crediting Capital."""
+        extra = {"party_type": "Customer", "party": party} if party else {}
+        entry = frappe.get_doc(
+            {
+                "doctype": "Journal Entry",
+                "company": self.company,
+                "posting_date": self.date,
+                "voucher_type": "Journal Entry",
+                "accounts": [
+                    {
+                        "account": account,
+                        "debit_in_account_currency": amount,
+                        "credit_in_account_currency": 0,
+                        **extra,
+                    },
+                    {
+                        "account": self.capital,
+                        "debit_in_account_currency": 0,
+                        "credit_in_account_currency": amount,
+                    },
+                ],
+            }
+        ).insert()
+        entry.submit()
+        self.made_entries.insert(0, entry.name)  # cancelled before the opening entry
+        return entry
+
+    def test_matches_after_a_clean_import(self):
+        session, report = self._imported([f"{self.bank},100,,", f"{self.capital},,100,"])
+        self.assertEqual(report["accounts"], [])
+        self.assertEqual(report["differences_count"], 0)
+        self.assertIn("matches the file, account by account", report["message"])
+        self.assertEqual(report["lines"], 2)
+        self.assertIsNone(report["balancing"])
+        self.assertEqual(report["temporary_opening"]["balance"], self._temporary_net())
+        self.assertEqual(
+            report["totals"],
+            {"file_debit": 100, "file_credit": 100, "erpnext_debit": 100, "erpnext_credit": 100},
+        )
+
+    def test_a_second_entry_makes_an_account_differ(self):
+        session, _ = self._imported([f"{self.bank},100,,", f"{self.capital},,100,"])
+        self._second_entry(self.bank, 25)
+        report = opening_balances.report(self._doc(session))
+        self.assertEqual(report["differences_count"], 2)
+        by_account = {row["account"]: row for row in report["accounts"]}
+        self.assertEqual(
+            by_account[self.bank],
+            {"account": self.bank, "file_net": 100, "erpnext_net": 125, "difference": 25},
+        )
+        self.assertEqual(
+            by_account[self.capital],
+            {"account": self.capital, "file_net": -100, "erpnext_net": -125, "difference": -25},
+        )
+        self.assertIn("2 accounts differ from the file; they are listed.", report["message"])
+        self.assertNotIn("matches", report["message"])
+
+    def test_covered_rows_are_labelled_and_never_differences(self):
+        session, report = self._imported(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.stock},20,,", f"{self.capital},,170,"]
+        )
+        covered = {row["account"]: row for row in report["covered"]}
+        self.assertEqual(set(covered), {self.debtors, self.stock})
+        self.assertEqual(
+            covered[self.debtors],
+            {
+                "account": self.debtors,
+                "file_net": 50,
+                "erpnext_net": 0,
+                "source": "opening invoices / opening stock",
+            },
+        )
+        self.assertEqual(covered[self.stock]["file_net"], 20)
+        self.assertEqual(report["accounts"], [])
+        self.assertEqual(report["differences_count"], 0)
+
+    def test_temporary_opening_holds_the_covered_rows_until_they_are_imported(self):
+        before = self._temporary_net()
+        session, report = self._imported(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.stock},20,,", f"{self.capital},,170,"]
+        )
+        self.assertEqual(report["balancing"], {"account": self.temporary, "debit": 70, "credit": 0})
+        self.assertEqual(report["temporary_opening"], {"account": self.temporary, "balance": before + 70})
+        self.assertIn("Temporary Opening still holds", report["message"])
+        self.assertIn("it clears when the opening invoices and opening stock are imported", report["message"])
+
+    def test_temporary_opening_not_netting_to_zero_when_everything_is_in(self):
+        session, _ = self._imported([f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.capital},,150,"])
+        customer = frappe.get_all("Customer", pluck="name", limit=1)
+        if not customer:
+            self.skipTest("the site has no Customer")
+        self._second_entry(self.debtors, 50, party=customer[0])  # the covered row is now in ERPNext
+        report = opening_balances.report(self._doc(session))
+        self.assertEqual(report["covered"][0]["erpnext_net"], 50)
+        self.assertEqual(report["temporary_opening"]["balance"], self._temporary_net())
+        self.assertIn("does not net to zero", report["message"])
+        self.assertNotIn("clears when", report["message"])
+
+    def test_differences_are_capped_with_their_count(self):
+        session, _ = self._imported([f"{self.bank},100,,", f"{self.capital},,100,"])
+        self._second_entry(self.bank, 5)
+        with patch.object(opening_balances, "DIFFERENCES_SHOWN", 1):
+            report = opening_balances.report(self._doc(session))
+        self.assertEqual(len(report["accounts"]), 1)
+        self.assertEqual(report["differences_count"], 2)
+        self.assertIn("first 1 of 2", report["message"])
+
+    def test_left_out_rows_are_listed_with_their_amounts(self):
+        session, _ = self._imported(
+            [f"{self.bank},100,,", f"{self.expense},30,,", f"{self.capital},,130,"],
+            profit_and_loss="retained_earnings",
+            retained_earnings_account=self._account("Retained", "Equity"),
+        )
+        self._doc(session).db_set("excluded_rows", frappe.as_json([3]))
+        report = opening_balances.report(self._doc(session))
+        self.assertEqual(len(report["not_brought_in"]), 1)
+        held = report["not_brought_in"][0]
+        self.assertEqual((held["count"], held["rows"], held["debit"], held["credit"]), (1, "3", 30, 0))
+        self.assertIn("30", report["message"])
+
+    def test_a_session_without_an_entry_has_an_empty_report(self):
+        session = self._session()
+        self.assertTrue(self._setup(session)["success"])
+        report = opening_balances.report(self._doc(session))
+        self.assertIsNone(report["journal_entry"])
+        self.assertEqual((report["accounts"], report["covered"], report["not_brought_in"]), ([], [], []))
+        self.assertEqual(report["differences_count"], 0)
+
+    def test_the_repeat_call_returns_the_full_report(self):
+        session, first = self._imported(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.capital},,150,"]
+        )
+        card = {
+            "session": session,
+            "company": self.company,
+            "cut_off": self.date,
+            "rows": 3,
+            "total_debit": 150,
+            "total_credit": 150,
+        }
+        again = self._run("import_opening_balances", card)
+        self.assertTrue(again["success"], again)
+        for key in ("accounts", "covered", "temporary_opening", "totals", "differences_count", "message"):
+            self.assertIn(key, again["result"])
+        self.assertEqual(again["result"]["covered"], first["covered"])

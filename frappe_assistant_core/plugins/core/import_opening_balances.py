@@ -948,15 +948,176 @@ def create(session) -> None:
         frappe.clear_messages()
 
 
+DIFFERENCES_SHOWN = 50
+COVERED_SOURCE = "opening invoices / opening stock"
+
+
+def _erpnext_sums(company: str, cut_off: str, accounts: List[str]) -> Dict[str, Dict[str, float]]:
+    """Debit and credit of each account's GL Entries up to the cut-off: one query, read only."""
+    if not accounts:
+        return {}
+    rows = frappe.get_all(
+        "GL Entry",
+        filters={
+            "company": company,
+            "is_cancelled": 0,
+            "posting_date": ["<=", cut_off],
+            "account": ["in", accounts],
+        },
+        fields=["account", "sum(debit) as debit", "sum(credit) as credit"],
+        group_by="account",
+    )
+    return {row.account: {"debit": flt(row.debit), "credit": flt(row.credit)} for row in rows}
+
+
+def _not_brought_in(session, precision: int) -> List[Dict[str, Any]]:
+    """The rows left out, by reason, with the file's amounts when the sheet can be read."""
+    from frappe_assistant_core.plugins.core import import_fixes
+
+    left_out = import_fixes.left_out(session)
+    if not left_out:
+        return []
+    try:
+        cells = {line.row: line.cells for line in read_lines(session)}
+    except Exception:
+        frappe.clear_messages()
+        cells = {}
+    groups: Dict[str, Dict[str, Any]] = {}
+    for entry in left_out:
+        reason = entry["reason"] or _("Left out by the user")
+        group = groups.setdefault(reason, {"reason": reason, "rows": [], "debit": 0.0, "credit": 0.0})
+        group["rows"].append(entry["row"])
+        try:
+            debit, credit = balance_of(cells.get(entry["row"]) or {})
+        except ValueError:
+            continue
+        group["debit"] += flt(debit)
+        group["credit"] += flt(credit)
+    return [
+        {
+            "reason": group["reason"],
+            "count": len(group["rows"]),
+            "rows": import_fixes.row_ranges(group["rows"]),
+            "debit": flt(group["debit"], precision),
+            "credit": flt(group["credit"], precision),
+        }
+        for group in groups.values()
+    ]
+
+
 def report(session) -> Dict[str, Any]:
-    """What the import made. A first, minimal report: the status and the entry."""
-    created = settings(session).get("created") or {}
+    """The opening entry against ERPNext's ledger at the cut-off, account by account: each
+    account whose balance differs from the file, the covered rows (brought in by the opening
+    invoices and stock), the Temporary Opening balance and the rows left out. Read only."""
+    balances = settings(session)
+    created = balances.get("created") or {}
     name = next(iter(created), None)
     held = created.get(name) or {}
-    if name:
-        message = _("Opening Journal Entry {0}: {1} lines from {2} rows.").format(
-            name, held.get("lines"), held.get("rows")
+    precision = _precision()
+    out: Dict[str, Any] = {
+        "status": session.status,
+        "journal_entry": name,
+        "lines": held.get("lines"),
+        "balancing": held.get("balancing"),
+        "accounts": [],
+        "differences_count": 0,
+        "covered": [],
+        "temporary_opening": None,
+        "not_brought_in": [],
+        "totals": {"file_debit": 0, "file_credit": 0, "erpnext_debit": 0, "erpnext_credit": 0},
+    }
+    if not name:
+        out["message"] = _("No opening entry was created.")
+        return out
+
+    company, cut_off = balances.get("company"), balances.get("cut_off")
+    temporary = balances.get("temporary_opening_account")
+    expected = held.get("expected") or {}
+    found = _erpnext_sums(company, cut_off, list({*expected, temporary} - {None}))
+    types = {
+        row.name: row.account_type
+        for row in frappe.get_all(
+            "Account", filters={"name": ["in", list(expected) or [""]]}, fields=["name", "account_type"]
         )
+    }
+
+    def net(sums: Dict[str, float]) -> float:
+        return flt(flt(sums.get("debit")) - flt(sums.get("credit")), precision)
+
+    differences, covered = [], []
+    totals = {"file_debit": 0.0, "file_credit": 0.0, "erpnext_debit": 0.0, "erpnext_credit": 0.0}
+    for account in sorted(expected):
+        file_sums, sums = expected[account], found.get(account, {})
+        file_net, erpnext_net = net(file_sums), net(sums)
+        if types.get(account) in COVERED_TYPES:
+            covered.append(
+                {
+                    "account": account,
+                    "file_net": file_net,
+                    "erpnext_net": erpnext_net,
+                    "source": COVERED_SOURCE,
+                }
+            )
+            continue
+        if account == temporary:
+            continue  # the balancing account is not in the file: reported on its own
+        totals["file_debit"] += flt(file_sums.get("debit"))
+        totals["file_credit"] += flt(file_sums.get("credit"))
+        totals["erpnext_debit"] += flt(sums.get("debit"))
+        totals["erpnext_credit"] += flt(sums.get("credit"))
+        if erpnext_net != file_net:
+            differences.append(
+                {
+                    "account": account,
+                    "file_net": file_net,
+                    "erpnext_net": erpnext_net,
+                    "difference": flt(erpnext_net - file_net, precision),
+                }
+            )
+    temporary_balance = net(found.get(temporary, {}))
+    everything_in = all(row["erpnext_net"] == row["file_net"] for row in covered)
+    not_brought_in = _not_brought_in(session, precision)
+
+    parts = []
+    if differences:
+        parts.append(_("{0} accounts differ from the file; they are listed.").format(len(differences)))
+        if len(differences) > DIFFERENCES_SHOWN:
+            parts.append(_("The first {0} of {1} are shown.").format(DIFFERENCES_SHOWN, len(differences)))
     else:
-        message = _("No opening entry was created.")
-    return {"status": session.status, "journal_entry": name, "message": message}
+        parts.append(
+            _("ERPNext's trial balance at {0} matches the file, account by account.").format(cut_off)
+        )
+    if temporary_balance:
+        if everything_in:
+            parts.append(
+                _("Temporary Opening does not net to zero: {0} is not accounted for.").format(
+                    temporary_balance
+                )
+            )
+        else:
+            parts.append(
+                _(
+                    "Temporary Opening still holds {0}: it clears when the opening invoices and opening "
+                    "stock are imported."
+                ).format(temporary_balance)
+            )
+    if not_brought_in:
+        parts.append(
+            _("Left out of the import: {0} rows (debit {1}, credit {2}).").format(
+                sum(group["count"] for group in not_brought_in),
+                flt(sum(group["debit"] for group in not_brought_in), precision),
+                flt(sum(group["credit"] for group in not_brought_in), precision),
+            )
+        )
+    out.update(
+        {
+            "accounts": differences[:DIFFERENCES_SHOWN],
+            "differences_count": len(differences),
+            "covered": covered,
+            "temporary_opening": {"account": temporary, "balance": temporary_balance},
+            "not_brought_in": not_brought_in,
+            "totals": {key: flt(value, precision) for key, value in totals.items()},
+            "message": " ".join(parts),
+        }
+    )
+    return out
