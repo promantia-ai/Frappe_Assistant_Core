@@ -130,6 +130,21 @@ class TestDataImportSession(run_tests.ImportRunCase):
         for row in result["data"]:
             self.assertIn(row["item"].replace("|", "\\|"), text)
 
+    def test_text_from_files_and_reasons_is_escaped_for_desk(self):
+        session, _checked, _result = self._partly_imported()
+        # Production: a left-out reason is the user's own words; a cell of a file can hold anything.
+        doc = self._doc(session)
+        rules = frappe.parse_json(doc.transformation_rules)
+        rules["left_out"]["3"] = "<img src=x onerror=alert(1)>"
+        doc.db_set("transformation_rules", frappe.as_json(rules))
+
+        result = self._report(import_session=session, document=1)
+
+        details = " ".join(row.get("details") or "" for row in result["data"])
+        self.assertNotIn("<img", details)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", details)
+        self.assertNotIn("<img", result["message"])
+
     def test_without_document_the_message_is_the_headline(self):
         session, _checked, _result = self._partly_imported()
 

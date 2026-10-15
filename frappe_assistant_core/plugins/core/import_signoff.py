@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, cint, cstr, flt, fmt_money, getdate, now_datetime
+from frappe.utils import add_days, cint, cstr, escape_html, flt, fmt_money, getdate, now_datetime
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 from frappe_assistant_core.plugins.core import import_failures, import_fixes
@@ -511,6 +511,19 @@ def columns() -> List[Dict[str, Any]]:
 
 def rows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The report as one table, a section after another: records per DocType, why rows aren't
+    in, opening balances, the trial balance, the open points and the sessions. The text comes
+    from users' files, their reasons and ERPNext's messages, and Desk shows a report's cells and
+    message as HTML: so every text is escaped here."""
+    out = _rows(report)
+    for row in out:
+        for key in ("item", "details"):
+            if row.get(key) not in (None, ""):
+                row[key] = escape_html(cstr(row[key]))
+    return out
+
+
+def _rows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The report as one table, a section after another: records per DocType, why rows aren't
     in, opening balances, the trial balance, the open points and the sessions."""
     out: List[Dict[str, Any]] = []
     for entry in report["doctypes"]:
@@ -697,7 +710,9 @@ def document(report: Dict[str, Any]) -> str:
     cards = summary_cards(report)
     out = [
         "**"
-        + _("Generated on {0} by {1}.").format(report["generated_on"][:16], report["generated_by"])
+        + _("Generated on {0} by {1}.").format(
+            report["generated_on"][:16], escape_html(report["generated_by"])
+        )
         + "**",
         "",
         report["message"],
