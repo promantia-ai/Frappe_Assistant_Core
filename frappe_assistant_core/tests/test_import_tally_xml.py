@@ -3,6 +3,7 @@ Tally XML exports (#34001): reading a Tally masters export safely, counting its 
 turning ledgers and stock items into rows the #34000 Tally presets match.
 """
 
+import time
 from unittest.mock import patch
 
 import frappe
@@ -166,6 +167,53 @@ class TestSurvey(XmlCase):
             tally.survey(frappe.get_doc("File", doc.name))
         self.assertIn("50 MB", str(raised.exception))
 
+    def test_empty_bom_only_and_garbage_files_are_refused(self):
+        doc = self._upload(export(ledger("A", "Sundry Debtors")))
+        # Frappe will not store an empty File, so the content is swapped in at read time.
+        no_element = "Could not read the XML: no element found (line 0)"
+        for label, content, message in (
+            ("empty", b"", no_element),
+            ("bom only", b"\xff\xfe", tally.NOT_TALLY),
+            ("garbage", b"\x00\x01 not xml", tally.NOT_TALLY),
+        ):
+            with self.subTest(label):
+                with patch.object(type(doc), "get_content", return_value=content):
+                    with self.assertRaises(FileProblem) as raised:
+                        tally.survey(doc)
+                self.assertEqual(str(raised.exception), message)
+
+    def test_billion_laughs_is_not_expanded(self):
+        entities = '<!ENTITY a0 "lol">' + "".join(
+            f'<!ENTITY a{i} "{f"&a{i - 1};" * 10}">' for i in range(1, 6)
+        )
+        content = (
+            f'<?xml version="1.0"?><!DOCTYPE ENVELOPE [{entities}]>'
+            "<ENVELOPE><BODY><IMPORTDATA><REQUESTDATA><TALLYMESSAGE>"
+            '<LEDGER NAME="X"><PARENT>&a5;</PARENT></LEDGER>'
+            "</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>"
+        ).encode()
+        started = time.monotonic()
+        doc = self._upload(content)
+        try:
+            found = tally.survey(doc)
+        except FileProblem:
+            # libxml2 may stop at the amplified entity; that refusal is as safe as not expanding it.
+            pass
+        else:
+            parent = "".join(found.parts["ledgers"].by_parent)
+            self.assertLess(len(parent), 100)
+            self.assertNotIn("lollol", parent)
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_text_drops_control_characters_and_spaces_out_whitespace(self):
+        self.assertEqual(tally._text("Pri\x04mary"), "Primary")
+        self.assertEqual(tally._text("\x04 Primary"), "Primary")
+        self.assertEqual(tally._text("Ravi\nTraders\t\r\nPvt"), "Ravi Traders Pvt")
+
+    def test_control_character_reference_in_a_record_is_dropped(self):
+        found = tally.survey(self._upload(export(group("Debtors", parent="Pri&#4;mary"))))
+        self.assertEqual(dict(found.parts["groups"].by_parent), {"Primary": 1})
+
 
 class TestPartSheet(XmlCase):
     def test_ledger_columns_from_every_candidate(self):
@@ -283,6 +331,24 @@ class TestPartSheet(XmlCase):
         with patch.object(tally, "MAX_PRESET_ROWS", 5), self.assertRaises(FileProblem) as raised:
             tally.part_sheet(doc, "ledgers")
         self.assertIn("more than 5", str(raised.exception))
+
+    def test_exactly_the_row_limit_in_records_is_allowed(self):
+        with patch.object(tally, "MAX_PRESET_ROWS", 5):
+            doc = self._upload(export(*[ledger(f"P{i}", "Sundry Debtors") for i in range(5)]))
+            self.assertEqual(len(tally.part_sheet(doc, "ledgers").rows), 6)  # header + 5 records
+            doc = self._upload(export(*[ledger(f"P{i}", "Sundry Debtors") for i in range(6)]))
+            with self.assertRaises(FileProblem):
+                tally.part_sheet(doc, "ledgers")
+
+    def test_hostile_opening_balances_are_kept_as_written(self):
+        values = ["1E999999999", "-1E999999999", "NaN", "Infinity", "-Infinity", "1E31"]
+        doc = self._upload(
+            export(*[ledger(f"P{i}", "Sundry Debtors", OPENINGBALANCE=v) for i, v in enumerate(values)])
+        )
+        started = time.monotonic()
+        sheet = tally.part_sheet(doc, "ledgers")
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual([row[8] for row in sheet.rows[1:]], values)
 
 
 class TestPartsProblem(XmlCase):

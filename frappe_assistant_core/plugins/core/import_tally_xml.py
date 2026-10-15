@@ -70,7 +70,7 @@ FLIP_SIGN = {
 TAGS = {part: tag for tag, part in PARTS.items()}
 LABELS = {"ledgers": "ledgers", "stock_items": "stock items", "groups": "groups"}
 
-_CONTROL = re.compile(r"[\x00-\x1f]+")
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")  # every control character but tab, newline, return
 
 
 @dataclass
@@ -106,7 +106,7 @@ def _local(tag: Any) -> str:
 
 
 def _text(value: Optional[str]) -> str:
-    return " ".join(_CONTROL.sub(" ", value or "").split())
+    return " ".join(_CONTROL.sub("", value or "").split())
 
 
 def _value(element, path: str) -> str:
@@ -197,6 +197,8 @@ def part_sheet(file_doc, part: str) -> Sheet:
     for tag, element in _walk(_content(file_doc), []):
         if tag != TAGS[part]:
             continue
+        # The limit counts records, not the header: exactly MAX_PRESET_ROWS records are allowed and
+        # the next one is refused (rows holds the header plus the records read so far).
         if len(rows) > MAX_PRESET_ROWS:
             raise FileProblem(
                 _("This export has more than {0:,} {1}. Export them from Tally in parts.").format(
@@ -208,7 +210,9 @@ def part_sheet(file_doc, part: str) -> Sheet:
             value = next((v for v in (_value(element, path) for path in paths) if v), "")
             if column in FLIP_SIGN and value:
                 number = _number(value)
-                value = value if number is None else _plain(-number)
+                # Hostile values (1E999999999, NaN, Infinity) are kept as written, never expanded.
+                if number is not None and number.is_finite() and abs(number.adjusted()) < 30:
+                    value = _plain(-number)
             row.append(value)
         rows.append(row)
     return Sheet(f"{part} (Tally XML)", rows)
