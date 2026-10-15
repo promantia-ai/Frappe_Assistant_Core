@@ -290,6 +290,31 @@ class TestSetup(OpeningBalancesCase):
         self.assertIn("already", error)
         self.assertIn(entry.name, error)
 
+    def test_the_dry_run_refuses_a_company_with_a_submitted_period_closing_voucher(self):
+        session = self._session()
+        self.assertTrue(self._setup(session)["success"])
+        real = frappe.db.exists
+
+        def closed(doctype=None, *args, **kwargs):
+            if doctype == "Period Closing Voucher":
+                return "PCV-0001"
+            return real(doctype, *args, **kwargs)
+
+        with patch.object(opening_balances.frappe.db, "exists", side_effect=closed):
+            reply = self._run("dry_run_import", {"session": session})
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Period Closing Voucher", frappe.as_json(reply))
+
+    def test_the_dry_run_refuses_a_date_with_an_opening_entry_already(self):
+        session = self._session()
+        self.assertTrue(self._setup(session)["success"])
+        entry = self._opening_entry()
+        reply = self._run("dry_run_import", {"session": session})
+        self.assertFalse(reply["success"], reply)
+        error = frappe.as_json(reply)
+        self.assertIn("already", error)
+        self.assertIn(entry.name, error)
+
     def test_this_sessions_own_entry_is_not_a_conflict(self):
         entry = self._opening_entry()
         session = self._session()
@@ -583,6 +608,22 @@ class TestCheck(OpeningBalancesCase):
         self.assertEqual(group["value"], f"No such {self.tag}")
         self.assertEqual(group["parent"], "Journal Entry Account")
         self.assertEqual(group["field"], "account")
+
+    def _hint(self, line, transactions):
+        with patch.object(opening_balances, "_has_transactions", return_value=transactions):
+            _, result = self._ready(self._simple(line))
+        return result["opening_balances"].get("chart_hint")
+
+    def test_a_missing_account_in_a_company_without_transactions_carries_the_chart_hint(self):
+        hint = self._hint(f"No such {self.tag},100,,", False)
+        self.assertIn("Chart of Accounts Importer", hint)
+        self.assertTrue(hint.startswith("This company has no transactions yet."))
+
+    def test_no_chart_hint_once_the_company_has_transactions(self):
+        self.assertIsNone(self._hint(f"No such {self.tag},100,,", True))
+
+    def test_no_chart_hint_when_no_account_is_missing(self):
+        self.assertIsNone(self._hint(f"{self.bank},100,,", False))
 
     def test_account_of_another_company(self):
         real = opening_balances.find_account
@@ -1726,6 +1767,11 @@ class TestReport(OpeningBalancesCase):
         held = report["not_brought_in"][0]
         self.assertEqual((held["count"], held["rows"], held["debit"], held["credit"]), (1, "3", 30, 0))
         self.assertIn("30", report["message"])
+        self.assertIn(
+            "Rows left out (net 30.00 debit) were not brought in, so Temporary Opening will not net "
+            "to zero by that amount.",
+            report["message"],
+        )
 
     def test_a_session_without_an_entry_has_an_empty_report(self):
         session = self._session()

@@ -248,3 +248,8 @@ The reply's `opening_balances` has `cut_off`, `rows`, `lines` (the entry's lines
 imports),
 `balancing` (the Temporary Opening line) and `profit_and_loss`. Pass `rows`, `total_debit` and
 `total_credit` to `import_opening_balances`.
+
+When an account is missing and the company has no transactions at all, `opening_balances` also
+carries `chart_hint`: if the chart of accounts should be replaced to match the old system, do it
+first with ERPNext's Chart of Accounts Importer, which refuses once any transaction exists. It is
+absent otherwise.
