@@ -338,7 +338,11 @@ def load_presets() -> List[Dict[str, Any]]:
     by_id: Dict[str, Dict[str, Any]] = {}
     for path in _preset_files():
         for preset in _read_file(path):
-            problem = validate_preset(preset)
+            try:
+                problem = validate_preset(preset)
+            except Exception as e:
+                # A shape validate_preset does not expect is this preset's problem only.
+                problem = str(e) or type(e).__name__
             if problem:
                 ident = preset.get("id") if isinstance(preset, dict) else None
                 frappe.log_error(title="Import preset skipped", message=f"{path}: {ident}: {problem}")

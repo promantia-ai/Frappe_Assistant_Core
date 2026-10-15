@@ -272,3 +272,26 @@ class TestLoad(BaseAssistantTest):
         first = presets.load_presets()
         with patch.object(presets, "_preset_files", side_effect=AssertionError("read again")):
             self.assertIs(presets.load_presets(), first)
+
+    def test_a_preset_with_the_wrong_shape_is_skipped_and_the_others_load(self):
+        self._write(
+            "odd.json",
+            [
+                preset(id="odd.one", header="not a dict"),
+                preset(
+                    id="odd.two",
+                    targets=[{"name": "X", "doctype": "Customer", "when": "Group"}],
+                ),
+                preset(id="good.one"),
+            ],
+        )
+        hooks, app_path = self._hooks([{"app": "partner_app", "path": "odd.json"}])
+        with hooks, app_path, patch.object(presets, "PRESET_DIR", os.path.join(self.folder, "none")), patch(
+            "frappe.log_error"
+        ) as log:
+            ids = [p["id"] for p in presets.load_presets()]
+        self.assertEqual(ids, ["good.one"])
+        logged = frappe.as_json([c.kwargs["message"] for c in log.call_args_list])
+        self.assertIn("odd.one", logged)
+        self.assertIn("odd.two", logged)
+        self.assertEqual(log.call_count, 2)
