@@ -227,7 +227,28 @@ class TestValidate(BaseAssistantTest):
             ),
             (
                 preset(targets=[{"name": "X", "engine": "opening_stock", "columns": {"Client": ["qty", 3]}}]),
-                "'Client' must map to a field",
+                "is not a field of opening_stock",
+            ),
+            (
+                preset(targets=[{"name": "X", "engine": "opening_stock", "columns": {"Client": ["qty"]}}]),
+                "is not a field of opening_stock",
+            ),
+            (
+                preset(targets=[{"name": "X", "engine": "opening_stock", "columns": {"Client": 5}}]),
+                "is not a field of opening_stock",
+            ),
+            (
+                preset(
+                    targets=[
+                        {
+                            "name": "X",
+                            "engine": "opening_stock",
+                            "columns": {"Client": "qty"},
+                            "constants": [{"column": "Kind", "field": "colour", "value": "x"}],
+                        }
+                    ]
+                ),
+                "'colour' is not a field of opening_stock",
             ),
             (preset(groups={"method": "indent", "column": "Client", "names": "Group"}), "groups.names"),
             (preset(skip={"totals": "Total"}), "skip.totals"),
@@ -259,6 +280,17 @@ class TestValidate(BaseAssistantTest):
             distinct_by=["Client"],
         )
         self.assertIsNone(presets.validate_preset(full))
+        engine = preset(
+            targets=[
+                {
+                    "name": "Stock",
+                    "engine": "opening_stock",
+                    "columns": {"Client": "qty"},
+                    "constants": [{"column": "Unit", "field": "uom", "value": "Nos"}],
+                }
+            ]
+        )
+        self.assertIsNone(presets.validate_preset(engine))
 
     def test_target_mapping_adds_constants_and_inputs(self):
         target = {

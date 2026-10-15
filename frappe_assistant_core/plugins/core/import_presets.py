@@ -340,6 +340,8 @@ def validate_preset(preset: Any) -> Optional[str]:
         if not isinstance(base, dict):
             return f"target '{name}': mapping must be an object"
         for column, value in base.items():
+            if target.get("engine") and not isinstance(value, str):
+                return f"target '{name}': '{value}' is not a field of {target['engine']}"
             if not _field_spec(value):
                 return f"target '{name}': '{column}' must map to a field or a list of fields"
         known = set(columns) | {
@@ -355,10 +357,9 @@ def validate_preset(preset: Any) -> Optional[str]:
             if engine == "opening_invoices" and target.get("invoice_type") not in ("Sales", "Purchase"):
                 return f"target '{name}': invoice_type must be Sales or Purchase"
             allowed = _engine_fields(engine)
-            for value in target_mapping(target).values():
-                for field in [value] if isinstance(value, str) else value:
-                    if field not in allowed:
-                        return f"target '{name}': '{field}' is not a field of {engine}"
+            for field in target_mapping(target).values():
+                if field not in allowed:
+                    return f"target '{name}': '{field}' is not a field of {engine}"
     return None
 
 
