@@ -10,7 +10,8 @@ Accounts of type Receivable, Payable or Stock are not put in the entry: the open
 the opening stock imports bring those in. They still count in the file's balance check. Because
 they are left out, the entry has one balancing line to the company's Temporary Opening account
 (the account of type Temporary) for their net. When opening invoices, opening stock and these
-balances are all imported, Temporary Opening nets to zero.
+balances are all imported, Temporary Opening nets to zero, unless rows were left out: their net
+amount is not brought in, so Temporary Opening stays off zero by that amount.
 
 ## Before calling
 
