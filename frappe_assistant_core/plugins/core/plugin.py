@@ -69,6 +69,7 @@ class CorePlugin(BasePlugin):
             # Email
             "send_email",
             # Data import
+            "apply_import_preset",
             "start_import_session",
             "get_import_schema",
             "set_column_mapping",

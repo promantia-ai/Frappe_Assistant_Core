@@ -30,6 +30,16 @@
     "content_file": "get_document.md"
   },
   {
+    "skill_id": "apply-import-preset-usage",
+    "title": "How to Use apply_import_preset",
+    "description": "Recognising an export from Tally Prime, Zoho Books, Busy, Marg or QuickBooks before mapping it: what each reply part means, unverified presets, targets that need a company or warehouse, opening reports, and what is not imported on a site without India Compliance",
+    "skill_type": "Tool Usage",
+    "linked_tool": "apply_import_preset",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "apply_import_preset.md"
+  },
+  {
     "skill_id": "start-import-session-usage",
     "title": "How to Use start_import_session",
     "description": "Opening an import session for an uploaded spreadsheet: sheets, columns, row counts, samples, and coming back to it later",
