@@ -868,3 +868,59 @@ class TestCreating(OpeningInvoicesCase):
         )
         self.assertFalse(reply["success"])
         self.assertIn("import_opening_invoices", frappe.as_json(reply))
+
+    def _approved_for_a_job(self, n):
+        """A session approved for the background job, whose body hasn't run yet."""
+        session, result = self._ready(self._lines(n))
+        with patch.object(opening_invoices, "REQUEST_LIMIT", 1), patch.object(frappe, "enqueue"):
+            self.assertTrue(self._import(session, result)["success"])
+        self.assertEqual(self._doc(session).status, "Importing")
+        return session
+
+    def test_job_stops_when_rows_dropped_since_the_approval(self):
+        session = self._approved_for_a_job(3)
+        real = opening_invoices.ready_lines
+        with patch.object(opening_invoices, "ready_lines", side_effect=lambda s: real(s)[:-1]):
+            opening_invoices.create_job(session, "Administrator")
+        for i in (1, 2, 3):
+            self.assertFalse(frappe.db.exists("Sales Invoice", self._number(i)))
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Failed")
+        self.assertIn("check it again", doc.steps[-1].message)
+
+    def test_job_stops_when_the_sheet_changed_since_the_approval(self):
+        session = self._approved_for_a_job(2)
+        doc = self._doc(session)
+        doc.excluded_rows = frappe.as_json([2])
+        doc.save()
+        opening_invoices.create_job(session, "Administrator")
+        self.assertFalse(frappe.db.exists("Sales Invoice", self._number(1)))
+        self.assertEqual(self._doc(session).status, "Failed")
+
+    def test_a_job_that_stops_keeps_its_first_batch_and_says_so(self):
+        session = self._approved_for_a_job(4)
+        calls = {"keep": 0}
+        real_keep = opening_invoices._keep
+
+        def keep(*args):
+            calls["keep"] += 1
+            if calls["keep"] == 2:
+                raise RuntimeError("the second batch failed")
+            return real_keep(*args)
+
+        events = []
+        with (
+            patch.object(opening_invoices, "COMMIT_EVERY", 2),
+            patch.object(opening_invoices, "_commits", return_value=True),
+            patch.object(opening_invoices, "_keep", side_effect=keep),
+            patch.object(frappe.db, "commit", side_effect=lambda: events.append("commit")),
+            patch.object(frappe.db, "rollback", side_effect=lambda *a, **k: events.append("rollback")),
+            patch.object(frappe, "log_error"),
+        ):
+            opening_invoices.create_job(session, "Administrator")  # does not raise
+        self.assertEqual(events, ["commit", "rollback", "commit"])
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Partially Completed")
+        self.assertIn("stopped", doc.steps[-1].message)
+        self.assertEqual(frappe.parse_json(doc.progress)["state"], "stopped")
+        self.assertEqual(frappe.parse_json(doc.progress)["done"], 2)

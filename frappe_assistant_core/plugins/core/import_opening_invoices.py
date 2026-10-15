@@ -826,6 +826,11 @@ def create(session) -> None:
     _import(session.name, lines, commit=False)  # the request commits when it returns
 
 
+def _commits() -> bool:
+    """Whether the import commits its own batches (not under tests, which roll back at the end)."""
+    return not frappe.flags.in_test
+
+
 def create_job(session_name: str, user: str) -> None:
     """Background job: the invoices, as the user who approved them."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
@@ -833,9 +838,18 @@ def create_job(session_name: str, user: str) -> None:
     frappe.set_user(user)
     try:
         session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
-        _import(session_name, ready_lines(session), commit=True)
+        lines = ready_lines(session)
+        # The count, not the fingerprint: create() has since reset this import's failures, which the
+        # fingerprint covers through the options, so a retry after failures would never match.
+        approved = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
+        if len(lines) != approved:
+            _stopped(session_name, _("the sheet changed after it was approved; check it again."))
+            if _commits():
+                frappe.db.commit()
+            return
+        _import(session_name, lines, commit=True)
     except Exception as e:
-        if frappe.flags.in_test:
+        if not _commits():
             raise
         frappe.db.rollback()  # back to the last batch committed, with its record on the session
         _stopped(session_name, _message_of_create(e))
@@ -903,10 +917,10 @@ def _import(session_name: str, lines: List[Ready], commit: bool) -> None:
             frappe.clear_messages()
         if done % COMMIT_EVERY == 0 or done == total:
             _keep(session_name, created, failed, done, total)
-            if commit and not frappe.flags.in_test:
+            if commit and _commits():
                 frappe.db.commit()
     _finish(session_name, total, failed)
-    if commit and not frappe.flags.in_test:
+    if commit and _commits():
         frappe.db.commit()
 
 
@@ -936,6 +950,8 @@ def _stopped(session_name: str, reason: str) -> None:
 
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     session.status = "Partially Completed" if settings(session).get("created") else "Failed"
+    last = frappe.parse_json(session.progress or "{}") or {}
+    session.progress = _progress("stopped", last.get("done") or 0, last.get("total") or 0)
     session.log_step(
         "Import",
         "Failed",
