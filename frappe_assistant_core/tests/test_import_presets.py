@@ -5,6 +5,14 @@ This file covers the pure module: parsers, loading, matching and cleaning. The t
 test_apply_import_preset.py.
 """
 
+import json
+import os
+import shutil
+import tempfile
+from unittest.mock import patch
+
+import frappe
+
 from frappe_assistant_core.plugins.core import import_presets as presets
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
@@ -107,3 +115,160 @@ class TestParse(BaseAssistantTest):
     def test_a_list_of_parsers_runs_in_order(self):
         spec = {"parse": ["last_segment", "strip_number"]}
         self.assertEqual(presets.parse("1000 · Assets:1010 · Checking", spec), "Checking")
+
+
+MINIMAL = {
+    "id": "test.customers",
+    "system": "Test System",
+    "export": "Customers",
+    "signature": {"required": [["Client"], ["Client Code"]]},
+    "columns": {"Client": {"from": ["Client"]}, "Code": {"from": ["Client Code"]}},
+    "targets": [{"name": "Customers", "doctype": "Customer", "mapping": {"Client": "customer_name"}}],
+}
+
+
+def preset(**changes):
+    out = json.loads(json.dumps(MINIMAL))
+    out.update(changes)
+    return out
+
+
+class TestValidate(BaseAssistantTest):
+    def test_a_minimal_preset_is_valid(self):
+        self.assertIsNone(presets.validate_preset(preset()))
+
+    def test_problems_are_named(self):
+        cases = [
+            (preset(id=""), "'id'"),
+            (preset(signature={"required": []}), "signature.required"),
+            (preset(header={"rows": 3}), "header.rows"),
+            (preset(columns={"Client": {"from": ["Client"], "parse": "magic"}}), "unknown parse 'magic'"),
+            (preset(targets=[]), "targets"),
+            (
+                preset(targets=[{"name": "X", "doctype": "Customer", "engine": "opening_stock"}]),
+                "exactly one",
+            ),
+            (preset(targets=[{"name": "X", "engine": "teleport", "columns": {}}]), "unknown engine"),
+            (
+                preset(targets=[{"name": "X", "engine": "opening_invoices", "columns": {"Client": "party"}}]),
+                "invoice_type",
+            ),
+            (
+                preset(targets=[{"name": "X", "engine": "opening_stock", "columns": {"Client": "colour"}}]),
+                "'colour'",
+            ),
+            (
+                preset(targets=[{"name": "X", "doctype": "Customer", "mapping": {"Nope": "customer_name"}}]),
+                "unknown column 'Nope'",
+            ),
+            (
+                preset(
+                    targets=[
+                        {"name": "X", "doctype": "Customer", "when": {"column": "Client"}, "mapping": {}}
+                    ]
+                ),
+                "when",
+            ),
+            (preset(groups={"method": "telepathy", "column": "Client"}), "groups.method"),
+            (preset(distinct_by=["Missing"]), "distinct_by"),
+        ]
+        for bad, text in cases:
+            problem = presets.validate_preset(bad)
+            self.assertIsNotNone(problem, bad)
+            self.assertIn(text, problem)
+
+    def test_target_mapping_adds_constants_and_inputs(self):
+        target = {
+            "name": "Accounts",
+            "doctype": "Account",
+            "mapping": {"Client": "account_name"},
+            "constants": [{"column": "Kind", "field": "account_type", "value": "Bank"}],
+            "inputs": [{"name": "company", "column": "Company", "field": "company", "ask": "Which company?"}],
+        }
+        self.assertEqual(
+            presets.target_mapping(target),
+            {"Client": "account_name", "Kind": "account_type", "Company": "company"},
+        )
+
+    def test_engine_doctype(self):
+        self.assertEqual(presets.engine_doctype({"engine": "opening_stock"}), "Stock Reconciliation")
+        self.assertEqual(presets.engine_doctype({"engine": "opening_balances"}), "Journal Entry")
+        self.assertEqual(
+            presets.engine_doctype({"engine": "opening_invoices", "invoice_type": "Purchase"}),
+            "Purchase Invoice",
+        )
+
+
+class TestLoad(BaseAssistantTest):
+    def setUp(self):
+        super().setUp()
+        self.folder = tempfile.mkdtemp()
+        presets.clear_cache()
+
+    def tearDown(self):
+        shutil.rmtree(self.folder, ignore_errors=True)
+        presets.clear_cache()
+        super().tearDown()
+
+    def _write(self, name, content):
+        path = os.path.join(self.folder, name)
+        with open(path, "w") as f:
+            f.write(content if isinstance(content, str) else json.dumps(content))
+        return path
+
+    def _hooks(self, entries):
+        real = frappe.get_hooks
+
+        def fake(hook=None, *args, **kwargs):
+            if hook == presets.HOOK:
+                return entries
+            return real(hook, *args, **kwargs)
+
+        return patch("frappe.get_hooks", side_effect=fake), patch(
+            "frappe.get_app_path", side_effect=lambda app, *parts: os.path.join(self.folder, *parts)
+        )
+
+    def test_shipped_presets_all_validate(self):
+        for name in sorted(os.listdir(presets.PRESET_DIR)):
+            with open(os.path.join(presets.PRESET_DIR, name)) as f:
+                content = json.load(f)
+            for item in content:
+                self.assertIsNone(presets.validate_preset(item), f"{name}: {item.get('id')}")
+
+    def test_a_hook_folder_adds_presets_and_a_hook_id_replaces_one(self):
+        os.mkdir(os.path.join(self.folder, "presets"))
+        self._write("presets/a.json", [preset(id="partner.customers")])
+        self._write("presets/b.json", [preset(export="Customers, partner edition")])
+        # FAC's own folder is replaced by an empty one; MINIMAL is loaded first through the first hook entry.
+        self._write("base.json", [preset()])
+        hooks, app_path = self._hooks(
+            [{"app": "fac_test", "path": "base.json"}, {"app": "partner_app", "path": "presets"}]
+        )
+        with hooks, app_path, patch.object(presets, "PRESET_DIR", os.path.join(self.folder, "none")):
+            loaded = {p["id"]: p for p in presets.load_presets()}
+        self.assertIn("partner.customers", loaded)
+        self.assertEqual(loaded["test.customers"]["export"], "Customers, partner edition")
+
+    def test_an_invalid_hook_preset_is_skipped_and_logged(self):
+        self._write("bad.json", [preset(id="bad.one", targets=[]), preset(id="good.one")])
+        hooks, app_path = self._hooks([{"app": "partner_app", "path": "bad.json"}])
+        with hooks, app_path, patch.object(presets, "PRESET_DIR", os.path.join(self.folder, "none")), patch(
+            "frappe.log_error"
+        ) as log:
+            ids = [p["id"] for p in presets.load_presets()]
+        self.assertEqual(ids, ["good.one"])
+        self.assertIn("bad.one", frappe.as_json(log.call_args))
+
+    def test_a_broken_json_file_is_skipped_and_logged(self):
+        self._write("broken.json", "{not json")
+        hooks, app_path = self._hooks([{"app": "partner_app", "path": "broken.json"}])
+        with hooks, app_path, patch.object(presets, "PRESET_DIR", os.path.join(self.folder, "none")), patch(
+            "frappe.log_error"
+        ) as log:
+            self.assertEqual(presets.load_presets(), [])
+        self.assertTrue(log.called)
+
+    def test_loading_is_cached_for_the_request(self):
+        first = presets.load_presets()
+        with patch.object(presets, "_preset_files", side_effect=AssertionError("read again")):
+            self.assertIs(presets.load_presets(), first)

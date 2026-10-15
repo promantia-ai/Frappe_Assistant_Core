@@ -16,9 +16,14 @@ cleans. It writes nothing: apply_import_preset writes the cleaned files and open
 """
 
 import datetime
+import glob
+import json
+import os
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+import frappe
 
 PARSERS = (
     "amount",
@@ -159,3 +164,189 @@ def parse(value: str, spec: Dict[str, Any]) -> str:
     if not text and "default" in spec:
         return str(spec["default"])
     return text
+
+
+# -- presets ---------------------------------------------------------------------------------
+
+PRESET_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "import_presets"
+)
+HOOK = "assistant_import_presets"
+ENGINES = {
+    "opening_stock": "set_opening_stock",
+    "opening_invoices": "set_opening_invoices",
+    "opening_balances": "set_opening_balances",
+}
+GROUP_METHODS = ("empty_amounts", "indent", "known_names")
+WHEN_KEYS = ("in", "not_in", "nonzero")
+
+
+def _engine_fields(engine: str):
+    from frappe_assistant_core.plugins.core import import_opening_balances as balances
+    from frappe_assistant_core.plugins.core import import_opening_invoices as invoices
+    from frappe_assistant_core.plugins.core import import_opening_stock as stock
+
+    return {
+        "opening_stock": stock.ITEM_FIELDS + stock.EXTRA_FIELDS,
+        "opening_invoices": invoices.FIELDS,
+        "opening_balances": balances.FIELDS,
+    }[engine]
+
+
+def engine_doctype(target: Dict[str, Any]) -> str:
+    """The record an engine target ends up creating, for the permission check."""
+    if target["engine"] == "opening_invoices":
+        return f"{target.get('invoice_type')} Invoice"
+    return {"opening_stock": "Stock Reconciliation", "opening_balances": "Journal Entry"}[target["engine"]]
+
+
+def target_mapping(target: Dict[str, Any]) -> Dict[str, Any]:
+    """Output column -> field (or candidate fields, or an engine's field), constants and inputs included."""
+    mapping = dict(target.get("mapping") or target.get("columns") or {})
+    for extra in (target.get("constants") or []) + (target.get("inputs") or []):
+        mapping[extra["column"]] = extra["field"]
+    return mapping
+
+
+def _alias_groups(value, allow_empty=False) -> bool:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        return False
+    return all(
+        isinstance(group, list) and group and all(isinstance(a, str) and a.strip() for a in group)
+        for group in value
+    )
+
+
+def validate_preset(preset: Any) -> Optional[str]:
+    """Why ``preset`` can't be used, or None."""
+    if not isinstance(preset, dict):
+        return "a preset must be a JSON object"
+    for key in ("id", "system", "export"):
+        if not isinstance(preset.get(key), str) or not preset[key].strip():
+            return f"'{key}' is required"
+    signature = preset.get("signature")
+    if not isinstance(signature, dict) or not _alias_groups(signature.get("required")):
+        return "signature.required must be a non-empty list of alias lists"
+    if signature.get("optional") is not None and not _alias_groups(signature["optional"], allow_empty=True):
+        return "signature.optional must be a list of alias lists"
+    if signature.get("title") is not None and not _alias_groups([signature["title"]]):
+        return "signature.title must be a list of patterns"
+    if (preset.get("header") or {}).get("rows", 1) not in (1, 2):
+        return "header.rows must be 1 or 2"
+
+    columns = preset.get("columns")
+    if not isinstance(columns, dict) or not columns:
+        return "columns must be a non-empty object"
+    for name, spec in columns.items():
+        if not isinstance(spec, dict):
+            return f"column '{name}' must be an object"
+        kinds = spec.get("parse") or []
+        for kind in [kinds] if isinstance(kinds, str) else kinds:
+            if kind not in PARSERS:
+                return f"column '{name}': unknown parse '{kind}'"
+        if "map" in ([kinds] if isinstance(kinds, str) else kinds) and not isinstance(
+            spec.get("values"), dict
+        ):
+            return f"column '{name}': parse 'map' needs 'values'"
+        if spec.get("fallback") and spec["fallback"] not in columns:
+            return f"column '{name}': fallback '{spec['fallback']}' is not a column"
+
+    groups = preset.get("groups")
+    if groups:
+        methods = groups.get("method")
+        methods = methods if isinstance(methods, list) else [methods]
+        if not methods or any(m not in GROUP_METHODS for m in methods):
+            return f"groups.method must be among {', '.join(GROUP_METHODS)}"
+        if groups.get("column") not in columns:
+            return "groups.column must be a column"
+        if groups.get("carry_to") and groups["carry_to"] not in columns:
+            return "groups.carry_to must be a column"
+    for key in preset.get("distinct_by") or []:
+        if key not in columns:
+            return f"distinct_by '{key}' is not a column"
+
+    targets = preset.get("targets")
+    if not isinstance(targets, list) or not targets:
+        return "targets must be a non-empty list"
+    names = set()
+    for target in targets:
+        if not isinstance(target, dict) or not target.get("name"):
+            return "every target needs a name"
+        name = target["name"]
+        if name in names:
+            return f"target '{name}' appears twice"
+        names.add(name)
+        if bool(target.get("doctype")) == bool(target.get("engine")):
+            return f"target '{name}' needs exactly one of doctype or engine"
+        when = target.get("when")
+        if when and (when.get("column") not in columns or not any(k in when for k in WHEN_KEYS)):
+            return f"target '{name}': when needs a column and one of {', '.join(WHEN_KEYS)}"
+        for constant in target.get("constants") or []:
+            if not all(isinstance(constant.get(k), str) for k in ("column", "field", "value")):
+                return f"target '{name}': a constant needs column, field and value"
+        for item in target.get("inputs") or []:
+            if not all(isinstance(item.get(k), str) and item[k] for k in ("name", "column", "field", "ask")):
+                return f"target '{name}': an input needs name, column, field and ask"
+        known = set(columns) | {
+            e["column"] for e in (target.get("constants") or []) + (target.get("inputs") or [])
+        }
+        for column in target_mapping(target):
+            if column not in known:
+                return f"target '{name}' maps unknown column '{column}'"
+        engine = target.get("engine")
+        if engine:
+            if engine not in ENGINES:
+                return f"target '{name}': unknown engine '{engine}'"
+            if engine == "opening_invoices" and target.get("invoice_type") not in ("Sales", "Purchase"):
+                return f"target '{name}': invoice_type must be Sales or Purchase"
+            allowed = _engine_fields(engine)
+            for field in target_mapping(target).values():
+                if field not in allowed:
+                    return f"target '{name}': '{field}' is not a field of {engine}"
+    return None
+
+
+def _preset_files() -> List[str]:
+    """FAC's preset files, then each hooked app's, in hook order."""
+    files = sorted(glob.glob(os.path.join(PRESET_DIR, "*.json")))
+    for entry in frappe.get_hooks(HOOK) or []:
+        try:
+            path = frappe.get_app_path(entry["app"], entry["path"])
+        except Exception:
+            frappe.log_error(title="Import preset hook skipped", message=repr(entry))
+            continue
+        files += sorted(glob.glob(os.path.join(path, "*.json"))) if os.path.isdir(path) else [path]
+    return files
+
+
+def _read_file(path: str) -> List[Any]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = json.load(f)
+    except Exception as e:
+        frappe.log_error(title="Import preset file skipped", message=f"{path}: {e}")
+        return []
+    return content if isinstance(content, list) else [content]
+
+
+def load_presets() -> List[Dict[str, Any]]:
+    """Every valid preset, FAC's first; a later preset with the same id replaces the earlier one.
+    Read once per request."""
+    cached = getattr(frappe.local, "fac_import_presets", None)
+    if cached is not None:
+        return cached
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for path in _preset_files():
+        for preset in _read_file(path):
+            problem = validate_preset(preset)
+            if problem:
+                ident = preset.get("id") if isinstance(preset, dict) else None
+                frappe.log_error(title="Import preset skipped", message=f"{path}: {ident}: {problem}")
+                continue
+            by_id[preset["id"]] = preset
+    frappe.local.fac_import_presets = list(by_id.values())
+    return frappe.local.fac_import_presets
+
+
+def clear_cache() -> None:
+    frappe.local.fac_import_presets = None
