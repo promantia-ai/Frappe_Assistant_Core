@@ -6,6 +6,7 @@
     "how_to_export": "Sales > Customers > ⋯ > Export Customers (CSV or XLSX).",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Display Name"], ["EmailID", "Contact ID", "Customer ID", "GST Treatment", "Billing Address"]],
       "optional": [["Customer Sub Type"], ["Customer ID"], ["Credit Limit"], ["Company Name"], ["Status"]]
     },
@@ -39,6 +40,7 @@
     "how_to_export": "Purchases > Vendors > ⋯ > Export Vendors (CSV or XLSX).",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Display Name"], ["EmailID", "Contact ID", "Vendor ID", "GST Treatment", "Billing Address"]],
       "optional": [["Vendor ID"], ["Bank Account Number", "Beneficiary Name"], ["TDS Name", "TDS Percentage"], ["Company Name"], ["Status"]]
     },
@@ -72,6 +74,7 @@
     "how_to_export": "Items > ⋯ > Export Items (CSV or XLSX).",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Item Name"], ["SKU", "Usage unit", "Item ID", "HSN/SAC"]],
       "optional": [["Rate"], ["Product Type"], ["Purchase Rate"], ["Intra State Tax Name"], ["Item Type"], ["Opening Stock"]]
     },
@@ -99,6 +102,7 @@
     "how_to_export": "Accountant > Chart of Accounts > ⋯ > Export Chart of Accounts.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Account Name"], ["Account Type"]],
       "optional": [["Account Code"], ["Account ID"], ["Parent Account"], ["Account Status"], ["Description"], ["Currency"]]
     },
@@ -154,6 +158,7 @@
     "how_to_export": "Sales > Invoices > filter Unpaid or Overdue > ⋯ > Export Invoices.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Invoice Number"], ["Invoice Date"], ["Balance"], ["Customer Name"]],
       "optional": [["Due Date"], ["Invoice Status"], ["Customer ID"], ["Invoice ID"]]
     },
@@ -178,6 +183,7 @@
     "how_to_export": "Purchases > Bills > filter Open or Overdue > ⋯ > Export Bills.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Bill Number"], ["Bill Date"], ["Balance"], ["Vendor Name"]],
       "optional": [["Due Date"], ["Bill Status"], ["Bill ID"]]
     },

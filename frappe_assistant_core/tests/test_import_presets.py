@@ -5,6 +5,7 @@ This file covers the pure module: parsers, loading, matching and cleaning. The t
 test_apply_import_preset.py.
 """
 
+import io
 import json
 import os
 import shutil
@@ -12,9 +13,11 @@ import tempfile
 from unittest.mock import patch
 
 import frappe
+from openpyxl import Workbook
 
 from frappe_assistant_core.plugins.core import import_presets as presets
 from frappe_assistant_core.plugins.core.import_presets import Sheet
+from frappe_assistant_core.plugins.core.import_session import FileProblem
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
 
@@ -204,6 +207,18 @@ class TestValidate(BaseAssistantTest):
             (preset(header={"search_rows": 0}), "header.search_rows"),
             (preset(header={"search_rows": "5"}), "header.search_rows"),
             (
+                preset(signature={"required": [["Client"]], "min_optional": -1}),
+                "signature.min_optional must be a non-negative integer",
+            ),
+            (
+                preset(signature={"required": [["Client"]], "min_optional": "1"}),
+                "signature.min_optional must be a non-negative integer",
+            ),
+            (
+                preset(signature={"required": [["Client"]], "min_optional": True}),
+                "signature.min_optional must be a non-negative integer",
+            ),
+            (
                 preset(
                     targets=[
                         {
@@ -389,6 +404,11 @@ class TestLoad(BaseAssistantTest):
             for item in content:
                 self.assertIsNone(presets.validate_preset(item), f"{name}: {item.get('id')}")
 
+    def test_every_shipped_preset_without_a_title_needs_an_optional_column(self):
+        for item in presets.load_presets():
+            if not item["signature"].get("title"):
+                self.assertGreaterEqual(item["signature"].get("min_optional", 0), 1, item["id"])
+
     def test_a_hook_folder_adds_presets_and_a_hook_id_replaces_one(self):
         os.mkdir(os.path.join(self.folder, "presets"))
         self._write("presets/a.json", [preset(id="partner.customers")])
@@ -535,6 +555,14 @@ class TestMatch(BaseAssistantTest):
     def test_score_counts_optional_groups(self):
         found = presets.match_sheet([["Name", "Under", "GSTIN"]], [LEDGERS])[0]
         self.assertAlmostEqual(found.score, 3 / 4)
+
+    def test_min_optional_needs_that_many_optional_groups_on_the_header_row(self):
+        strict = {**LEDGERS, "signature": {**LEDGERS["signature"], "min_optional": 1}}
+        self.assertIsNone(presets.validate_preset(strict))
+        self.assertEqual(presets.match_sheet([["Name", "Under"], ["A", "B"]], [strict]), [])
+        found = presets.match_sheet([["Name", "Under"], ["Name", "Under", "GSTIN"]], [strict])
+        self.assertEqual(found[0].header_row, 1)  # the row without an optional group is no candidate
+        self.assertEqual(len(presets.match_sheet([["Name", "Under"]], [LEDGERS])), 1)  # default 0
 
     def test_no_match_without_every_required_group(self):
         self.assertEqual(presets.match_sheet([["Name", "GSTIN"], ["A", "B"]], [LEDGERS]), [])
@@ -852,6 +880,57 @@ class TestReadAndCarry(BaseAssistantTest):
         for name in self._files:
             frappe.delete_doc("File", name, force=True, ignore_permissions=True)
         super().tearDown()
+
+    def _file(self, name, content):
+        doc = frappe.get_doc(
+            {"doctype": "File", "file_name": name, "content": content, "is_private": 1}
+        ).insert(ignore_permissions=True)
+        self._files.append(doc.name)
+        return doc
+
+    def test_head_rows_covers_the_deepest_header_search(self):
+        self.assertEqual(presets.head_rows([LEDGERS]), 22)
+        deep = {**LEDGERS, "header": {"search_rows": 30}}
+        self.assertEqual(presets.head_rows([LEDGERS, deep]), 32)
+        self.assertGreaterEqual(presets.head_rows(), 22)
+
+    def test_read_heads_reads_only_the_top_of_each_sheet(self):
+        rows = [["Name", "Under"]] + [[f"Party {i}", "Sundry Debtors"] for i in range(499)]
+        limit = presets.head_rows()
+        csv_doc = self._file("heads.csv", "\n".join(",".join(r) for r in rows).encode())
+        workbook = Workbook()
+        workbook.active.title = "One"
+        second = workbook.create_sheet("Two")
+        for row in rows:
+            workbook["One"].append(row)
+            second.append(row)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        xlsx_doc = self._file("heads.xlsx", buffer.getvalue())
+
+        (csv_head,) = presets.read_heads(csv_doc)
+        self.assertIsNone(csv_head.name)
+        self.assertEqual(len(csv_head.rows), limit)
+        self.assertEqual(csv_head.rows[:2], rows[:2])
+        with patch.object(presets, "_as_text", wraps=presets._as_text) as as_text:
+            xlsx_heads = presets.read_heads(xlsx_doc)
+        self.assertEqual(
+            as_text.call_count, 2 * limit * 2
+        )  # two sheets, two cells a row: no row past the head
+        self.assertEqual([s.name for s in xlsx_heads], ["One", "Two"])
+        self.assertEqual([len(s.rows) for s in xlsx_heads], [limit, limit])
+        self.assertEqual(xlsx_heads[1].rows[:2], rows[:2])
+        self.assertEqual(len(presets.read_heads(csv_doc, rows=5)[0].rows), 5)
+
+        self.assertEqual(len(presets.read_sheet(csv_doc, None).rows), 500)
+        two = presets.read_sheet(xlsx_doc, "Two")
+        self.assertEqual((two.name, len(two.rows)), ("Two", 500))
+        with patch.object(presets, "MAX_PRESET_ROWS", 499):
+            with self.assertRaises(FileProblem) as raised:
+                presets.read_sheet(xlsx_doc, "One")
+        self.assertIn("more than 499 rows", str(raised.exception))
+        with self.assertRaises(FileProblem):
+            presets.read_sheet(xlsx_doc, "Three")
 
     def test_csv_keeps_leading_spaces_so_indent_groups_are_found(self):
         content = (

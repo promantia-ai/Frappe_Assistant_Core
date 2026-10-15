@@ -6,6 +6,7 @@
     "how_to_export": "Books > All Ledgers > Excel icon, Formatted No, Balance only Yes, Format-2.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Ledger Name", "Party Name"], ["Group", "Group Name"]],
       "optional": [["Station"], ["Area"], ["GSTIN", "GST No."], ["Mobile", "Phone"], ["Address"], ["State"], ["Opening", "Balance"], ["Dr/Cr"]]
     },
@@ -33,6 +34,7 @@
     "how_to_export": "Masters > Inventory > Product list > Alt+P > Excel.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Product Name", "Item Name", "Product"], ["Packing"], ["Company"]],
       "optional": [["Unit"], ["HSN"], ["GST %", "GST", "Tax"], ["MRP"], ["Rate"]]
     },

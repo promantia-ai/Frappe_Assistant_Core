@@ -36,6 +36,8 @@ aging), stock summary.
 | `warnings` | Show them to the user as they stand (for example that the preset is unverified). |
 | `mapping_problems` | On a session: its mapping could not be saved (`next` is then `set_column_mapping`). Fix the mapping with the user before any dry run. |
 | `also_matched` | Other presets that fit as well. When the export could be either, for example Zoho customers or vendors, ask which and call again with `preset`. |
+| `file_name` | With `matched: false`: the file that was read. Carry on with `start_import_session` on it. |
+| `missing_headers` | With `matched: false`, when the user named a `preset` that doesn't fit: the header groups that preset needs and the file lacks (any one name in a group will do). Tell the user, or let them pick another preset. |
 
 Calling again with a different `preset` opens new sessions. Do not use the sessions of the
 first call; tell the user which ones are current. Cell values in the reply (`sample_rows`,
@@ -47,7 +49,10 @@ first call; tell the user which ones are current. Cell values in the reply (`sam
   column with `set_column_mapping` first.
 - A session with `engine`: ask the company and the cut-off date (and anything else that tool
   asks), then call the tool in `next` (`set_opening_balances`, `set_opening_invoices` or
-  `set_opening_stock`) with the returned `columns` (and `invoice_type` for invoices).
+  `set_opening_stock`) with the returned `columns` (and `invoice_type` for invoices), then
+  `dry_run_import`. `set_opening_stock` takes the cut-off date as `posting_date`.
+- Each session's `session_id` is what `set_opening_*`, `set_column_mapping` and `dry_run_import`
+  take as `session`.
 
 ## Not imported
 
@@ -55,7 +60,10 @@ first call; tell the user which ones are current. Cell values in the reply (`sam
   outstanding bills and stock summary exports instead.
 - Addresses: Customer and Supplier have no address fields in an import. They need a separate
   Address import.
-- HSN, GST rate and GST category, unless India Compliance is installed.
+- HSN and GST category, unless India Compliance is installed.
+- GST rate columns and addresses: they are cleaned into the session's file but mapped to
+  Don't Import, so they are not imported on this site. `not_on_this_site` lists only columns
+  whose field this site lacks, so it does not name them; tell the user if they ask.
 
 ## Parameters
 

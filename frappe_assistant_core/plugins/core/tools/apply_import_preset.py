@@ -104,6 +104,14 @@ class ApplyImportPreset(BaseTool):
         if not file_id and not file_url:
             return {"success": False, "error": _("Give file_id or file_url of a file on this site.")}
 
+        if arguments.get("values") is not None and not isinstance(arguments["values"], dict):
+            return {"success": False, "error": _('values must be an object like {"company": "Acme Ltd"}')}
+        targets = arguments.get("targets")
+        if targets is not None and not (
+            isinstance(targets, list) and all(isinstance(t, str) for t in targets)
+        ):
+            return {"success": False, "error": _("targets must be a list of target names")}
+
         available = presets.load_presets()
         wanted = (arguments.get("preset") or "").strip()
         if wanted:
@@ -121,18 +129,19 @@ class ApplyImportPreset(BaseTool):
 
         try:
             file_doc = find_site_file(file_id=file_id, file_url=file_url)
-            sheets = presets.read_sheets(file_doc)
+            # Only the top of each sheet is read to match; the matched sheet is read in full below.
+            heads = presets.read_heads(file_doc)
         except FileProblem as e:
             return {"success": False, "error": str(e)}
 
         sheet_name = arguments.get("sheet") or None
-        if sheet_name:
-            sheets = [s for s in sheets if s.name == sheet_name]
-            if not sheets:
+        if sheet_name and not (len(heads) == 1 and heads[0].name is None):  # a CSV has no sheets
+            heads = [s for s in heads if s.name == sheet_name]
+            if not heads:
                 return {"success": False, "error": _("Sheet '{0}' not found.").format(sheet_name)}
 
-        sheet, matches = next(
-            ((s, m) for s in sheets for m in [presets.match_sheet(s.rows, available)] if m),
+        head, matches = next(
+            ((s, m) for s in heads for m in [presets.match_sheet(s.rows, available)] if m),
             (None, []),
         )
         if not matches:
@@ -146,10 +155,14 @@ class ApplyImportPreset(BaseTool):
             }
             if wanted:
                 result["missing_headers"] = presets.missing_groups(
-                    sheets[0].rows if sheets else [], available[0]
+                    heads[0].rows if heads else [], available[0]
                 )
             return result
 
+        try:
+            sheet = presets.read_sheet(file_doc, head.name)
+        except FileProblem as e:
+            return {"success": False, "error": str(e)}
         best = matches[0]
         if presets.uses_indent(best.preset):
             sheet.indents = presets.read_indents(file_doc, sheet.name)
@@ -158,7 +171,9 @@ class ApplyImportPreset(BaseTool):
             return {
                 "success": False,
                 "error": _(
-                    "Recognised as {0}: {1}, but no data rows were left after removing title, total and group rows."
+                    "Recognised as {0}: {1}, but no data rows were left after removing title, total and "
+                    "group rows. If this is not a {0} export, map it the normal way: call "
+                    "start_import_session."
                 ).format(best.preset["system"], best.preset["export"]),
             }
         return self._open_all(file_doc, sheet, best, matches, cleaned, arguments)
@@ -254,8 +269,7 @@ class ApplyImportPreset(BaseTool):
         return None
 
     def _open(self, file_doc, sheet, match, cleaned, rows, not_on_site) -> Dict[str, Any]:
-        target = rows.target
-        name = f"{os.path.splitext(file_doc.file_name)[0]} - {target['name']}.csv"
+        name = f"{os.path.splitext(file_doc.file_name)[0]} - {rows.target['name']}.csv"
         buffer = io.StringIO()
         csv.writer(buffer, lineterminator="\n").writerows([rows.header, *rows.rows])
         cleaned_file = frappe.get_doc(
@@ -266,7 +280,17 @@ class ApplyImportPreset(BaseTool):
                 "is_private": 1,
             }
         ).insert()
+        try:
+            return self._open_session(file_doc, sheet, match, cleaned, rows, not_on_site, cleaned_file, name)
+        except Exception:
+            # The savepoint rollback undoes the database rows, but not the file written to disk.
+            frappe.delete_doc("File", cleaned_file.name, force=True, ignore_permissions=True)
+            raise
 
+    def _open_session(
+        self, file_doc, sheet, match, cleaned, rows, not_on_site, cleaned_file, name
+    ) -> Dict[str, Any]:
+        target = rows.target
         session = frappe.get_doc(
             {
                 "doctype": SESSION_DOCTYPE,

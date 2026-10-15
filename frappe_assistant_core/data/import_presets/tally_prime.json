@@ -6,6 +6,7 @@
     "how_to_export": "Alt+E > Masters > Configure: Type of Master Ledgers, Format Excel (.xlsx), then E. Or Display More Reports > List of Accounts > Alt+E > Current > Excel.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Name", "Name of Ledger"], ["Group Name", "Under", "Parent", "Under Group"]],
       "optional": [
         ["GST Registration -GSTIN/UIN", "GSTIN/UIN", "GST Number", "GST No.", "GST Identification Number"],
@@ -43,6 +44,7 @@
     "how_to_export": "Alt+E > Masters > Configure: Type of Master Stock Items, Format Excel (.xlsx), then E.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Name", "Name of Item", "Stock Item"], ["Units", "UOM", "Base Units"]],
       "optional": [["Group Name", "Under", "Parent Name", "Stock Group"], ["Part No.", "Part Number"], ["HSN/SAC", "HSN/SAC Code", "HSN Code"],
                    ["Opening Balance – Quantity", "Opening Quantity"], ["Category", "Stock Category"], ["Alias"]]

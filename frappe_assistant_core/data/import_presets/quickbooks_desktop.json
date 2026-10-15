@@ -6,6 +6,7 @@
     "how_to_export": "Customers > Customer Center > Excel > Export Customer List.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Customer"], ["Main Phone", "Main Email", "Bill to 1"]],
       "optional": [["Active Status"], ["Company"], ["First Name"], ["Last Name"], ["Balance", "Balance Total"], ["Customer Type"]]
     },
@@ -29,6 +30,7 @@
     "how_to_export": "Vendors > Vendor Center > Excel > Export Vendor List.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Vendor"], ["Main Phone", "Main Email", "Bill from 1"]],
       "optional": [["Active Status"], ["Company"], ["First Name"], ["Last Name"], ["Balance", "Balance Total"], ["Vendor Type"]]
     },
@@ -52,6 +54,7 @@
     "how_to_export": "Lists > Item List > Excel > Export all items.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Item"], ["Type"], ["Price"], ["Cost", "On Hand", "Quantity On Hand"]],
       "optional": [["Description"], ["Account"], ["U/M"], ["Active Status"]]
     },
@@ -80,6 +83,7 @@
     "how_to_export": "Reports > List > Account Listing > Excel > Create New Worksheet.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Account"], ["Type"], ["Accnt. #", "Balance Total"]],
       "optional": [["Description"], ["Tax Line"]]
     },

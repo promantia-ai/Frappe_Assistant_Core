@@ -6,6 +6,7 @@ preset patched in; the shipped presets are tested at the end of this file.
 
 import io
 import json
+import os
 from unittest.mock import patch
 
 import frappe
@@ -196,6 +197,85 @@ class TestApply(PresetToolCase):
         reply = self._run({"file_id": file_doc.name})
         self.assertFalse(reply["success"])
         self.assertIn("no data rows", reply["error"])
+        self.assertTrue(
+            reply["error"].endswith(
+                "If this is not a Test export, map it the normal way: call start_import_session."
+            ),
+            reply["error"],
+        )
+
+    def test_a_file_no_preset_matches_is_answered_from_its_head(self):
+        rows = [["Customer Name", "Customer Group"]] + [[f"C{i}", "Retail"] for i in range(300)]
+        file_doc = self._upload(f"plain-{self.tag}.csv", "\n".join(",".join(r) for r in rows).encode())
+        with patch.object(presets, "read_sheet", side_effect=AssertionError("read the whole sheet")):
+            result = self._apply({"file_id": file_doc.name})
+        self.assertFalse(result["matched"])
+        self.assertEqual(result["file_name"], f"plain-{self.tag}.csv")
+
+    def test_only_the_matched_sheet_is_read_in_full(self):
+        workbook_rows = {"Notes": [["Nothing here"]], "Ledgers": self._rows(LEDGER_ROWS)}
+        workbook = Workbook()
+        workbook.remove(workbook.active)
+        for title, rows in workbook_rows.items():
+            sheet = workbook.create_sheet(title)
+            for row in rows:
+                sheet.append(row)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        file_doc = self._upload(f"two-{self.tag}.xlsx", buffer.getvalue())
+        with patch.object(presets, "read_sheet", wraps=presets.read_sheet) as read_sheet:
+            result = self._apply({"file_id": file_doc.name})
+        self.assertEqual(read_sheet.call_count, 1)
+        self.assertEqual(read_sheet.call_args.args[1], "Ledgers")
+        self.assertEqual(result["source"]["sheet"], "Ledgers")
+        self.assertEqual(result["source"]["header_row"], 4)
+
+    def test_a_matched_sheet_over_the_row_ceiling_is_refused(self):
+        rows = [["Name", "Under"]] + [[f"P{i}", "Sundry Debtors"] for i in range(5)]
+        file_doc = self._upload(f"big-{self.tag}.csv", "\n".join(",".join(r) for r in rows).encode())
+        before = frappe.db.count("FAC Import Session")
+        with patch.object(presets, "MAX_PRESET_ROWS", 5):
+            reply = self._run({"file_id": file_doc.name})
+        self.assertFalse(reply["success"])
+        self.assertIn(
+            "This sheet has more than 5 rows. Split it into smaller files, or use start_import_session.",
+            reply["error"],
+        )
+        self.assertEqual(frappe.db.count("FAC Import Session"), before)
+
+    def test_a_sheet_given_for_a_csv_is_ignored(self):
+        rows = [["Name", "Under"], [f"Ravi {self.tag}", "Sundry Debtors"]]
+        file_doc = self._upload(f"ledgers-{self.tag}.csv", "\n".join(",".join(r) for r in rows).encode())
+        result = self._apply({"file_id": file_doc.name, "sheet": "Sheet1"})
+        self.assertTrue(result["matched"])
+        self.assertEqual([s["target"] for s in result["sessions"]], ["Customers"])
+
+    def test_a_sheet_that_is_not_in_the_workbook_is_refused(self):
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        reply = self._run({"file_id": file_doc.name, "sheet": "Nope"})
+        self.assertFalse(reply["success"])
+        self.assertIn("Sheet 'Nope' not found.", reply["error"])
+
+    def test_values_and_targets_of_the_wrong_type_are_refused(self):
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        before = frappe.db.count("FAC Import Session"), frappe.db.count("File")
+        tool = self.registry.get_tool("apply_import_preset")
+        # The tool's own check. Through _safe_execute the schema check refuses a value that is not
+        # an object or a list before execute runs, so execute is called directly here.
+        for arguments, error in (
+            ({"values": "Acme Ltd"}, 'values must be an object like {"company": "Acme Ltd"}'),
+            ({"values": ["Acme Ltd"]}, 'values must be an object like {"company": "Acme Ltd"}'),
+            ({"targets": "Customers"}, "targets must be a list of target names"),
+            ({"targets": ["Customers", 3]}, "targets must be a list of target names"),
+        ):
+            with patch.object(presets, "load_presets", return_value=[LEDGERS]):
+                reply = tool.execute({"file_id": file_doc.name, **arguments})
+            self.assertEqual(reply, {"success": False, "error": error}, arguments)
+        # A list with a name that is not a string passes the schema check and is refused by the tool.
+        reply = self._run({"file_id": file_doc.name, "targets": ["Customers", 3]})
+        self.assertFalse(reply["success"])
+        self.assertIn("targets must be a list of target names", reply["error"])
+        self.assertEqual((frappe.db.count("FAC Import Session"), frappe.db.count("File")), before)
 
     def test_a_user_who_cannot_read_the_file_gets_the_usual_refusal(self):
         file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
@@ -268,6 +348,7 @@ class TestApply(PresetToolCase):
 
     def test_a_failure_opening_one_target_leaves_the_others_and_no_half_writes(self):
         file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        private_files = frappe.get_site_path("private", "files")
         real_save = tool_module.save_mapping
 
         def save_unless_supplier(session, doctype, *args, **kwargs):
@@ -289,6 +370,10 @@ class TestApply(PresetToolCase):
         self.assertEqual(
             frappe.db.count("File", {"file_name": ["like", f"ledgers-{self.tag} - Customers%"]}), 1
         )
+        # The cleaned Suppliers file written to disk before the failure is gone too.
+        on_disk = [f for f in os.listdir(private_files) if f.startswith(f"ledgers-{self.tag} - ")]
+        self.assertTrue(any("Customers" in f for f in on_disk), on_disk)
+        self.assertFalse(any("Suppliers" in f for f in on_disk), on_disk)
 
     def test_an_engine_doctype_missing_from_the_site_is_skipped(self):
         rows = [
@@ -969,12 +1054,49 @@ class TestShippedPresets(PresetToolCase):
         for content in (
             b"Account,Debit,Credit,Balance\nCash,100,,\n",
             b"Customer Name,Customer Group,Territory\nA,B,C\n",
+            # Generic headers that untitled presets accept as required: not claimed without an
+            # optional column of that system (signature.min_optional).
+            b"Name,Group,Phone\nA,B,C\n",
+            b"Name,Parent\nA,B\n",
+            b"Name,Under\nA,B\n",
+            b"Name,UOM\nA,Nos\n",
+            b"Item Name,SKU\nA,B\n",
         ):
-            file_doc = self._upload(f"plain-{self.tag}.csv", content)
-            result = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})[
-                "result"
-            ]
-            self.assertFalse(result["matched"], result)
+            with self.subTest(content.split(b"\n")[0]):
+                file_doc = self._upload(f"plain-{self.tag}.csv", content)
+                reply = self.registry.get_tool("apply_import_preset")._safe_execute(
+                    {"file_id": file_doc.name}
+                )
+                self.assertTrue(reply["success"], reply)
+                self.assertFalse(reply["result"]["matched"], reply["result"])
+
+    def test_tally_ledgers_customers_pass_the_dry_run(self):
+        result, _ = self._check("tally_prime.ledgers", *SHIPPED["tally_prime.ledgers"])
+        # Failures inside groups (a customer that already exists, say) are fine: the tool must not fail.
+        customers = next(s for s in result["sessions"] if s["target"] == "Customers")
+        reply = self.registry.get_tool("dry_run_import")._safe_execute({"session": customers["session_id"]})
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(reply["result"]["total_rows"], 1, reply)
+
+    def test_quickbooks_aging_passes_set_opening_invoices_and_the_dry_run(self):
+        if not opening_invoices.in_fiscal_year(frappe.utils.nowdate(), self._company()):
+            self.skipTest("today is in no fiscal year of the test company")
+        result, _ = self._check(
+            "quickbooks_online.ar_aging_summary", *SHIPPED["quickbooks_online.ar_aging_summary"]
+        )
+        session = result["sessions"][0]
+        setup = self.registry.get_tool("set_opening_invoices")._safe_execute(
+            {
+                "session": session["session_id"],
+                "company": self._company(),
+                "invoice_type": session["invoice_type"],
+                "cut_off": frappe.utils.nowdate(),
+                "columns": session["columns"],
+            }
+        )
+        self.assertTrue(setup["success"], setup)
+        reply = self.registry.get_tool("dry_run_import")._safe_execute({"session": session["session_id"]})
+        self.assertTrue(reply["success"], reply)
 
 
 class TestPresetIntoTheEngines(OpeningBalancesCase):

@@ -154,6 +154,7 @@
     "how_to_export": "Sales > Products & services > Run report (or the export icon) > Export to Excel.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Product/Service", "Product/Service Name"], ["Type"], ["Price", "Sales Price", "Sales Price / Rate", "Rate"]],
       "optional": [["Cost", "Purchase Cost"], ["Qty on hand", "Quantity On Hand"], ["SKU"], ["Description", "Sales Description"], ["Income Account"]]
     },

@@ -20,12 +20,13 @@ import datetime
 import fnmatch
 import glob
 import io
+import itertools
 import json
 import os
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -261,6 +262,10 @@ def validate_preset(preset: Any) -> Optional[str]:
         return "signature.optional must be a list of alias lists"
     if signature.get("title") is not None and not _alias_groups([signature["title"]]):
         return "signature.title must be a list of patterns"
+    if signature.get("min_optional") is not None and not (
+        _is_int(signature["min_optional"]) and signature["min_optional"] >= 0
+    ):
+        return "signature.min_optional must be a non-negative integer"
     header = preset.get("header") or {}
     if not isinstance(header, dict):
         return "header must be an object"
@@ -447,6 +452,8 @@ def clear_cache() -> None:
 # -- reading ---------------------------------------------------------------------------------
 
 SEARCH_ROWS = 20
+MIN_HEAD_ROWS = 22  # SEARCH_ROWS plus the second row of a two-row header, and one spare
+MAX_PRESET_ROWS = 200_000  # a matched sheet is read whole; past this, the normal flow streams it
 DROP_REASONS = ("title", "blank", "repeated_header", "totals", "footer", "groups", "merged", "no_target")
 
 
@@ -470,9 +477,9 @@ def _content(file_doc) -> bytes:
     return content.encode("utf-8") if isinstance(content, str) else content
 
 
-def _read_csv(content: bytes) -> List[List[str]]:
-    """A CSV's rows with cells as written. Frappe's reader strips every cell, which loses the
-    leading spaces that mark groups by indent. QuickBooks Desktop writes cp1252."""
+def _csv_rows(content: bytes) -> Iterator[List[str]]:
+    """A CSV's rows with cells as written, one at a time. Frappe's reader strips every cell, which
+    loses the leading spaces that mark groups by indent. QuickBooks Desktop writes cp1252."""
     try:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -481,23 +488,74 @@ def _read_csv(content: bytes) -> List[List[str]]:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel
-    return [list(row) for row in csv.reader(io.StringIO(text), dialect)]
+    return (list(row) for row in csv.reader(io.StringIO(text), dialect))
 
 
-def read_sheets(file_doc) -> List[Sheet]:
-    """Every sheet of the file, every row as text, title rows and all."""
+def _sheet_rows(file_doc) -> Iterator[Tuple[Optional[str], Iterator[List[str]]]]:
+    """(sheet name, rows as text) for each sheet, lazily: a sheet is read only as far as it is
+    consumed, and the next one only after it. A CSV is one sheet named None."""
     content = _content(file_doc)
+    if _extension(file_doc) == "csv":
+        yield None, _csv_rows(content)
+        return
+    for name, rows in _iter_sheets(content, _extension(file_doc)):
+        yield name, ([_as_text(v) for v in row] for row in rows)
+
+
+def _reading(read):
+    """``read()``, with any failure to read the file as a FileProblem."""
     try:
-        if _extension(file_doc) == "csv":
-            return [Sheet(None, _read_csv(content))]
-        return [
-            Sheet(name, [[_as_text(v) for v in row] for row in rows])
-            for name, rows in _iter_sheets(content, _extension(file_doc))
-        ]
+        return read()
     except FileProblem:
         raise
     except Exception as e:
         raise FileProblem(_("Could not read the file: {0}").format(_describe_read_error(e)))
+
+
+def head_rows(preset_list: Optional[List[Dict[str, Any]]] = None) -> int:
+    """How many rows matching needs from the top of a sheet: the largest header search, plus two
+    for a two-row header, and never fewer than 22."""
+    loaded = load_presets() if preset_list is None else preset_list
+    deepest = max(
+        ((p.get("header") or {}).get("search_rows", SEARCH_ROWS) for p in loaded), default=SEARCH_ROWS
+    )
+    return max(deepest + 2, MIN_HEAD_ROWS)
+
+
+def read_heads(file_doc, rows: Optional[int] = None) -> List[Sheet]:
+    """The first ``rows`` rows (default: head_rows()) of every sheet, as text. Enough to match a
+    preset; the rest of each sheet is never read."""
+    limit = head_rows() if rows is None else rows
+    return _reading(
+        lambda: [Sheet(name, list(itertools.islice(cells, limit))) for name, cells in _sheet_rows(file_doc)]
+    )
+
+
+def read_sheet(file_doc, sheet_name: Optional[str]) -> Sheet:
+    """One sheet in full (for a CSV, sheet_name is None), up to MAX_PRESET_ROWS rows."""
+
+    def read():
+        for name, cells in _sheet_rows(file_doc):
+            if name != sheet_name and sheet_name is not None:
+                continue
+            rows = list(itertools.islice(cells, MAX_PRESET_ROWS + 1))
+            if len(rows) > MAX_PRESET_ROWS:
+                raise FileProblem(
+                    _(
+                        "This sheet has more than {0} rows. Split it into smaller files, or use "
+                        "start_import_session."
+                    ).format(f"{MAX_PRESET_ROWS:,}")
+                )
+            return Sheet(name, rows)
+        raise FileProblem(_("Sheet '{0}' not found.").format(sheet_name))
+
+    return _reading(read)
+
+
+def read_sheets(file_doc) -> List[Sheet]:
+    """Every sheet of the file, every row as text, title rows and all. The tool does not use it:
+    it reads read_heads, then read_sheet for the matched sheet only."""
+    return _reading(lambda: [Sheet(name, list(cells)) for name, cells in _sheet_rows(file_doc)])
 
 
 def read_indents(file_doc, sheet_name: Optional[str]) -> Optional[List[List[int]]]:
@@ -573,6 +631,7 @@ def match_sheet(rows: List[List[str]], presets: List[Dict[str, Any]]) -> List[Ma
         depth = header.get("rows", 1)
         signature = preset["signature"]
         optional = signature.get("optional") or []
+        min_optional = signature.get("min_optional") or 0
         has_title = 1 if signature.get("title") else 0
         best: Optional[Match] = None
         for index in range(min(header.get("search_rows", SEARCH_ROWS), len(rows))):
@@ -580,9 +639,13 @@ def match_sheet(rows: List[List[str]], presets: List[Dict[str, Any]]) -> List[Ma
             names = {normalise(h) for h in headers if h.strip()}
             if not all(_found(g, names) for g in signature["required"]):
                 continue
+            optional_hits = sum(_found(g, names) for g in optional)
+            # A generic signature ("Name, Group") also needs some of the system's own columns.
+            if optional_hits < min_optional:
+                continue
             if not _title_ok(signature, rows, index):
                 continue
-            hits = len(signature["required"]) + sum(_found(g, names) for g in optional) + has_title
+            hits = len(signature["required"]) + optional_hits + has_title
             total = len(signature["required"]) + len(optional) + has_title
             # The header is the row with the most groups found; a tie goes to the earlier row.
             if best is None or hits > best.hits:

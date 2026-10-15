@@ -6,6 +6,7 @@
     "how_to_export": "Administration > Masters > Account > List > Configurable (select Group, Op. Bal., GSTIN, Mobile, Email) > Alt+E > Microsoft Excel.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Name", "Account Name"], ["Group", "Under Group", "Parent Group"]],
       "optional": [["Op. Bal.", "Opening Balance", "Op. Bal"], ["Dr/Cr"], ["GSTIN", "GST No."], ["Mobile", "Mobile No."],
                    ["Email", "E-mail"], ["Station"], ["PAN", "PAN No."], ["Type of Dealer"], ["Alias"], ["Print Name"]]
@@ -35,6 +36,7 @@
     "how_to_export": "Administration > Masters > Item > List > Configurable Alphabetical > Select Fields (Group, Main Unit, HSN Code, Tax Category, Sale Price) > Alt+E.",
     "verified": false,
     "signature": {
+      "min_optional": 1,
       "required": [["Name", "Item Name"], ["Unit", "Main Unit"], ["Group", "Item Group"]],
       "optional": [["HSN Code", "HSN"], ["Tax Category"], ["Sale Price"], ["Purc. Price", "Purchase Price"], ["MRP"], ["Alias"]]
     },

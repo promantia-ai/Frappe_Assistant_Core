@@ -6,7 +6,7 @@ The `start_import_session` tool starts a data import for a spreadsheet the user 
 
 For an export from another accounting system, call `apply_import_preset` first. It recognises Tally Prime, Zoho Books, Busy, Marg and QuickBooks exports and opens the sessions itself; use this tool when it answers `matched: false`.
 
-**No copy of the file is saved.** The file stays where the user attached it, and every later step reads it from there. The session is the audit record: it holds only the file's name, sheet, columns and row count, never its rows.
+**No copy of the file is saved** (sessions opened by apply_import_preset hold a cleaned copy attached to the session). The file stays where the user attached it, and every later step reads it from there. The session is the audit record: it holds only the file's name, sheet, columns and row count, never its rows.
 
 Call it when the user asks to **import** a file, not just to look at one.
 
