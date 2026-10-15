@@ -686,3 +686,88 @@ class TestClean(BaseAssistantTest):
         customers = presets.finish(cleaned.targets[0], {})
         self.assertEqual(customers.header[-1], "Customer Type")
         self.assertEqual(customers.rows[0][-1], "Company")
+
+
+AGING = {
+    "id": "test.aging2",
+    "system": "Test",
+    "export": "Aging",
+    "signature": {"required": [["Customer"], ["Total"]]},
+    "skip": {"totals": ["TOTAL", "Total for *"]},
+    "groups": {"method": "empty_amounts", "column": "Customer", "carry_to": "Parent"},
+    "columns": {
+        "Customer": {"from": ["Customer"]},
+        "Parent": {"from": []},
+        "Total": {"from": ["Total"], "parse": "amount"},
+    },
+    "targets": [
+        {
+            "name": "Open",
+            "engine": "opening_invoices",
+            "invoice_type": "Sales",
+            "columns": {"Customer": "party", "Total": "outstanding_amount"},
+        }
+    ],
+}
+
+
+class TestReadAndCarry(BaseAssistantTest):
+    def setUp(self):
+        super().setUp()
+        self._files = []
+
+    def tearDown(self):
+        for name in self._files:
+            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        super().tearDown()
+
+    def test_csv_keeps_leading_spaces_so_indent_groups_are_found(self):
+        content = (
+            b"Acme\nTrial Balance\nParticulars,Debit,Credit\n"
+            b"Loans,,900\n  Bank Loan,,900\nCapital Account,,100\n"
+        )
+        doc = frappe.get_doc(
+            {"doctype": "File", "file_name": "tb_indent.csv", "content": content, "is_private": 1}
+        ).insert(ignore_permissions=True)
+        self._files.append(doc.name)
+        sheet = presets.read_sheets(doc)[0]
+        self.assertEqual(sheet.rows[4][0], "  Bank Loan")
+        found = presets.match_sheet(sheet.rows, [TB])[0]
+        cleaned = presets.clean(sheet, found)
+        self.assertEqual([r[0] for r in cleaned.targets[0].rows], ["Bank Loan", "Capital Account"])
+        self.assertEqual(cleaned.dropped["groups"], 1)
+
+    def test_a_total_row_ends_the_carried_group(self):
+        rows = [
+            ["Customer", "Current", "Total"],
+            ["Freeman Sporting Goods", "", ""],
+            ["0969 Ocean View Road", "477.50", "477.50"],
+            ["Total for Freeman Sporting Goods", "477.50", "477.50"],
+            ["Plain Co", "10.00", "10.00"],
+        ]
+        found = presets.match_sheet(rows, [AGING])[0]
+        cleaned = presets.clean(Sheet(None, rows), found)
+        self.assertEqual(
+            cleaned.targets[0].rows,
+            [["0969 Ocean View Road", "Freeman Sporting Goods", "477.5"], ["Plain Co", "", "10"]],
+        )
+
+    def test_equal_scores_keep_load_order_whatever_the_hits(self):
+        first = {**LEDGERS, "id": "first", "signature": {"required": [["Name"]], "optional": [["Nope"]]}}
+        later = {
+            **LEDGERS,
+            "id": "later",
+            "signature": {"required": [["Name"]], "optional": [["Under"], ["Nope"], ["Nada"]]},
+        }
+        found = presets.match_sheet([["Name", "Under"]], [first, later])
+        self.assertEqual([m.score for m in found], [0.5, 0.5])
+        self.assertEqual([m.preset["id"] for m in found], ["first", "later"])
+
+    def test_missing_groups_finds_two_row_joined_aliases(self):
+        two = {
+            **TB,
+            "header": {"rows": 2},
+            "signature": {"required": [["Closing Balance › Debit"], ["Nope"]]},
+        }
+        rows = [["Particulars", "Closing Balance", ""], ["", "Debit", "Credit"]]
+        self.assertEqual(presets.missing_groups(rows, two), [["Nope"]])

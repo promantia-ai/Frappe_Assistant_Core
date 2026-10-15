@@ -15,6 +15,7 @@ other apps add theirs through the assistant_import_presets hook. This module rea
 cleans. It writes nothing: apply_import_preset writes the cleaned files and opens the sessions.
 """
 
+import csv
 import datetime
 import fnmatch
 import glob
@@ -453,10 +454,22 @@ def _content(file_doc) -> bytes:
     return content.encode("utf-8") if isinstance(content, str) else content
 
 
+def _read_csv(content: bytes) -> List[List[str]]:
+    """A CSV's rows with cells as written. Frappe's reader strips every cell, which loses the
+    leading spaces that mark groups by indent. QuickBooks Desktop writes cp1252."""
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("cp1252", errors="replace")
+    return [list(row) for row in csv.reader(io.StringIO(text))]
+
+
 def read_sheets(file_doc) -> List[Sheet]:
     """Every sheet of the file, every row as text, title rows and all."""
     content = _content(file_doc)
     try:
+        if _extension(file_doc) == "csv":
+            return [Sheet(None, _read_csv(content))]
         return [
             Sheet(name, [[_as_text(v) for v in row] for row in rows])
             for name, rows in _iter_sheets(content, _extension(file_doc))
@@ -552,14 +565,20 @@ def match_sheet(rows: List[List[str]], presets: List[Dict[str, Any]]) -> List[Ma
             total = len(signature["required"]) + len(optional) + has_title
             found.append(Match(preset, index, headers, hits / total, hits))
             break
-    found.sort(key=lambda m: (-m.score, -m.hits))  # sort is stable
+    found.sort(key=lambda m: -m.score)  # stable: equal scores keep load order
     return found
 
 
 def missing_groups(rows: List[List[str]], preset: Dict[str, Any]) -> List[List[str]]:
     """The required header groups no row in the search window has, for a preset the user named."""
-    limit = min((preset.get("header") or {}).get("search_rows", SEARCH_ROWS), len(rows))
-    names = {normalise(c) for row in rows[:limit] for c in row if c.strip()}
+    header = preset.get("header") or {}
+    limit = min(header.get("search_rows", SEARCH_ROWS), len(rows))
+    names = {
+        normalise(h)
+        for index in range(limit)
+        for h in _header_cells(rows, index, header.get("rows", 1))
+        if h.strip()
+    }
     return [g for g in preset["signature"]["required"] if not _found(g, names)]
 
 
@@ -670,6 +689,7 @@ def clean(sheet: Sheet, match: Match) -> Cleaned:
     dropped["title"] = match.header_row
 
     kept: List[int] = []
+    totals: set = set()
     first_data = match.header_row + depth
     for r in range(first_data, len(sheet.rows)):
         row = sheet.rows[r]
@@ -682,6 +702,7 @@ def clean(sheet: Sheet, match: Match) -> Cleaned:
             dropped["repeated_header"] += 1
         elif _like(filled[0], skip.get("totals") or []):
             dropped["totals"] += 1
+            totals.add(r)
         elif len(filled) == 1 and _like(filled[0], skip.get("footer") or []):
             dropped["footer"] += 1
         else:
@@ -692,8 +713,11 @@ def clean(sheet: Sheet, match: Match) -> Cleaned:
     carry = group_spec.get("carry_to")
     current_group = ""
     built: List[Dict[str, str]] = []
-    for r in kept:
+    for r in sorted(totals.union(kept)):
         row = sheet.rows[r]
+        if r in totals:
+            current_group = ""  # "Total for X" closes X
+            continue
         if r in groups:
             dropped["groups"] += 1
             current_group = _read(row, positions.get(group_spec["column"], [])).strip()
