@@ -1,0 +1,295 @@
+"""
+Tally XML exports (#34001): reading a Tally masters export safely, counting its parts, and
+turning ledgers and stock items into rows the #34000 Tally presets match.
+"""
+
+from unittest.mock import patch
+
+import frappe
+
+from frappe_assistant_core.plugins.core import import_presets as presets
+from frappe_assistant_core.plugins.core import import_tally_xml as tally
+from frappe_assistant_core.plugins.core.import_session import FileProblem
+from frappe_assistant_core.tests.base_test import BaseAssistantTest
+
+
+def ledger(name, parent, named=True, **tags):
+    """A LEDGER record in TallyPrime's layout. Pass tag=value for the extra child tags."""
+    attribute = f' NAME="{name}" RESERVEDNAME=""' if named else ""
+    body = "".join(f"<{tag}>{value}</{tag}>" for tag, value in tags.items() if "." not in tag)
+    lists = "".join(value for tag, value in tags.items() if "." in tag)
+    return (
+        f'<TALLYMESSAGE xmlns:UDF="TallyUDF"><LEDGER{attribute}>'
+        f'<LANGUAGENAME.LIST><NAME.LIST TYPE="String"><NAME>{name}</NAME><NAME>{name[:2]}</NAME>'
+        f"</NAME.LIST></LANGUAGENAME.LIST><PARENT>{parent}</PARENT>{body}{lists}</LEDGER></TALLYMESSAGE>"
+    )
+
+
+def stock_item(name, parent, units="Nos", **tags):
+    body = "".join(f"<{tag}>{value}</{tag}>" for tag, value in tags.items() if "." not in tag)
+    lists = "".join(value for tag, value in tags.items() if "." in tag)
+    return (
+        f'<TALLYMESSAGE xmlns:UDF="TallyUDF"><STOCKITEM NAME="{name}" RESERVEDNAME="">'
+        f"<PARENT>{parent}</PARENT><BASEUNITS>{units}</BASEUNITS>{body}{lists}</STOCKITEM></TALLYMESSAGE>"
+    )
+
+
+def group(name, parent="&#4; Primary"):
+    return (
+        f'<TALLYMESSAGE xmlns:UDF="TallyUDF"><GROUP NAME="{name}" RESERVEDNAME="{name}">'
+        f"<PARENT>{parent}</PARENT></GROUP></TALLYMESSAGE>"
+    )
+
+
+VOUCHER = (
+    '<TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Sales" ACTION="Create"><DATE>20240401</DATE>'
+    "<VOUCHERNUMBER>1</VOUCHERNUMBER></VOUCHER></TALLYMESSAGE>"
+)
+
+
+def export(*records, company="Acme Traders", encoding="utf-16"):
+    """A Tally XML export as Tally writes it: UTF-16 with a BOM, company in REQUESTDESC."""
+    text = (
+        "<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA>"
+        "<REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>"
+        f"<STATICVARIABLES><SVCURRENTCOMPANY>{company}</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC>"
+        f"<REQUESTDATA>{''.join(records)}</REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>"
+    )
+    return text.encode(encoding)
+
+
+GSTIN_NEW = "<LEDGSTREGDETAILS.LIST><GSTIN>29ABCDE1234F1Z5</GSTIN></LEDGSTREGDETAILS.LIST>"
+MAILING = (
+    "<LEDMAILINGDETAILS.LIST><MAILINGNAME>Ravi Traders Pvt Ltd</MAILINGNAME>"
+    "<STATE>Karnataka</STATE></LEDMAILINGDETAILS.LIST>"
+)
+HSN_NEW = "<HSNDETAILS.LIST><HSNCODE>7214</HSNCODE></HSNDETAILS.LIST>"
+
+
+class XmlCase(BaseAssistantTest):
+    def setUp(self):
+        super().setUp()
+        frappe.set_user("Administrator")
+        self.tag = frappe.generate_hash(length=6)
+        self.files_before = set(frappe.get_all("File", pluck="name"))
+
+    def tearDown(self):
+        frappe.set_user("Administrator")
+        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
+            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        super().tearDown()
+
+    def _upload(self, content, file_name=None):
+        return frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": file_name or f"Master-{self.tag}.xml",
+                "content": content,
+                "is_private": 1,
+            }
+        ).insert()
+
+
+class TestSurvey(XmlCase):
+    def test_parts_are_counted_with_samples_and_parents(self):
+        doc = self._upload(
+            export(
+                group("Sundry Debtors"),
+                group("Sundry Creditors"),
+                ledger("Ravi Traders", "Sundry Debtors"),
+                ledger("Mehta Supplies", "Sundry Creditors"),
+                ledger("HDFC Bank", "Bank Accounts"),
+                stock_item("Steel Rod 10mm", "Raw Material"),
+                VOUCHER,
+            )
+        )
+        found = tally.survey(doc)
+        self.assertEqual(found.company, "Acme Traders")
+        self.assertEqual(found.parts["ledgers"].count, 3)
+        self.assertEqual(found.parts["ledgers"].sample, ["Ravi Traders", "Mehta Supplies", "HDFC Bank"])
+        self.assertEqual(
+            dict(found.parts["ledgers"].by_parent),
+            {"Sundry Debtors": 1, "Sundry Creditors": 1, "Bank Accounts": 1},
+        )
+        self.assertEqual(found.parts["groups"].count, 2)
+        self.assertEqual(dict(found.parts["groups"].by_parent), {"Primary": 2})  # &#4; dropped
+        self.assertEqual(found.parts["stock_items"].count, 1)
+        self.assertEqual(found.other_records, {"VOUCHER": 1})
+
+    def test_utf8_and_namespaces_and_company_in_header(self):
+        text = export(ledger("A", "Sundry Debtors"), encoding="utf-8").decode("utf-8")
+        text = text.replace("<HEADER>", "<HEADER><SVCURRENTCOMPANY>Header Co</SVCURRENTCOMPANY>")
+        text = text.replace(
+            "<STATICVARIABLES><SVCURRENTCOMPANY>Acme Traders</SVCURRENTCOMPANY></STATICVARIABLES>", ""
+        )
+        found = tally.survey(self._upload(text.encode("utf-8")))
+        self.assertEqual(found.company, "Header Co")
+        self.assertEqual(found.parts["ledgers"].count, 1)
+
+    def test_a_large_export_is_streamed_and_samples_stay_capped(self):
+        records = [ledger(f"Party {i}", "Sundry Debtors") for i in range(5000)]
+        found = tally.survey(self._upload(export(*records)))
+        self.assertEqual(found.parts["ledgers"].count, 5000)
+        self.assertEqual(len(found.parts["ledgers"].sample), 10)
+
+    def test_not_a_tally_export_is_refused(self):
+        for content in (
+            b"<customers><customer><name>A</name></customer></customers>",
+            b"<ENVELOPE><BODY></BODY></ENVELOPE>",
+        ):
+            with self.assertRaises(FileProblem) as raised:
+                tally.survey(self._upload(content))
+            self.assertEqual(str(raised.exception), tally.NOT_TALLY)
+
+    def test_vouchers_only_is_refused_with_what_it_holds(self):
+        with self.assertRaises(FileProblem) as raised:
+            tally.survey(self._upload(export(VOUCHER, VOUCHER)))
+        self.assertEqual(str(raised.exception), tally.NO_MASTERS.format("VOUCHER 2"))
+
+    def test_external_entities_are_not_read(self):
+        content = (
+            b'<?xml version="1.0"?><!DOCTYPE ENVELOPE [<!ENTITY secret SYSTEM "file:///etc/passwd">]>'
+            b"<ENVELOPE><BODY><IMPORTDATA><REQUESTDATA><TALLYMESSAGE>"
+            b'<LEDGER NAME="X"><PARENT>&secret;</PARENT></LEDGER>'
+            b"</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>"
+        )
+        found = tally.survey(self._upload(content))
+        self.assertNotIn("root:", "".join(found.parts["ledgers"].by_parent))
+
+    def test_wrong_extension_and_size_are_refused(self):
+        doc = self._upload(export(ledger("A", "Sundry Debtors")), file_name=f"Master-{self.tag}.txt")
+        with self.assertRaises(FileProblem):
+            tally.survey(doc)
+        doc = self._upload(export(ledger("A", "Sundry Debtors")))
+        frappe.db.set_value("File", doc.name, "file_size", 51 * 1024 * 1024)
+        with self.assertRaises(FileProblem) as raised:
+            tally.survey(frappe.get_doc("File", doc.name))
+        self.assertIn("50 MB", str(raised.exception))
+
+
+class TestPartSheet(XmlCase):
+    def test_ledger_columns_from_every_candidate(self):
+        doc = self._upload(
+            export(
+                ledger(
+                    "Ravi Traders",
+                    "Sundry Debtors",
+                    EMAIL="ravi@example.com",
+                    LEDGERMOBILE="9876543210",
+                    INCOMETAXNUMBER="ABCDE1234F",
+                    OPENINGBALANCE="-1000.00",
+                    **{"LEDGSTREGDETAILS.LIST": GSTIN_NEW, "LEDMAILINGDETAILS.LIST": MAILING},
+                ),
+                ledger(
+                    "Mehta Supplies",
+                    "Sundry Creditors",
+                    PARTYGSTIN="27PQRSX5678L1Z2",
+                    LEDGERPHONE="022-1234",
+                    LEDSTATENAME="Maharashtra",
+                    OPENINGBALANCE="500.00",
+                ),
+                ledger("No Attr Co", "Sundry Debtors", named=False, OPENINGBALANCE="n/a"),
+            )
+        )
+        sheet = tally.part_sheet(doc, "ledgers")
+        self.assertEqual(sheet.name, "ledgers (Tally XML)")
+        self.assertEqual(
+            sheet.rows[0],
+            [
+                "Name",
+                "Parent",
+                "GSTIN/UIN",
+                "E-mail",
+                "Ledger Mobile",
+                "PAN",
+                "State",
+                "Mailing Name",
+                "Opening Balance",
+            ],
+        )
+        self.assertEqual(
+            sheet.rows[1],
+            [
+                "Ravi Traders",
+                "Sundry Debtors",
+                "29ABCDE1234F1Z5",
+                "ravi@example.com",
+                "9876543210",
+                "ABCDE1234F",
+                "Karnataka",
+                "Ravi Traders Pvt Ltd",
+                "1000",
+            ],
+        )
+        self.assertEqual(sheet.rows[2][2], "27PQRSX5678L1Z2")
+        self.assertEqual(sheet.rows[2][4], "022-1234")
+        self.assertEqual(sheet.rows[2][6], "Maharashtra")
+        self.assertEqual(sheet.rows[2][8], "-500")  # a credit in Tally XML is positive
+        self.assertEqual(sheet.rows[3][0], "No Attr Co")  # from LANGUAGENAME.LIST
+        self.assertEqual(sheet.rows[3][8], "n/a")  # not a number: kept as written
+
+    def test_stock_item_columns(self):
+        doc = self._upload(
+            export(
+                stock_item(
+                    "Steel Rod 10mm",
+                    "Raw Material",
+                    DESCRIPTION="10mm TMT",
+                    CATEGORY="Steel",
+                    OPENINGBALANCE=" 10 Nos",
+                    OPENINGRATE="100.00/Nos",
+                    **{"HSNDETAILS.LIST": HSN_NEW},
+                ),
+                stock_item(
+                    "Paint 1L",
+                    "Finished Goods",
+                    units="Ltr",
+                    **{"GSTDETAILS.LIST": "<GSTDETAILS.LIST><HSNCODE>3208</HSNCODE></GSTDETAILS.LIST>"},
+                ),
+            )
+        )
+        sheet = tally.part_sheet(doc, "stock_items")
+        self.assertEqual(
+            sheet.rows[0],
+            [
+                "Name",
+                "Stock Group",
+                "Base Units",
+                "HSN Code",
+                "Description",
+                "Category",
+                "Opening Quantity",
+                "Opening Rate",
+            ],
+        )
+        self.assertEqual(
+            sheet.rows[1],
+            ["Steel Rod 10mm", "Raw Material", "Nos", "7214", "10mm TMT", "Steel", "10 Nos", "100.00/Nos"],
+        )
+        self.assertEqual(sheet.rows[2][3], "3208")
+
+    def test_the_tally_presets_match_the_sheets(self):
+        presets.clear_cache()
+        by_id = {p["id"]: p for p in presets.load_presets()}
+        doc = self._upload(export(ledger("A", "Sundry Debtors"), stock_item("B", "Raw Material")))
+        for part, preset_id in tally.IMPORTABLE.items():
+            sheet = tally.part_sheet(doc, part)
+            found = presets.match_sheet(sheet.rows, [by_id[preset_id]])
+            self.assertEqual(len(found), 1, part)
+            self.assertEqual(found[0].header_row, 0, part)
+
+    def test_a_part_over_the_row_limit_is_refused(self):
+        doc = self._upload(export(*[ledger(f"P{i}", "Sundry Debtors") for i in range(6)]))
+        with patch.object(tally, "MAX_PRESET_ROWS", 5), self.assertRaises(FileProblem) as raised:
+            tally.part_sheet(doc, "ledgers")
+        self.assertIn("more than 5", str(raised.exception))
+
+
+class TestPartsProblem(XmlCase):
+    def test_each_bad_request_is_named(self):
+        found = tally.survey(self._upload(export(ledger("A", "Sundry Debtors"), group("Sundry Debtors"))))
+        self.assertIsNone(tally.parts_problem(["ledgers"], found))
+        self.assertIn("at least one", tally.parts_problem([], found))
+        self.assertIn("not imported", tally.parts_problem(["groups"], found))
+        self.assertIn("ledgers, stock_items", tally.parts_problem(["vouchers"], found))
+        self.assertEqual(tally.parts_problem(["stock_items"], found), "This export has no stock items.")
