@@ -31,6 +31,7 @@ from frappe_assistant_core.plugins.core.import_mapping import save_mapping, sess
 from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
 
 TARGET = "Stock Reconciliation"
+IMPORT_TOOL = "import_opening_stock"
 ITEM_TABLE = "Stock Reconciliation Item"
 PURPOSE = "Opening Stock"
 DEFAULT_TIME = "23:59:59"

@@ -94,11 +94,13 @@ def check_status(session) -> None:
 
 def special_engine(session):
     """The engine of a session that isn't imported through Data Import (opening stock, opening
-    invoices), or None. Each keeps its settings under its own key in template_options."""
+    invoices, opening balances), or None. Each keeps its settings under its own key in
+    template_options."""
+    from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
     from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
     from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 
-    for engine in (opening_stock, opening_invoices):
+    for engine in (opening_stock, opening_invoices, opening_balances):
         if engine.settings(session):
             return engine
     return None

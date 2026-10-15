@@ -34,6 +34,7 @@ from frappe_assistant_core.plugins.core.import_mapping import save_mapping, sess
 from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
 
 TOOL = "Opening Invoice Creation Tool"
+IMPORT_TOOL = "import_opening_invoices"
 INVOICE_DOCTYPES = {"Sales": "Sales Invoice", "Purchase": "Purchase Invoice"}
 PARTY_TYPES = {"Sales": "Customer", "Purchase": "Supplier"}
 PARTY_FIELDS = {"Customer": "customer", "Supplier": "supplier"}

@@ -77,14 +77,11 @@ class StartImport(BaseTool):
 
         engine = special_engine(session)
         if engine:
-            tool = (
-                "import_opening_stock"
-                if engine.__name__.endswith("opening_stock")
-                else "import_opening_invoices"
-            )
             return {
                 "success": False,
-                "error": _("This session is imported with {0}, not through Data Import.").format(tool),
+                "error": _("This session is imported with {0}, not through Data Import.").format(
+                    engine.IMPORT_TOOL
+                ),
                 "session": session_name,
             }
 
