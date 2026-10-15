@@ -50,7 +50,7 @@ class OpeningBalancesCase(BaseAssistantTest):
         frappe.set_user("Administrator")
         for name in self.made_entries:
             if frappe.db.get_value("Journal Entry", name, "docstatus") == 1:
-                frappe.get_doc("Journal Entry", name).cancel()
+                frappe.get_doc("Journal Entry", name)._cancel()  # cancel() queues more than 100 lines
             frappe.delete_doc("Journal Entry", name, force=True, ignore_permissions=True)
         for name in reversed(self.made_accounts):
             try:
@@ -1282,7 +1282,10 @@ class TestCreating(OpeningBalancesCase):
         self.assertIn("Refused at submit", reply["error"])
         self.assertEqual(self._entries(), before)
         self.assertEqual(frappe.db.count("Journal Entry", {"docstatus": 0, "is_opening": "Yes"}), 0)
-        self.assertEqual(self._doc(session).status, "Failed")
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Failed")
+        self.assertEqual([r for r in doc.created_records if r.record_doctype == "Journal Entry"], [])
+        self.assertFalse(opening_balances.settings(doc).get("created"))
 
     def test_a_failed_session_can_be_checked_and_imported_again(self):
         session, result = self._ready()
@@ -1346,3 +1349,109 @@ class TestCreating(OpeningBalancesCase):
         )
         self.assertFalse(reply["success"])
         self.assertIn("start_import", reply["error"])
+
+    # -- review fixes --------------------------------------------------------------------
+
+    def test_an_entry_of_more_than_100_lines_is_imported_in_the_request(self):
+        accounts = [self._account(f"Bulk {i}", "Asset") for i in range(101)]
+        lines = [f"{account},1,," for account in accounts] + [f"{self.capital},,101,"]
+        session, result = self._ready(lines)
+        self.assertEqual((result["ready"], result["failed"]), (102, 0), result)
+        queued = frappe.db.count("Submission Queue")
+        reply = self._import(session, result)
+        self.assertTrue(reply["success"], reply)
+        entry = frappe.get_doc("Journal Entry", self._entry_of(session))
+        self.assertEqual((entry.docstatus, len(entry.accounts)), (1, 102))
+        self.assertEqual(self._doc(session).status, "Completed")
+        self.assertEqual(frappe.db.count("Submission Queue"), queued)
+
+    def test_the_check_submits_the_entry_the_way_the_import_does(self):
+        accounts = [self._account(f"Bulk {i}", "Asset") for i in range(101)]
+        lines = [f"{account},1,," for account in accounts] + [f"{self.capital},,101,"]
+        queued = frappe.db.count("Submission Queue")
+        with patch.object(frappe.model.document.Document, "_submit", autospec=True) as submitted:
+            submitted.side_effect = lambda doc: setattr(doc, "docstatus", 1)
+            self._ready(lines)
+        self.assertTrue(submitted.called)
+        self.assertEqual(frappe.db.count("Submission Queue"), queued)
+
+    def test_create_returns_when_another_call_already_moved_the_session(self):
+        for status in ("Importing", "Completed"):
+            session, result = self._ready()
+            stale = self._doc(session)
+            frappe.db.set_value("FAC Import Session", session, "status", status, update_modified=False)
+            before = self._entries()
+            opening_balances.create(stale)
+            self.assertEqual(self._entries(), before)
+            self.assertEqual(frappe.db.get_value("FAC Import Session", session, "status"), status)
+
+    def test_the_session_is_importing_while_the_entry_is_made(self):
+        session, result = self._ready()
+        seen = []
+        real = opening_balances.build_entry
+
+        def spy(*args, **kwargs):
+            seen.append(frappe.db.get_value("FAC Import Session", session, "status"))
+            return real(*args, **kwargs)
+
+        with patch.object(opening_balances, "build_entry", side_effect=spy):
+            self.assertTrue(self._import(session, result)["success"])
+        self.assertEqual(seen, ["Importing"])
+
+    def test_a_failure_does_not_overwrite_a_concurrent_completion(self):
+        session, result = self._ready()
+        real = frappe.db.rollback
+
+        def rollback_then_complete(*args, **kwargs):
+            real(*args, **kwargs)
+            if kwargs.get("save_point") == opening_balances.CREATE_SAVEPOINT:
+                options = frappe.parse_json(
+                    frappe.db.get_value("FAC Import Session", session, "template_options")
+                )
+                options["opening_balances"]["created"] = {"ACC-JV-OTHER": {}}
+                frappe.db.set_value(
+                    "FAC Import Session",
+                    session,
+                    {"status": "Completed", "template_options": frappe.as_json(options)},
+                    update_modified=False,
+                )
+
+        with (
+            patch.object(opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw("No")),
+            patch.object(frappe.db, "rollback", side_effect=rollback_then_complete),
+        ):
+            reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Completed")
+        self.assertEqual(list(opening_balances.settings(doc)["created"]), ["ACC-JV-OTHER"])
+        self.assertFalse([s for s in doc.steps if s.step == "Import" and s.outcome == "Failed"])
+
+    def test_a_card_for_an_unchecked_sheet_says_so_without_none(self):
+        session = self._session()
+        self.assertTrue(self._setup(session)["success"])
+        reply = self._run(
+            "import_opening_balances",
+            {
+                "session": session,
+                "company": self.company,
+                "cut_off": self.date,
+                "rows": 2,
+                "total_debit": 100,
+                "total_credit": 100,
+            },
+        )
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("dry_run_import", reply["error"])
+        self.assertNotIn("None", reply["error"])
+
+    def test_a_changed_ready_count_is_refused(self):
+        session, result = self._ready()
+        before = self._entries()
+        real = opening_balances.ready_lines
+        with patch.object(opening_balances, "ready_lines", side_effect=lambda s: real(s)[:-1]):
+            reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("changed since the last check", reply["error"])
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(self._doc(session).status, "Ready to Import")

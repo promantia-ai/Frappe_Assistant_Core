@@ -681,6 +681,15 @@ def build_entry(balances: Dict[str, Any], ready: List[Ready]):
 SAVEPOINT = "fac_opening_balances_check"
 
 
+def _submit_now(entry) -> None:
+    """Submit in this request, all or nothing. ``submit()`` hands an entry of more than 100
+    lines to a background queue and returns with it still a draft, so neither the check nor the
+    import could rely on it; ``_submit()`` is the same submission without the queue."""
+    entry._submit()
+    if entry.docstatus != 1:
+        frappe.throw(_("{0} was not submitted.").format(entry.name or _("The entry")))
+
+
 def _entry_error(balances: Dict[str, Any], ready: List[Ready]) -> Optional[Exception]:
     """None when ERPNext accepts the entry, inserted and submitted, else why not. Rolled back."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
@@ -691,7 +700,7 @@ def _entry_error(balances: Dict[str, Any], ready: List[Ready]) -> Optional[Excep
         try:
             entry = build_entry(balances, ready)
             entry.insert()
-            entry.submit()
+            _submit_now(entry)
             return None
         except Exception as e:
             return e
@@ -815,6 +824,8 @@ def check_card(session, company, cut_off, rows, total_debit, total_credit) -> No
     except Exception:
         frappe.clear_messages()
         asked = None
+    if checked[2] is None:
+        raise OpeningBalancesProblem(_("The sheet hasn't been checked. Check it with dry_run_import first."))
     if asked != checked:
         raise OpeningBalancesProblem(
             _(
@@ -885,13 +896,18 @@ def create(session) -> None:
     if problem:
         raise OpeningBalancesProblem(problem)
 
+    # Two calls at once: the row lock makes the second wait, then see Importing and report.
+    current = frappe.db.get_value(session.doctype, session.name, "status", for_update=True)
+    if current != "Ready to Import":
+        return
+    session.status = "Importing"
+    session.save()
+
     frappe.db.savepoint(CREATE_SAVEPOINT)
     try:
         entry = build_entry(balances, ready)
         entry.insert()
-        entry.submit()
-        if entry.docstatus != 1:
-            frappe.throw(_("{0} was not submitted.").format(entry.name))
+        _submit_now(entry)
         session.append("created_records", {"record_doctype": TARGET, "record_name": entry.name})
         options = frappe.parse_json(session.template_options or "{}") or {}
         options["opening_balances"]["created"] = {
@@ -921,6 +937,9 @@ def create(session) -> None:
         frappe.clear_messages()
         message = _("ERPNext refused the opening entry: {0}").format(dry_run._message_of(e))
         session.reload()  # drop what the failed attempt put on the document
+        if settings(session).get("created"):
+            # another call made the entry meanwhile: its status stands
+            raise OpeningBalancesProblem(message) from e
         session.status = "Failed"
         session.log_step("Import", "Failed", message, rows_ok=0, rows_failed=len(ready))
         session.save()
