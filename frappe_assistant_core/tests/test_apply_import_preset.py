@@ -491,6 +491,208 @@ SHIPPED = {
 }
 
 
+SHIPPED.update(
+    {
+        "quickbooks_desktop.customer_list": (
+            [
+                ["Active Status", "Customer", "Balance", "Company", "Main Phone", "Main Email", "Bill to 1"],
+                ["Active", "Abercrombie, Kristy", "0.00", "", "415-555-6579", "kristy@example.com", "Kristy Abercrombie"],
+                ["Inactive", "Old Co", "0.00", "Old Co", "", "", ""],
+            ],
+            {"Customers": 2},
+        ),
+        "quickbooks_desktop.vendor_list": (
+            [
+                ["Active Status", "Vendor", "Balance", "Company", "Main Phone", "Main Email", "Bill from 1"],
+                ["Active", "Cal Telephone", "0.00", "Cal Telephone", "415-555-1234", "", "Cal Telephone"],
+            ],
+            {"Suppliers": 1},
+        ),
+        "quickbooks_desktop.item_list": (
+            [
+                ["Item", "Description", "Type", "Account", "On Hand", "Price", "Cost"],
+                ["Cabinets:Cabinet Pulls", "Cabinet Pulls", "Inventory Part", "Construction Income", "423", "0.00", "3.00"],
+                ["Framing", "Framing labor", "Service", "Construction Income", "", "55.00", ""],
+                ["Subtotal", "", "Subtotal", "", "", "", ""],
+            ],
+            {"Items": 2},
+        ),
+        "quickbooks_desktop.account_listing": (
+            [
+                ["Account", "Type", "Balance Total", "Description", "Accnt. #", "Tax Line"],
+                ["1000 · Checking", "Bank", "46,969.10", "", "1000", ""],
+                ["1500 · Truck:1510 · Depreciation", "Fixed Asset", "-2,500.00", "", "1510", ""],
+                ["Estimates", "Non-Posting", "0.00", "", "", ""],
+            ],
+            {},  # needs the company first; Non-Posting is no_target
+        ),
+        "zoho_books.customers": (
+            [
+                [
+                    "Display Name",
+                    "Company Name",
+                    "EmailID",
+                    "Phone",
+                    "MobilePhone",
+                    "GST Treatment",
+                    "GST Identification Number (GSTIN)",
+                    "Currency Code",
+                    "Status",
+                    "Customer Sub Type",
+                    "Contact ID",
+                ],
+                [
+                    "Ravi Traders",
+                    "Ravi Traders Pvt Ltd",
+                    "ravi@example.com",
+                    "080-1234",
+                    "",
+                    "business_gst",
+                    "29ABCDE1234F1Z5",
+                    "INR",
+                    "Active",
+                    "business",
+                    "4600000000001",
+                ],
+            ],
+            {"Customers": 1},
+        ),
+        "zoho_books.vendors": (
+            [
+                [
+                    "Display Name",
+                    "Company Name",
+                    "EmailID",
+                    "Phone",
+                    "GST Treatment",
+                    "GST Identification Number (GSTIN)",
+                    "Status",
+                    "Vendor ID",
+                    "Bank Account Number",
+                ],
+                ["Mehta Supplies", "Mehta Supplies", "", "", "business_none", "", "Active", "4600000000002", ""],
+            ],
+            {"Suppliers": 1},
+        ),
+        "zoho_books.items": (
+            [
+                ["Item ID", "Item Name", "SKU", "HSN/SAC", "Description", "Rate", "Usage unit", "Product Type", "Status"],
+                ["46000001", "Steel Rod 10mm", "SR10", "7214", "", "INR 100.00", "pcs", "goods", "Active"],
+                ["46000002", "Design", "", "998391", "", "75", "", "service", "Inactive"],
+            ],
+            {"Items": 2},
+        ),
+        "zoho_books.chart_of_accounts": (
+            [
+                [
+                    "Account ID",
+                    "Account Name",
+                    "Account Code",
+                    "Description",
+                    "Account Type",
+                    "Account Status",
+                    "Currency",
+                    "Parent Account",
+                ],
+                ["1", "Petty Cash", "1001", "", "Cash", "Active", "INR", ""],
+                ["2", "Office Rent", "6001", "", "Expense", "Active", "INR", "Rent"],
+            ],
+            {},  # needs the company first
+        ),
+        "zoho_books.trial_balance": (
+            [
+                ["Acme Pvt Ltd"],
+                ["Trial Balance"],
+                ["Basis: Accrual"],
+                ["As of 31/03/2025"],
+                ["Account", "Account Code", "Net Debit", "Net Credit"],
+                ["Assets", "", "", ""],
+                ["Current Assets", "", "", ""],
+                ["Petty Cash", "1001", "500.00", ""],
+                ["Total for Assets", "", "500.00", ""],
+                ["Equities", "", "", ""],
+                ["Capital", "3001", "", "500.00"],
+                ["Total", "", "500.00", "500.00"],
+            ],
+            {"Trial balance": 2},
+        ),
+        "zoho_books.invoices": (
+            [
+                [
+                    "Invoice Date",
+                    "Invoice ID",
+                    "Invoice Number",
+                    "Invoice Status",
+                    "Customer ID",
+                    "Customer Name",
+                    "Due Date",
+                    "Balance",
+                    "Item Name",
+                    "Quantity",
+                ],
+                ["2025-03-01", "1", "INV-001", "Overdue", "9", "Ravi Traders", "2025-03-31", "1180.00", "Steel Rod", "10"],
+                ["2025-03-01", "1", "INV-001", "Overdue", "9", "Ravi Traders", "2025-03-31", "1180.00", "Paint", "2"],
+                ["2025-03-05", "2", "INV-002", "Paid", "9", "Ravi Traders", "2025-04-04", "0.00", "Paint", "1"],
+            ],
+            {"Open invoices": 1},
+        ),
+        "zoho_books.bills": (
+            [
+                ["Bill Date", "Bill ID", "Bill Number", "Bill Status", "Vendor Name", "Due Date", "Balance", "Item Name"],
+                ["2025-03-02", "7", "B-77", "Open", "Mehta Supplies", "2025-04-01", "500.00", "Steel"],
+            ],
+            {"Open bills": 1},
+        ),
+        "busy.accounts": (
+            [
+                ["Acme Pvt Ltd"],
+                ["Account List"],
+                ["Name", "Group", "Op. Bal.", "Dr/Cr", "GSTIN", "Mobile", "Email"],
+                ["Ravi Traders", "Sundry Debtors", "1000", "Dr", "29ABCDE1234F1Z5", "9876543210", ""],
+                ["Mehta Supplies", "Sundry Creditors", "500", "Cr", "", "", ""],
+                ["Cash", "Cash-in-hand", "200", "Dr", "", "", ""],
+            ],
+            {"Customers": 1, "Suppliers": 1},
+        ),
+        "busy.items": (
+            [
+                ["Name", "Group", "Main Unit", "HSN Code", "Tax Category", "Sale Price"],
+                ["Steel Rod 10mm", "Raw Material", "Pcs.", "7214", "GST 18%", "120.00"],
+            ],
+            {"Items": 1},
+        ),
+        "busy.trial_balance": (
+            [
+                ["Acme Pvt Ltd"],
+                ["Trial Balance as on 31-03-2025"],
+                ["Account Name", "Debit", "Credit"],
+                ["Cash", "200.00", ""],
+                ["Capital", "", "200.00"],
+                ["Total", "200.00", "200.00"],
+            ],
+            {"Trial balance": 2},
+        ),
+        "marg.ledgers": (
+            [
+                ["Acme Pharma"],
+                ["All Ledgers"],
+                ["Ledger Name", "Station", "Group", "GSTIN", "Mobile", "Balance", "Dr/Cr"],
+                ["Ravi Medicals", "Bengaluru", "Sundry Debtors", "29ABCDE1234F1Z5", "9876543210", "1000", "Dr"],
+                ["Cipla Distributor", "Mumbai", "Sundry Creditors", "", "", "500", "Cr"],
+            ],
+            {"Customers": 1, "Suppliers": 1},
+        ),
+        "marg.items": (
+            [
+                ["Product Name", "Packing", "Company", "Unit", "HSN", "GST %", "MRP", "Rate"],
+                ["Paracetamol 500", "10x10", "Cipla", "Strip", "3004", "12", "25.00", "20.00"],
+            ],
+            {"Items": 1},
+        ),
+    }
+)
+
+
 # Tally's real Trial Balance export: a two-row Closing Balance header and Particulars in a column
 # with no header.
 TALLY_TB_REAL = [
@@ -619,6 +821,14 @@ class TestShippedPresets(PresetToolCase):
 
     def _company(self):
         return frappe.get_all("Company", pluck="name", order_by="creation", limit=1)[0]
+
+    def test_zoho_contacts_ties_are_reported_for_the_model_to_ask(self):
+        # Both Zoho contact presets have 2 required and 5 optional groups, so headers common to both tie.
+        rows = [["Display Name", "EmailID", "Status"], ["Ravi Traders", "", "Active"]]
+        file_doc = as_xlsx_file(self, f"zoho-contacts-{self.tag}.xlsx", rows)
+        result = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})["result"]
+        self.assertEqual(result["preset"]["id"], "zoho_books.customers")
+        self.assertIn("zoho_books.vendors", result["also_matched"])
 
     def test_a_plain_file_is_not_claimed_by_any_preset(self):
         for content in (
