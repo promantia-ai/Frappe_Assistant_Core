@@ -206,7 +206,10 @@ A warehouse of another company, or a group warehouse, can be mapped to a real on
 For a session set up with `set_opening_invoices`, the check also covers: a party that doesn't exist
 (`map` it, or `leave_out` the rows; or create it with `create_document`, see below); a disabled party (`map`); a party in another currency,
 an amount that isn't positive, a due date before the invoice date, the same invoice number twice, an
-invoice number ERPNext already has (`leave_out`, or fix in the file); an invoice dated in no fiscal year
+invoice number ERPNext already has (`leave_out`, or fix in the file); an invoice dated after the
+cut-off (it wasn't owed at the cut-off: `leave_out`, or fix the date in the file); an invoice without a
+number whose party, date and amount ERPNext already has as an opening invoice, say from the same file
+imported in another session (`leave_out`); an invoice dated in no fiscal year
 (`post_at_cutoff` posts it at the cut-off date, its old date kept in the remarks, or `leave_out`). Each
 ready row's invoice is created and submitted inside the check and rolled back, so the check catches
 most of ERPNext's own refusals. A few rows can still be refused during the import; they are reported

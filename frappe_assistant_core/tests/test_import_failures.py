@@ -524,3 +524,16 @@ class TestImportFailures(ImportRunCase):
 
         self.assertEqual((result["status"], result["ready"]), ("Ready to Import", 1), result)
         self.assertEqual(self._doc(session).sheet, f"{session}-failed-rows")
+
+    # -- Frappe v16 refuses SQL functions in get_all's fields ------------------------------------
+
+    def test_the_runs_are_counted_without_asking_get_all_for_a_sql_function(self):
+        from frappe_assistant_core.plugins.core import import_failures
+        from frappe_assistant_core.tests.test_import_opening_stock import refuse_sql_functions
+
+        session, _checked, _result = self._partly_imported()
+
+        with patch("frappe.get_all", refuse_sql_functions(frappe.get_all)):
+            runs = import_failures.runs(self._doc(session))
+
+        self.assertEqual([(run["created"], run["failed"]) for run in runs], [(2, 1)])

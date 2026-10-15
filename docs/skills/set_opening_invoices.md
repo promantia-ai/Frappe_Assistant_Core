@@ -27,7 +27,8 @@ It writes no business data.
 
 `party` and `outstanding_amount` are required.
 
-- `posting_date` is the invoice's own date (it keeps the ageing right); default the cut-off.
+- `posting_date` is the invoice's own date (it keeps the ageing right); default the cut-off. A date
+  after the cut-off is refused: what was owed at the cut-off was invoiced on or before it.
 - `due_date` defaults to the invoice date.
 - Sales: the invoice number becomes the invoice's name. Purchase: it becomes the supplier's bill
   number (`bill_no`); ERPNext names the invoice.

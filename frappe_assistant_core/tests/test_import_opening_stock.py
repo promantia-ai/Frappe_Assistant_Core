@@ -965,3 +965,208 @@ class TestSessionIsOneKind(OpeningStockCase):
         self.assertFalse(reply["success"], reply)
         self.assertIn("opening balances", reply["error"])
         self.assertEqual(self._doc(session).template_options, before)
+
+
+def refuse_sql_functions(real_get_all):
+    """frappe.get_all as Frappe v16 has it: SQL functions in fields are refused. v15 accepts
+    them, so code tested on v15 only would pass here and break on v16."""
+
+    def get_all(doctype, *args, **kwargs):
+        fields = kwargs.get("fields") or (args[1] if len(args) > 1 else None) or []
+        for field in [fields] if isinstance(fields, str) else fields:
+            if isinstance(field, str) and "(" in field:
+                raise frappe.ValidationError(f"SQL functions are not allowed as strings in SELECT: {field}")
+        return real_get_all(doctype, *args, **kwargs)
+
+    return get_all
+
+
+class TestSignoffReviewFixes(OpeningStockCase):
+    """The review's findings on opening stock (#33999), each pinned by a test that failed first."""
+
+    def _imported(self, lines):
+        session, result = self._ready(lines)
+        response = self._run("import_opening_stock", self._card(session, result))
+        self.assertTrue(response["success"], response)
+        return session, response["result"]
+
+    # -- the report works on Frappe v16 ----------------------------------------------------------
+
+    def test_the_report_asks_get_all_for_no_sql_function(self):
+        from unittest.mock import patch
+
+        session, _report = self._imported([f"{self.item},{self.stores},5,10"])
+
+        with patch("frappe.get_all", refuse_sql_functions(frappe.get_all)):
+            report = opening_stock.report(self._doc(session))
+
+        self.assertEqual(report["warehouses"][self.stores]["erpnext_value"], 50)
+
+    # -- numbers as the file writes them ------------------------------------------------------
+
+    def test_numbers_with_both_separators_take_the_last_as_the_decimal_point(self):
+        self.assertEqual(opening_stock.number("1,234.56"), 1234.56)
+        self.assertEqual(opening_stock.number("1.234,56"), 1234.56)
+        self.assertEqual(opening_stock.number("1 234,56"), 1234.56)
+        self.assertEqual(opening_stock.number("(1.234,50)"), -1234.5)
+        self.assertEqual(opening_stock.number("1.234.567"), 1234567)
+
+    def test_a_comma_is_read_by_the_sites_number_format(self):
+        from unittest.mock import patch
+
+        with patch.object(opening_stock, "decimal_comma", return_value=False):
+            self.assertEqual(opening_stock.number("1,234"), 1234)
+            with self.assertRaises(ValueError):  # not 125: it isn't thousands
+                opening_stock.number("12,5")
+        with patch.object(opening_stock, "decimal_comma", return_value=True):
+            self.assertEqual(opening_stock.number("12,5"), 12.5)
+            self.assertEqual(opening_stock.number("1,234"), 1.234)
+        self.assertEqual(opening_stock.number("1234.5"), 1234.5)  # a workbook's number, either way
+
+    def test_the_decimal_point_comes_from_system_settings(self):
+        from unittest.mock import patch
+
+        for fmt, comma in (("#,###.##", False), ("#.###,##", True), ("# ###,##", True), ("#.###", True)):
+            with patch.object(frappe.db, "get_default", return_value=fmt):
+                self.assertEqual(opening_stock.decimal_comma(), comma, fmt)
+
+    def test_indian_grouping_is_read_as_thousands(self):
+        self.assertEqual(opening_stock.number("1,00,000"), 100000)
+        self.assertEqual(opening_stock.number("12,34,567.50"), 1234567.5)
+        self.assertEqual(opening_stock.number("(2,50,000)"), -250000)
+        with self.assertRaises(ValueError):  # neither way of grouping
+            opening_stock.number("1,0,0")
+
+    def test_nan_and_inf_are_not_numbers(self):
+        for text in ("nan", "inf", "-inf"):
+            with self.assertRaises(ValueError):
+                opening_stock.number(text)
+
+    # -- a draft is failed when ERPNext says so, and pending while queued ----------------------
+
+    def _queued_draft(self):
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        with patch.object(StockReconciliation, "submit", lambda doc: None):  # as when queued
+            name = self._run("import_opening_stock", self._card(session, result))["result"]["documents"][0]
+        return session, name
+
+    def test_a_draft_whose_queued_submit_failed_is_failed_at_once(self):
+        session, name = self._queued_draft()
+        # Production: Frappe's execute_action adds this comment when the queued submit raises.
+        frappe.get_doc("Stock Reconciliation", name).add_comment("Comment", "Action Failed<br><br>No stock")
+
+        report = opening_stock.report(self._doc(session))
+
+        self.assertEqual(report["failed_documents"], [name])
+        self.assertEqual(self._doc(session).status, "Failed")
+
+    def test_a_draft_still_waiting_in_the_queue_is_pending_however_old(self):
+        session, name = self._queued_draft()
+        long_ago = frappe.utils.add_to_date(None, seconds=-(opening_stock.STALL_SECONDS + 60))
+        frappe.db.set_value("Stock Reconciliation", name, "modified", long_ago, update_modified=False)
+        doc = frappe.get_doc("Stock Reconciliation", name)
+        doc.lock()  # Production: queue_action locks the document until its job starts
+        try:
+            report = opening_stock.report(self._doc(session))
+        finally:
+            doc.unlock()
+
+        self.assertEqual((report["pending"], report["failed_documents"]), ([name], []))
+        self.assertEqual(self._doc(session).status, "Importing")
+
+    def test_a_draft_out_of_the_queue_is_not_failed_within_the_jobs_time(self):
+        session, name = self._queued_draft()
+        ten_minutes_ago = frappe.utils.add_to_date(None, minutes=-11)
+        frappe.db.set_value("Stock Reconciliation", name, "modified", ten_minutes_ago, update_modified=False)
+
+        report = opening_stock.report(self._doc(session))
+
+        self.assertEqual((report["pending"], report["failed_documents"]), ([name], []))
+
+    # -- a sheet of several documents is made in the background -------------------------------
+
+    def test_several_documents_are_made_by_a_background_job(self):
+        from unittest.mock import patch
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"])
+        with patch.object(opening_stock, "CHUNK_ROWS", 1):
+            with patch("frappe.enqueue", wraps=frappe.enqueue) as enqueue:
+                response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(enqueue.call_args.args[0], f"{opening_stock.__name__}.create_job")
+        self.assertEqual(enqueue.call_args.kwargs["job_id"], f"fac_opening_stock::{session}")
+        self.assertEqual(len(response["result"]["documents"]), 2)
+        self.assertEqual(self._doc(session).status, "Completed")
+
+    def test_one_document_is_made_in_the_request(self):
+        from unittest.mock import patch
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        with patch("frappe.enqueue", wraps=frappe.enqueue) as enqueue:
+            response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertTrue(response["success"], response)
+        self.assertFalse([c for c in enqueue.call_args_list if c.args and "create_job" in c.args[0]])
+
+    def test_while_the_job_runs_the_report_says_so_and_waits(self):
+        from unittest.mock import patch
+
+        session, _report = self._imported([f"{self.item},{self.stores},5,10"])
+        doc = self._doc(session)
+        doc.db_set("status", "Importing")
+        doc.db_set("progress", opening_stock._progress("queued"))
+
+        with patch.object(opening_stock, "_job_running", return_value=True):
+            report = opening_stock.report(self._doc(session))
+
+        self.assertEqual(report["status"], "Importing")
+        self.assertIn("in the background", report["message"])
+
+    def test_a_job_that_stopped_before_its_end_is_marked_so(self):
+        from unittest.mock import patch
+
+        session, _report = self._imported([f"{self.item},{self.stores},5,10"])
+        doc = self._doc(session)
+        doc.db_set("status", "Importing")
+        doc.db_set("progress", opening_stock._progress("queued"))
+
+        with patch.object(opening_stock, "_job_running", return_value=False):
+            report = opening_stock.report(self._doc(session))
+
+        self.assertEqual(report["status"], "Partially Completed")
+        self.assertIn("stopped", self._doc(session).steps[-1].message)
+
+    # -- every row, for the sign-off report --------------------------------------------------
+
+    def test_the_summary_counts_every_row_and_values_them_as_the_file_does(self):
+        session, result = self._ready(
+            [
+                f"{self.item},{self.stores},5,10",
+                f"{self.item2},{self.shop},2,7.5",
+                f"NO-SUCH-{self.tag},{self.stores},1,1",
+                "Total,,8,",
+            ]
+        )
+        groups = {g["cause"]: g for g in result["groups"]}
+        result = self._run(
+            "dry_run_import",
+            {
+                "session": session,
+                "fixes": [{"group": groups["Totals row"]["id"], "action": "leave_out", "reason": "Totals"}],
+            },
+        )["result"]
+
+        summary = opening_stock.summary(self._doc(session))
+
+        self.assertEqual(
+            summary["rows"], {"source": 4, "imported": 0, "excluded": 1, "failed": 1, "not_imported": 2}
+        )
+        self.assertEqual(summary["excluded"], [{"reason": "Totals", "count": 1, "rows": "5"}])
+        self.assertEqual(summary["value"]["source"], 66)  # the totals row isn't a row of stock
+        self.assertEqual(summary["value"]["failed"], 1)
+        self.assertEqual(summary["erpnext"]["total"], 0)
