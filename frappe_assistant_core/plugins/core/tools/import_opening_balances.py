@@ -64,6 +64,12 @@ class ImportOpeningBalances(BaseTool):
                 "error": _("This session isn't opening balances. Use start_import."),
                 "session": name,
             }
+        if session.status == "Failed" and not opening_balances.settings(session).get("created"):
+            return {
+                "success": False,
+                "error": _("The last import failed. Check the sheet again with dry_run_import, then import."),
+                "session": name,
+            }
         try:
             opening_balances.check_card(
                 session,

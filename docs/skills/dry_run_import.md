@@ -244,6 +244,7 @@ Voucher, when an opening Journal Entry already exists at the cut-off date, or wh
 already made its entry.
 
 The reply's `opening_balances` has `cut_off`, `rows`, `lines` (the entry's lines), `total_debit`,
-`total_credit`, `covered` (Receivable, Payable and Stock rows left to the other opening imports),
+`total_credit`, `covered` (a count of the Receivable, Payable and Stock rows, left to the other opening
+imports),
 `balancing` (the Temporary Opening line) and `profit_and_loss`. Pass `rows`, `total_debit` and
 `total_credit` to `import_opening_balances`.

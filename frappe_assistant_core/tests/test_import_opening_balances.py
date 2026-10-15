@@ -179,6 +179,16 @@ class TestSetup(OpeningBalancesCase):
         self.assertIn("bogus", error)
         self.assertIn("each of: account", error)
 
+    def test_two_columns_for_one_field_are_reported_with_the_other_wrong_columns(self):
+        session = self._session()
+        reply = self._setup(
+            session, columns={"Account": "account", "Debit": "debit", "Credit": "debit", "Balance": "bogus"}
+        )
+        self.assertFalse(reply["success"])
+        error = frappe.as_json(reply)
+        self.assertIn("Two columns are mapped to debit: Debit and Credit.", error)
+        self.assertIn("bogus", error)
+
     def test_needs_an_amount_column(self):
         session = self._session()
         reply = self._setup(session, columns={"Account": "account"})
@@ -1013,6 +1023,32 @@ class TestFixes(OpeningBalancesCase):
             result = self._fix(session, group["id"], "map", to=cash)["result"]
         self.assertEqual((result["ready"], result["failed"]), (2, 0), result)
 
+    def _map_group(self):
+        return {
+            "cause": dry_run.CAUSE_MISSING_LINK,
+            "link_doctype": "Account",
+            "parent": "accounts",
+            "field": "parent_account",
+            "label": "Parent Account",
+            "value": "Nowhere",
+        }
+
+    def test_a_session_that_is_not_opening_balances_can_map_to_a_group_account(self):
+        from frappe_assistant_core.plugins.core import import_fixes
+
+        plain = frappe._dict(template_options="{}")
+        rules = import_fixes._map(plain, self._map_group(), {"to": self.equity_group}, [])
+        self.assertEqual([(r["field"], r["to"]) for r in rules], [("parent_account", self.equity_group)])
+
+    def test_an_opening_balances_session_still_cannot_map_to_a_group_account(self):
+        from frappe_assistant_core.plugins.core import import_fixes
+
+        balances = frappe._dict(
+            template_options=frappe.as_json({"opening_balances": {"company": self.company}})
+        )
+        with self.assertRaises(import_fixes.FixProblem):
+            import_fixes._map(balances, self._map_group(), {"to": self.equity_group}, [])
+
     def _refused(self, to, message):
         session, group = self._missing()
         before = self._doc(session).transformation_rules
@@ -1286,6 +1322,87 @@ class TestCreating(OpeningBalancesCase):
         self.assertEqual(doc.status, "Failed")
         self.assertEqual([r for r in doc.created_records if r.record_doctype == "Journal Entry"], [])
         self.assertFalse(opening_balances.settings(doc).get("created"))
+
+    def test_a_failed_entry_leaves_no_commit_callbacks_or_webhooks_behind(self):
+        session, result = self._ready()
+        real = frappe.model.document.Document._submit
+        queue_before = getattr(frappe.local, "_webhook_queue", None)
+
+        def spy():
+            pass
+
+        def cleanup():
+            for name in ("before_commit", "after_commit"):
+                functions = getattr(frappe.db, name)._functions
+                while spy in functions:
+                    functions.remove(spy)
+            frappe.local._webhook_queue = queue_before
+
+        self.addCleanup(cleanup)
+
+        def refuse(doc, *args, **kwargs):
+            if doc.doctype == "Journal Entry":
+                frappe.db.after_commit.add(spy)
+                frappe.db.before_commit.add(spy)
+                frappe.local._webhook_queue = [frappe._dict(doc=doc, webhook=frappe._dict())]
+                frappe.throw("Refused at submit")
+            return real(doc, *args, **kwargs)
+
+        with patch.object(frappe.model.document.Document, "_submit", refuse):
+            reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        self.assertNotIn(spy, frappe.db.after_commit._functions)
+        self.assertNotIn(spy, frappe.db.before_commit._functions)
+        self.assertEqual(getattr(frappe.local, "_webhook_queue", None), queue_before)
+
+    def test_folded_profit_and_loss_accounts_are_reported_and_said_in_the_message(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.expense},30,,", f"{self.capital},,130,"],
+            profit_and_loss="retained_earnings",
+            retained_earnings_account=self.retained,
+        )
+        reply = self._import(session, result)
+        self.assertTrue(reply["success"], reply)
+        report = reply["result"]
+        self.assertEqual(report["folded"], [{"account": self.expense, "file_net": 30}])
+        self.assertIn("1 Profit and Loss accounts were folded into", report["message"])
+        self.assertIn(self.retained, report["message"])
+        self.assertIn("not compared one by one", report["message"])
+
+    def test_nothing_folded_adds_no_clause(self):
+        session, result = self._ready()
+        report = self._import(session, result)["result"]
+        self.assertEqual(report["folded"], [])
+        self.assertNotIn("folded", report["message"])
+
+    def test_importing_again_after_a_failure_is_refused_until_the_sheet_is_checked(self):
+        session, result = self._ready()
+        with patch.object(opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw("No")):
+            self.assertFalse(self._import(session, result)["success"])
+        before = self._entries()
+        again = self._import(session, result)
+        self.assertFalse(again["success"], again)
+        self.assertEqual(
+            again["error"], "The last import failed. Check the sheet again with dry_run_import, then import."
+        )
+        self.assertEqual(self._entries(), before)
+
+    def test_a_currency_precision_of_zero_is_used_as_given(self):
+        with patch.object(opening_balances.frappe, "get_precision", return_value=0):
+            self.assertEqual(opening_balances._precision(), 0)
+            # 0.4 is a rounding difference at no decimals, but not at two
+            session, result = self._ready([f"{self.bank},100.4,,", f"{self.capital},,100,"])
+            self.assertEqual(result["ready"], 2, result)
+            lines = opening_balances.entry_lines(
+                opening_balances.settings(self._doc(session)),
+                opening_balances.ready_lines(self._doc(session)),
+            )
+            self.assertEqual(
+                [(x["debit_in_account_currency"], x["credit_in_account_currency"]) for x in lines],
+                [(100, 0), (0, 100)],
+            )
+        with patch.object(opening_balances.frappe, "get_precision", return_value=None):
+            self.assertEqual(opening_balances._precision(), 2)
 
     def test_a_failed_session_can_be_checked_and_imported_again(self):
         session, result = self._ready()

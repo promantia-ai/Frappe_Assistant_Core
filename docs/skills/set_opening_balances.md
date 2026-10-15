@@ -59,7 +59,10 @@ Ask the user which one before calling; ask for the retained-earnings account by 
 - an opening Journal Entry already on that company and date;
 - a company without a Temporary Opening account, or a cut-off in no fiscal year;
 - a session that already made its opening entry, for another company or date: start a new session;
-- a session that brought in opening stock or invoices: start a new session for the balances.
+- a session that brought in opening stock or invoices: start a new session for the balances;
+- a user without Create or Submit permission on Journal Entry;
+- a session whose status doesn't allow setting up again (for example Completed or Importing);
+- two columns mapped to the same field, or any other wrong column (all are listed at once).
 
 ## Chart of accounts
 

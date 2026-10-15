@@ -510,7 +510,7 @@ def _map(session, group, fix, maps):
                 _("There is no {0} called '{1}'.").format(_(doctype or group["label"]), to)
                 + (" " + _("Closest: {0}.").format(", ".join(closest)) if closest else "")
             )
-        if doctype == "Account":
+        if doctype == "Account" and opening_balances.is_opening_balances(session):
             _check_account(session, to)
     elif to not in _select_options(session, group):
         raise FixProblem(

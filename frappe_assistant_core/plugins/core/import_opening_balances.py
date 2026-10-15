@@ -183,12 +183,18 @@ def setup(
 
     headers = session_headers(session)
     mapping, extra, given, problems = {}, {}, set(), []
+    column_of: Dict[str, str] = {}  # field -> the column mapped to it first
     for column, field in (columns or {}).items():
         if column not in headers:
             problems.append(_("There is no column '{0}'. Columns: {1}.").format(column, ", ".join(headers)))
         elif field not in FIELDS:
             problems.append(_("'{0}' can't be mapped. Map columns to: {1}.").format(field, ", ".join(FIELDS)))
+        elif field in column_of:
+            problems.append(
+                _("Two columns are mapped to {0}: {1} and {2}.").format(field, column_of[field], column)
+            )
         else:
+            column_of[field] = column
             given.add(field)
             if field in MAPPED:
                 mapping[str(headers.index(column))] = MAPPED[field]
@@ -403,7 +409,8 @@ class _AccountChecker(opening_stock._StockChecker):
 
 
 def _precision() -> int:
-    return frappe.get_precision(CHILD, "debit_in_account_currency") or 2
+    precision = frappe.get_precision(CHILD, "debit_in_account_currency")
+    return 2 if precision is None else int(precision)
 
 
 def _problem(cause: str, field: str, value: str, message: str):
@@ -647,6 +654,18 @@ def entry_lines(balances: Dict[str, Any], ready: List[Ready]) -> List[Dict[str, 
             }
         )
     return lines
+
+
+def folded_accounts(balances: Dict[str, Any], ready: List[Ready]) -> Dict[str, float]:
+    """The Profit and Loss accounts folded into the retained-earnings line, with the file's net."""
+    if balances.get("profit_and_loss") != "retained_earnings":
+        return {}
+    precision = _precision()
+    folded: Dict[str, float] = {}
+    for row in ready:
+        if not row.covered and row.report_type == "Profit and Loss":
+            folded[row.account] = flt(folded.get(row.account, 0) + row.debit - row.credit, precision)
+    return folded
 
 
 def balancing_line(balances: Dict[str, Any], lines: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -903,6 +922,14 @@ def create(session) -> None:
     session.status = "Importing"
     session.save()
 
+    # A rollback to the savepoint does not undo what the insert or submit registered to run at
+    # commit (hooks, queued jobs, webhooks): keep the lists as they are now, to put them back.
+    callbacks = {
+        name: list(getattr(frappe.db, name)._functions)
+        for name in ("before_commit", "after_commit", "before_rollback", "after_rollback")
+    }
+    webhook_queue = getattr(frappe.local, "_webhook_queue", None)
+    webhook_queue = list(webhook_queue) if webhook_queue else None
     frappe.db.savepoint(CREATE_SAVEPOINT)
     try:
         entry = build_entry(balances, ready)
@@ -916,6 +943,7 @@ def create(session) -> None:
                 "rows": len(ready),
                 "expected": _expected(balances, lines, ready),
                 "balancing": balancing_line(balances, lines),
+                "folded": folded_accounts(balances, ready),
             }
         }
         session.template_options = frappe.as_json(options)
@@ -934,6 +962,11 @@ def create(session) -> None:
         from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
         frappe.db.rollback(save_point=CREATE_SAVEPOINT)
+        for name, functions in callbacks.items():
+            manager = getattr(frappe.db, name)
+            manager._functions.clear()
+            manager._functions.extend(functions)
+        frappe.local._webhook_queue = webhook_queue
         frappe.clear_messages()
         message = _("ERPNext refused the opening entry: {0}").format(dry_run._message_of(e))
         session.reload()  # drop what the failed attempt put on the document
@@ -1019,6 +1052,7 @@ def report(session) -> Dict[str, Any]:
         "journal_entry": name,
         "lines": held.get("lines"),
         "balancing": held.get("balancing"),
+        "folded": [],
         "accounts": [],
         "differences_count": 0,
         "covered": [],
@@ -1074,6 +1108,10 @@ def report(session) -> Dict[str, Any]:
                     "difference": flt(erpnext_net - file_net, precision),
                 }
             )
+    folded = [
+        {"account": account, "file_net": flt(value, precision)}
+        for account, value in sorted((held.get("folded") or {}).items())
+    ]
     temporary_balance = net(found.get(temporary, {}))
     everything_in = all(row["erpnext_net"] == row["file_net"] for row in covered)
     not_brought_in = _not_brought_in(session, precision)
@@ -1086,6 +1124,12 @@ def report(session) -> Dict[str, Any]:
     else:
         parts.append(
             _("ERPNext's trial balance at {0} matches the file, account by account.").format(cut_off)
+        )
+    if folded:
+        parts.append(
+            _("{0} Profit and Loss accounts were folded into {1}; they are not compared one by one.").format(
+                len(folded), balances.get("retained_earnings_account")
+            )
         )
     if temporary_balance:
         if everything_in:
@@ -1114,6 +1158,7 @@ def report(session) -> Dict[str, Any]:
             "accounts": differences[:DIFFERENCES_SHOWN],
             "differences_count": len(differences),
             "covered": covered,
+            "folded": folded,
             "temporary_opening": {"account": temporary, "balance": temporary_balance},
             "not_brought_in": not_brought_in,
             "totals": {key: flt(value, precision) for key, value in totals.items()},
