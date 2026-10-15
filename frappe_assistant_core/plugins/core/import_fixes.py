@@ -329,7 +329,7 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
     from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
 
     if cause == opening_balances.CAUSE_NOT_BALANCED:
-        # Attached to one row only, so leaving it out or mapping it would drop an unrelated row.
+        # No fixes: the file itself is wrong, so it must be corrected and checked again.
         explanation = _(
             "{0} The file's debits and credits must be made to balance in the file; "
             "it is then checked again."
@@ -375,6 +375,8 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
     ``groups`` are the last dry run's groups by id, with all their rows. Returns one plain
     sentence per fix applied. The caller saves the session and checks it again.
     """
+    from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
+
     maps = value_maps(session)
     reasons = {str(entry["row"]): entry["reason"] for entry in left_out(session)}
     zero_rate = list(_rules(session).get("zero_rate_items") or [])
@@ -391,8 +393,6 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
                 )
             group = _with_target(session, group)
             action = fix.get("action")
-            from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
-
             if group.get("cause") == opening_balances.CAUSE_NOT_BALANCED:
                 raise FixProblem(
                     _("Debits and credits that don't balance can only be corrected in the file.")
@@ -541,7 +541,9 @@ def _check_account(session, name: str) -> None:
     company = opening_balances.settings(session).get("company")
     if account.is_group or account.disabled or (company and account.company != company):
         raise FixProblem(
-            _("{0} can't take entries: it must be an enabled ledger account of {1}.").format(name, company)
+            _("{0} can't take entries: it must be an enabled ledger account of {1}.").format(
+                name, company or _("the session's company")
+            )
         )
 
 

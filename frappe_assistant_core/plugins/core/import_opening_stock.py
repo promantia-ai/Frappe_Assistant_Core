@@ -155,7 +155,12 @@ def setup(
         raise OpeningStockProblem(
             _("This session brought in opening invoices. Start a new session for the stock.")
         )
-    options.pop("opening_invoices", None)  # a session is one kind of special import
+    if (options.get("opening_balances") or {}).get("created"):
+        raise OpeningStockProblem(
+            _("This session brought in opening balances. Start a new session for the stock.")
+        )
+    for other in ("opening_invoices", "opening_balances"):  # a session is one kind of special import
+        options.pop(other, None)
     if settings(session).get("created"):  # what the earlier documents held stays on the session
         stock["created"] = settings(session)["created"]
     options["opening_stock"] = stock

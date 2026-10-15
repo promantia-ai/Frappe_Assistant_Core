@@ -16,7 +16,7 @@ imports; one balancing line to the Temporary Opening account keeps the entry bal
 It is the third special engine, after opening stock and opening invoices: the dry run reaches it
 through ``import_dry_run.special_engine``. An opening-balances session keeps its settings in
 ``template_options.opening_balances``. This module holds the setup and its pre-checks; the row
-checks, creation and report are added on top.
+checks, creation and a first report are here; the full report follows.
 """
 
 from dataclasses import dataclass
@@ -157,6 +157,11 @@ def setup(
             _("This session brought in opening stock or invoices. Start a new session for the balances.")
         )
     earlier = settings(session)
+    try:
+        normal_cut_off = str(getdate(cut_off))
+    except Exception:
+        frappe.clear_messages()
+        normal_cut_off = cstr(cut_off)  # setup_problem below says it isn't a date
     if earlier.get("created") and earlier.get("company") != company:
         raise OpeningBalancesProblem(
             _(
@@ -164,7 +169,7 @@ def setup(
                 "other company."
             ).format(earlier["company"])
         )
-    if earlier.get("created") and earlier.get("cut_off") != cut_off:
+    if earlier.get("created") and earlier.get("cut_off") != normal_cut_off:
         raise OpeningBalancesProblem(
             _(
                 "This session already made the opening entry at {0}. Start a new session for another "
@@ -201,7 +206,7 @@ def setup(
 
     balances = {
         "company": company,
-        "cut_off": str(getdate(cut_off)),
+        "cut_off": normal_cut_off,
         "profit_and_loss": profit_and_loss,
         "retained_earnings_account": retained_earnings_account
         if profit_and_loss == "retained_earnings"
@@ -234,6 +239,13 @@ def check_can_run(session) -> None:
 
     dry_run.check_status(session)
     balances = settings(session)
+    if balances.get("created"):
+        raise dry_run.DryRunProblem(
+            _(
+                "This session already made the opening entry {0}. Checking again could bring the "
+                "balances in twice; import_opening_balances with the same values reports on it."
+            ).format(", ".join(balances["created"]))
+        )
     problem = setup_problem(
         balances.get("company"),
         balances.get("cut_off"),
@@ -772,3 +784,160 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
         update_modified=False,
     )
     return summary
+
+
+# -- creating --------------------------------------------------------------------------------
+
+CREATE_SAVEPOINT = "fac_opening_balances_create"
+DONE = ("Importing", "Completed", "Failed")
+
+
+def check_card(session, company, cut_off, rows, total_debit, total_credit) -> None:
+    """The approval card shows what FACO passed: refuse unless it is what the last check found."""
+    summary = frappe.parse_json(session.validation_summary or "{}") or {}
+    totals, balances = summary.get("opening_balances") or {}, settings(session)
+    precision = _precision()
+    checked = (
+        balances.get("company"),
+        balances.get("cut_off"),
+        summary.get("ready"),
+        flt(totals.get("total_debit"), precision),
+        flt(totals.get("total_credit"), precision),
+    )
+    try:
+        asked = (
+            cstr(company).strip(),
+            str(getdate(cut_off)),
+            int(rows),
+            flt(total_debit, precision),
+            flt(total_credit, precision),
+        )
+    except Exception:
+        frappe.clear_messages()
+        asked = None
+    if asked != checked:
+        raise OpeningBalancesProblem(
+            _(
+                "The last check found {2} rows for {0} at {1}, with debits of {3} and credits of {4}. "
+                "Pass those, so the approval card shows them."
+            ).format(*checked)
+        )
+
+
+def _expected(balances: Dict[str, Any], lines: List[Dict[str, Any]], ready: List[Ready]):
+    """Per account, what the file says the books should hold from this import: the entry's lines
+    and the covered rows (which the other imports bring in)."""
+    precision = _precision()
+    expected: Dict[str, Dict[str, float]] = {}
+
+    def add(account: str, debit: float, credit: float) -> None:
+        held = expected.setdefault(account, {"debit": 0, "credit": 0})
+        held["debit"] = flt(held["debit"] + flt(debit), precision)
+        held["credit"] = flt(held["credit"] + flt(credit), precision)
+
+    for line in lines:
+        add(line["account"], line["debit_in_account_currency"], line["credit_in_account_currency"])
+    for row in ready:
+        if row.covered:
+            add(row.account, row.debit, row.credit)
+    return expected
+
+
+def create(session) -> None:
+    """Create and submit the one opening Journal Entry, all or nothing, in one savepoint. Done
+    already (or running): nothing is created and the caller reports. Raises OpeningBalancesProblem
+    when it isn't ready, or when ERPNext refuses (the session is then Failed and nothing is left)."""
+    from frappe_assistant_core.plugins.core import import_fixes
+
+    if session.status in DONE or settings(session).get("created"):
+        return
+    if session.status != "Ready to Import" or not import_fixes.checked_as_is(session):
+        raise OpeningBalancesProblem(
+            _(
+                "The sheet isn't ready, or it changed since its last check. Check it with dry_run_import first."
+            )
+        )
+    balances = settings(session)
+    ready = ready_lines(session)
+    approved = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
+    if len(ready) != approved:
+        raise OpeningBalancesProblem(
+            _(
+                "The balances changed since the last check: {0} rows are ready now, not {1}. Check it "
+                "again with dry_run_import."
+            ).format(len(ready), approved)
+        )
+    lines = entry_lines(balances, ready)
+    if not lines:
+        raise OpeningBalancesProblem(
+            _(
+                "Nothing to import: every row is covered by the opening invoices and stock imports, "
+                "or left out."
+            )
+        )
+    problem = setup_problem(
+        balances.get("company"),
+        balances.get("cut_off"),
+        balances.get("profit_and_loss"),
+        balances.get("retained_earnings_account"),
+        session,
+    )
+    if problem:
+        raise OpeningBalancesProblem(problem)
+
+    frappe.db.savepoint(CREATE_SAVEPOINT)
+    try:
+        entry = build_entry(balances, ready)
+        entry.insert()
+        entry.submit()
+        if entry.docstatus != 1:
+            frappe.throw(_("{0} was not submitted.").format(entry.name))
+        session.append("created_records", {"record_doctype": TARGET, "record_name": entry.name})
+        options = frappe.parse_json(session.template_options or "{}") or {}
+        options["opening_balances"]["created"] = {
+            entry.name: {
+                "lines": len(lines),
+                "rows": len(ready),
+                "expected": _expected(balances, lines, ready),
+                "balancing": balancing_line(balances, lines),
+            }
+        }
+        session.template_options = frappe.as_json(options)
+        session.status = "Completed"
+        session.log_step(
+            "Import",
+            "Success",
+            _("Opening Journal Entry {0} created and submitted: {1} lines from {2} rows.").format(
+                entry.name, len(lines), len(ready)
+            ),
+            rows_ok=len(ready),
+            rows_failed=0,
+        )
+        session.save()
+    except Exception as e:
+        from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+        frappe.db.rollback(save_point=CREATE_SAVEPOINT)
+        frappe.clear_messages()
+        message = _("ERPNext refused the opening entry: {0}").format(dry_run._message_of(e))
+        session.reload()  # drop what the failed attempt put on the document
+        session.status = "Failed"
+        session.log_step("Import", "Failed", message, rows_ok=0, rows_failed=len(ready))
+        session.save()
+        raise OpeningBalancesProblem(message) from e
+    finally:
+        frappe.clear_messages()
+
+
+def report(session) -> Dict[str, Any]:
+    """What the import made. A first, minimal report: the status and the entry."""
+    created = settings(session).get("created") or {}
+    name = next(iter(created), None)
+    held = created.get(name) or {}
+    if name:
+        message = _("Opening Journal Entry {0}: {1} lines from {2} rows.").format(
+            name, held.get("lines"), held.get("rows")
+        )
+    else:
+        message = _("No opening entry was created.")
+    return {"status": session.status, "journal_entry": name, "message": message}

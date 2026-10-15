@@ -345,6 +345,39 @@ class TestSetup(OpeningBalancesCase):
         reply = self._setup(session, company="No Such Company")
         self.assertFalse(reply["success"])
 
+    def _mark_created(self, session, **changes):
+        doc = self._doc(session)
+        options = frappe.parse_json(doc.template_options or "{}") or {}
+        options["opening_balances"] = {
+            **options["opening_balances"],
+            "created": {"ACC-JV-NONE": {}},
+            **changes,
+        }
+        doc.template_options = frappe.as_json(options)
+        doc.save()
+
+    def test_the_same_cut_off_in_another_format_is_not_a_change(self):
+        session = self._session()
+        self.assertTrue(self._setup(session)["success"])
+        self._mark_created(session)
+        same_day = self.date.replace("-", "/")
+        self.assertNotEqual(same_day, self.date)
+        reply = self._setup(session, cut_off=same_day)
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(opening_balances.settings(self._doc(session))["cut_off"], self.date)
+
+    def test_a_different_cut_off_or_company_is_refused_once_created(self):
+        session = self._session()
+        self.assertTrue(self._setup(session)["success"])
+        self._mark_created(session)
+        reply = self._setup(session, cut_off=frappe.utils.add_days(self.date, -1))
+        self.assertFalse(reply["success"])
+        self.assertIn("already made the opening entry at", frappe.as_json(reply))
+        self._mark_created(session, company="Some Other Company")
+        reply = self._setup(session)
+        self.assertFalse(reply["success"])
+        self.assertIn("Some Other Company", frappe.as_json(reply))
+
     def test_refuses_a_session_that_made_invoices_or_stock(self):
         for key in ("opening_stock", "opening_invoices"):
             session = self._session()
@@ -1015,3 +1048,301 @@ class TestFixes(OpeningBalancesCase):
         session, group = self._missing()
         self.assertIn("ERPNext names it itself", fixes.cannot_create("Account", self._doc(session)))
         self.assertEqual(fixes.masters_plan(self._doc(session), [group]), [])
+
+
+class TestCreating(OpeningBalancesCase):
+    def setUp(self):
+        super().setUp()
+        self.stock = self._account("Stock", "Asset", "Stock")
+        self.retained = self._account("Retained", "Equity")
+
+    # -- helpers -------------------------------------------------------------------------
+
+    def _ready(self, lines=None, **setup):
+        session = self._session(lines)
+        self.assertTrue(self._setup(session, **setup)["success"])
+        reply = self._run("dry_run_import", {"session": session})
+        self.assertTrue(reply["success"], reply)
+        return session, reply["result"]
+
+    def _card(self, session, result, **changes):
+        return {
+            "session": session,
+            "company": self.company,
+            "cut_off": result["opening_balances"]["cut_off"],
+            "rows": result["ready"],
+            "total_debit": result["opening_balances"]["total_debit"],
+            "total_credit": result["opening_balances"]["total_credit"],
+            **changes,
+        }
+
+    def _import(self, session, result, **changes):
+        reply = self._run("import_opening_balances", self._card(session, result, **changes))
+        for record in self._doc(session).created_records or []:
+            if record.record_doctype == "Journal Entry" and record.record_name not in self.made_entries:
+                self.made_entries.append(record.record_name)
+        return reply
+
+    def _entries(self):
+        return frappe.db.count("Journal Entry", {"company": self.company, "is_opening": "Yes"})
+
+    def _entry_of(self, session):
+        created = opening_balances.settings(self._doc(session))["created"]
+        self.assertEqual(len(created), 1)
+        return next(iter(created))
+
+    # -- creating ------------------------------------------------------------------------
+
+    def test_imports_one_submitted_opening_entry(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.stock},20,,", f"{self.capital},,170,"]
+        )
+        reply = self._import(session, result)
+        self.assertTrue(reply["success"], reply)
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Completed")
+        name = self._entry_of(session)
+        entry = frappe.get_doc("Journal Entry", name)
+        self.assertEqual(
+            (entry.docstatus, entry.is_opening, entry.voucher_type, str(entry.posting_date)),
+            (1, "Yes", "Opening Entry", self.date),
+        )
+        lines = {line.account: (line.debit, line.credit) for line in entry.accounts}
+        self.assertEqual(lines, {self.bank: (100, 0), self.capital: (0, 170), self.temporary: (70, 0)})
+        self.assertEqual(
+            [(r.record_doctype, r.record_name) for r in doc.created_records], [("Journal Entry", name)]
+        )
+        gl = frappe.db.sql(
+            "select sum(debit), sum(credit) from `tabGL Entry` where voucher_no=%s and is_cancelled=0",
+            name,
+        )[0]
+        self.assertEqual(gl[0], gl[1])
+        self.assertEqual("Success", [step for step in doc.steps if step.step == "Import"][-1].outcome)
+        self.assertEqual(reply["result"]["journal_entry"], name)
+        self.assertEqual(reply["result"]["status"], "Completed")
+
+    def test_the_created_record_is_keyed_by_the_entry_with_the_files_numbers(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.stock},20,,", f"{self.capital},,170,"]
+        )
+        self.assertTrue(self._import(session, result)["success"])
+        name = self._entry_of(session)
+        held = opening_balances.settings(self._doc(session))["created"][name]
+        self.assertEqual((held["lines"], held["rows"]), (3, 4))
+        self.assertEqual(
+            held["expected"],
+            {
+                self.bank: {"debit": 100, "credit": 0},
+                self.capital: {"debit": 0, "credit": 170},
+                self.temporary: {"debit": 70, "credit": 0},
+                self.debtors: {"debit": 50, "credit": 0},
+                self.stock: {"debit": 20, "credit": 0},
+            },
+        )
+        self.assertEqual(held["balancing"], {"account": self.temporary, "debit": 70, "credit": 0})
+
+    def test_no_balancing_line_when_the_file_needs_none(self):
+        session, result = self._ready()
+        self.assertTrue(self._import(session, result)["success"])
+        held = opening_balances.settings(self._doc(session))["created"][self._entry_of(session)]
+        self.assertIsNone(held["balancing"])
+        self.assertEqual(held["lines"], 2)
+
+    def test_profit_and_loss_is_folded_into_the_retained_earnings_line(self):
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.expense},30,,", f"{self.capital},,130,"],
+            profit_and_loss="retained_earnings",
+            retained_earnings_account=self.retained,
+        )
+        self.assertTrue(self._import(session, result)["success"])
+        entry = frappe.get_doc("Journal Entry", self._entry_of(session))
+        lines = {line.account: (line.debit, line.credit) for line in entry.accounts}
+        self.assertEqual(lines, {self.bank: (100, 0), self.capital: (0, 130), self.retained: (30, 0)})
+        self.assertNotIn(self.expense, lines)
+
+    def test_a_card_that_does_not_match_the_check_is_refused(self):
+        session, result = self._ready()
+        before = self._entries()
+        for changes in (
+            {"total_debit": 999},
+            {"total_credit": 1},
+            {"rows": 7},
+            {"cut_off": frappe.utils.add_days(self.date, -1)},
+            {"company": "Another Company"},
+        ):
+            reply = self._import(session, result, **changes)
+            self.assertFalse(reply["success"], changes)
+            self.assertIn("approval card", frappe.as_json(reply))
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(self._doc(session).status, "Ready to Import")
+
+    def test_the_cut_off_in_another_format_is_the_same_card(self):
+        session, result = self._ready()
+        reply = self._import(session, result, cut_off=self.date.replace("-", "/"))
+        self.assertTrue(reply["success"], reply)
+
+    def test_a_change_after_the_check_is_refused(self):
+        session, result = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
+        doc = self._doc(session)
+        doc.excluded_rows = frappe.as_json([2])
+        doc.save()
+        before = self._entries()
+        reply = self._import(session, result)
+        self.assertFalse(reply["success"])
+        self.assertIn("dry_run_import", frappe.as_json(reply))
+        self.assertEqual(self._entries(), before)
+
+    def test_calling_again_creates_nothing_and_reports(self):
+        session, result = self._ready()
+        self.assertTrue(self._import(session, result)["success"])
+        before, name = self._entries(), self._entry_of(session)
+        again = self._import(session, result)
+        self.assertTrue(again["success"], again)
+        self.assertEqual(again["result"]["journal_entry"], name)
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(self._doc(session).status, "Completed")
+        self.assertEqual(len(self._doc(session).created_records), 1)
+
+    def test_a_completed_session_cannot_be_set_up_or_checked_again(self):
+        session, result = self._ready()
+        self.assertTrue(self._import(session, result)["success"])
+        self.assertFalse(self._setup(session)["success"])
+        self.assertFalse(self._run("dry_run_import", {"session": session})["success"])
+
+    def test_a_file_that_does_not_balance_cannot_be_imported(self):
+        session, result = self._ready([f"{self.bank},100,,", f"{self.capital},,90,"])
+        self.assertEqual(result["ready"], 0)
+        before = self._entries()
+        reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        self.assertEqual(self._entries(), before)
+        self.assertNotEqual(self._doc(session).status, "Completed")
+
+    def test_only_covered_rows_is_nothing_to_import(self):
+        session, result = self._ready([f"{self.debtors},50,,", f"{self.creditors},,50,"])
+        self.assertEqual(result["ready"], 2)
+        before = self._entries()
+        reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Nothing to import", reply["error"])
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(self._doc(session).status, "Ready to Import")
+
+    def test_an_unchecked_session_is_refused(self):
+        session = self._session()
+        self.assertTrue(self._setup(session)["success"])
+        before = self._entries()
+        reply = self._run(
+            "import_opening_balances",
+            {
+                "session": session,
+                "company": self.company,
+                "cut_off": self.date,
+                "rows": 2,
+                "total_debit": 100,
+                "total_credit": 100,
+            },
+        )
+        self.assertFalse(reply["success"], reply)
+        self.assertEqual(self._entries(), before)
+
+    def test_a_failure_at_submit_leaves_nothing_and_fails_the_session(self):
+        session, result = self._ready()
+        before, gl = self._entries(), frappe.db.count("GL Entry")
+
+        def refuse(*args, **kwargs):
+            frappe.throw("ERPNext says no for the test")
+
+        with patch.object(opening_balances, "build_entry", side_effect=refuse):
+            reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("ERPNext says no for the test", reply["error"])
+        self.assertEqual((self._entries(), frappe.db.count("GL Entry")), (before, gl))
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Failed")
+        self.assertEqual(len(doc.created_records), 0)
+        self.assertNotIn("created", opening_balances.settings(doc))
+        last = [step for step in doc.steps if step.step == "Import"][-1]
+        self.assertEqual(last.outcome, "Failed")
+        self.assertIn("ERPNext says no for the test", last.message)
+
+    def test_a_failure_after_the_insert_rolls_the_entry_back(self):
+        session, result = self._ready()
+        before = self._entries()
+        real = frappe.model.document.Document._submit
+
+        def refuse(doc, *args, **kwargs):
+            if doc.doctype == "Journal Entry":
+                frappe.throw("Refused at submit")
+            return real(doc, *args, **kwargs)
+
+        with patch.object(frappe.model.document.Document, "_submit", refuse):
+            reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Refused at submit", reply["error"])
+        self.assertEqual(self._entries(), before)
+        self.assertEqual(frappe.db.count("Journal Entry", {"docstatus": 0, "is_opening": "Yes"}), 0)
+        self.assertEqual(self._doc(session).status, "Failed")
+
+    def test_a_failed_session_can_be_checked_and_imported_again(self):
+        session, result = self._ready()
+        with patch.object(opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw("No")):
+            self.assertFalse(self._import(session, result)["success"])
+        again = self._run("dry_run_import", {"session": session})
+        self.assertTrue(again["success"], again)
+        self.assertTrue(self._import(session, again["result"])["success"])
+        self.assertEqual(self._doc(session).status, "Completed")
+
+    def test_a_user_who_cannot_submit_gets_the_setup_error(self):
+        session, result = self._ready()
+        real = frappe.has_permission
+
+        def no_submit(doctype=None, ptype="read", *args, **kwargs):
+            if doctype == "Journal Entry" and ptype == "submit":
+                return False
+            return real(doctype, ptype, *args, **kwargs)
+
+        before = self._entries()
+        with patch.object(opening_balances.frappe, "has_permission", side_effect=no_submit):
+            reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Accounts Manager", frappe.as_json(reply))
+        self.assertEqual(self._entries(), before)
+
+    def test_another_opening_entry_at_the_date_is_refused_at_the_import(self):
+        session, result = self._ready()
+        entry = frappe.get_doc(
+            {
+                "doctype": "Journal Entry",
+                "voucher_type": "Opening Entry",
+                "company": self.company,
+                "posting_date": self.date,
+                "accounts": [
+                    {"account": self.bank, "debit_in_account_currency": 5},
+                    {"account": self.capital, "credit_in_account_currency": 5},
+                ],
+            }
+        )
+        entry.insert()
+        entry.submit()
+        self.made_entries.append(entry.name)
+        reply = self._import(session, result)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn(entry.name, frappe.as_json(reply))
+        self.assertEqual(self._doc(session).status, "Ready to Import")
+
+    def test_a_session_of_another_kind_is_pointed_to_start_import(self):
+        started = self._run("start_import_session", {"file_id": self._file([f"{self.bank},1,,"]).name})
+        reply = self._run(
+            "import_opening_balances",
+            {
+                "session": started["result"]["session_id"],
+                "company": self.company,
+                "cut_off": self.date,
+                "rows": 1,
+                "total_debit": 1,
+                "total_credit": 0,
+            },
+        )
+        self.assertFalse(reply["success"])
+        self.assertIn("start_import", reply["error"])

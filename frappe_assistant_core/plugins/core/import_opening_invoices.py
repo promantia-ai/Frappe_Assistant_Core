@@ -117,6 +117,10 @@ def setup(session, company: str, invoice_type: str, cut_off: str, columns: Dict[
         raise OpeningInvoicesProblem(
             _("This session brought in opening stock. Start a new session for the invoices.")
         )
+    if (options.get("opening_balances") or {}).get("created"):
+        raise OpeningInvoicesProblem(
+            _("This session brought in opening balances. Start a new session for the invoices.")
+        )
     earlier = settings(session)
     if earlier.get("created") and earlier.get("invoice_type") != invoice_type:
         raise OpeningInvoicesProblem(
@@ -169,7 +173,8 @@ def setup(session, company: str, invoice_type: str, cut_off: str, columns: Dict[
     for kept in ("created", "failed"):  # what earlier imports made stays on the session
         if earlier.get(kept):
             invoices[kept] = earlier[kept]
-    options.pop("opening_stock", None)  # a session is one kind of special import
+    for other in ("opening_stock", "opening_balances"):  # a session is one kind of special import
+        options.pop(other, None)
     options["opening_invoices"] = invoices
     session.template_options = frappe.as_json(options)
     session.import_type = "Insert New Records"

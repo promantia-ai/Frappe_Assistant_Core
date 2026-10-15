@@ -105,6 +105,7 @@ WRITE_TOOLS = {
     "start_import",  # imports the checked file through Data Import
     "import_opening_stock",  # creates and submits Stock Reconciliations
     "import_opening_invoices",  # creates and submits opening invoices
+    "import_opening_balances",  # creates and submits the opening Journal Entry
     "update_document",
     # Document generation (saves a private Frappe File — a create side effect)
     "generate_document",  # Markdown -> PDF saved as a File record; NOT read-only

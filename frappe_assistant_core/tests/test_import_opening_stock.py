@@ -942,3 +942,26 @@ class TestSessionIsOneKind(OpeningStockCase):
         self.assertFalse(reply["success"], reply)
         self.assertIn("Start a new session for the stock", reply["error"])
         self.assertEqual(self._doc(session).template_options, before)
+
+    def _with_balances(self, session, **kept):
+        doc = self._doc(session)
+        options = frappe.parse_json(doc.template_options or "{}") or {}
+        options["opening_balances"] = {"company": self.company, **kept}
+        doc.db_set("template_options", frappe.as_json(options))
+
+    def test_a_stale_balances_setting_is_dropped(self):
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._with_balances(session)
+        self.assertTrue(self._setup(session)["success"])
+        options = frappe.parse_json(self._doc(session).template_options)
+        self.assertNotIn("opening_balances", options)
+        self.assertIn("opening_stock", options)
+
+    def test_balances_already_made_refuse_the_stock_setup(self):
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._with_balances(session, created={"ACC-JV-1": {}})
+        before = self._doc(session).template_options
+        reply = self._setup(session)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("opening balances", reply["error"])
+        self.assertEqual(self._doc(session).template_options, before)
