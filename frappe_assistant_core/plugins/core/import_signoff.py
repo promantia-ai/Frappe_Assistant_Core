@@ -154,6 +154,29 @@ def _data_import_summary(session) -> Dict[str, Any]:
     return out
 
 
+# -- who may see ERPNext's side ----------------------------------------------------------------
+
+#: The ledger each opening import is compared with; opening invoices are compared with the
+#: invoices themselves.
+LEDGERS = {"opening_stock": "Stock Ledger Entry", "opening_balances": "GL Entry"}
+
+
+def can_read_ledger(doctype: str, company: str) -> bool:
+    """Whether the user may read ``doctype``'s records of ``company``: a role lets them read it,
+    and no User Permission keeps them from that company. The report sums ERPNext's records
+    without going through get_list, so it asks first, as ERPNext's own reports do."""
+    if not frappe.has_permission(doctype, "read"):
+        return False
+    probe = frappe.new_doc(doctype)
+    if probe.meta.has_field("company"):
+        probe.company = company
+    return bool(frappe.has_permission(doctype, "read", doc=probe))
+
+
+def _cannot_read(doctype: str, company: str) -> str:
+    return _("You can't read {0} of {1}, so ERPNext's side isn't shown.").format(_(doctype), company)
+
+
 # -- one session ------------------------------------------------------------------------------
 
 
@@ -177,6 +200,11 @@ def session_summary(session) -> Dict[str, Any]:
             "label": _(session.target_doctype or "") or _("Unknown"),
             "problem": _("The file can't be read, so its rows can't be counted: {0}").format(str(e)),
         }
+    if body.get("erpnext") is not None:
+        ledger = LEDGERS.get(body["kind"]) or body["doctype"]
+        if not can_read_ledger(ledger, body["company"]):
+            # the rows are the user's own file; ERPNext's totals are only for who may read them
+            body["erpnext"] = {"problem": _cannot_read(ledger, body["company"])}
     return {**head, **body}
 
 
@@ -281,8 +309,11 @@ def _opening_balances(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
         entry["sessions"].append(summary["session"])
         entry["file"] += summary[measure]["source"]
         entry["imported"] += summary[measure]["imported"]
-        entry["erpnext"] += summary["erpnext"]["total"]
         entry["not_in"] += summary[measure]["source"] - summary[measure]["imported"]
+        if summary["erpnext"].get("problem"):
+            entry["problem"] = summary["erpnext"]["problem"]
+            continue
+        entry["erpnext"] += summary["erpnext"]["total"]
         # ERPNext against the file's rows that are in; what isn't in is shown apart.
         entry["difference"] += summary["erpnext"]["difference"]
     for name, company in companies.items():
@@ -291,6 +322,8 @@ def _opening_balances(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
             if entry:
                 for key in ("file", "imported", "erpnext", "not_in", "difference"):
                     entry[key] = flt(entry[key], precision)
+                if entry.get("problem"):
+                    entry["erpnext"] = entry["difference"] = None
         trial = trial_balance(name, company["cut_off"])
         files = company.pop("trial_balance_files", [])
         if files:
@@ -317,8 +350,8 @@ def trial_balance(company: str, as_of: str) -> Dict[str, Any]:
     Summed with frappe.qb: Frappe v16 refuses SQL functions in get_all's fields."""
     from frappe.query_builder.functions import Sum
 
-    if not frappe.has_permission("GL Entry", "read"):
-        return {"as_of": as_of, "problem": _("You can't read the General Ledger, so it isn't shown.")}
+    if not can_read_ledger("GL Entry", company):
+        return {"as_of": as_of, "problem": _cannot_read("GL Entry", company)}
     precision = _precision()
     gle = frappe.qb.DocType("GL Entry")
     up_to = (gle.company == company) & (gle.is_cancelled == 0) & (gle.posting_date <= as_of)
@@ -367,6 +400,8 @@ def open_points(report: Dict[str, Any]) -> List[str]:
         if rows["not_imported"]:
             points.append(_("{0}: {1} rows aren't imported yet.").format(name, rows["not_imported"]))
         erpnext = summary.get("erpnext") or {}
+        if erpnext.get("problem"):
+            points.append(_("{0}: {1}").format(name, erpnext["problem"]))
         if erpnext.get("difference"):
             points.append(
                 _("{0}: ERPNext differs from the file's rows by {1}.").format(name, erpnext["difference"])
@@ -379,6 +414,8 @@ def open_points(report: Dict[str, Any]) -> List[str]:
             )
     for company, balances in report["opening_balances"].items():
         trial = balances.get("trial_balance") or {}
+        if trial.get("problem"):
+            points.append(_("{0}: the trial balance isn't checked. {1}").format(company, trial["problem"]))
         if trial.get("difference"):
             points.append(
                 _("{0}: the trial balance at {1} doesn't balance (debit {2}, credit {3}).").format(
@@ -516,6 +553,7 @@ def rows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "imported_amount": entry["imported"],
                         "in_erpnext": entry["erpnext"],
                         "difference": entry["difference"],
+                        "details": entry.get("problem"),
                     }
                 )
         out += _trial_balance_rows(company, balances.get("trial_balance") or {})

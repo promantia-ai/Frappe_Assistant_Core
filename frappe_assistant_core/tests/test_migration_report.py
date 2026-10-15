@@ -197,6 +197,26 @@ class TestOpeningInvoicesInTheReport(invoices_tests.OpeningInvoicesCase):
         self.assertEqual(report["opening_balances"][self.company]["receivables"]["difference"], -1)
         self.assertTrue(any("differs from the file's rows by -1" in p for p in report["open_points"]))
 
+    def test_a_user_who_cannot_read_the_books_sees_their_rows_but_not_erpnexts_totals(self):
+        session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        user = self.make_throwaway_user("signoff", roles=("Desk User",))
+        # Production: a Desk User's own session and file; an Accounts Manager imported for them,
+        # or their role was taken away since.
+        self._doc(session).db_set("user", user)
+        frappe.db.set_value("File", self._doc(session).source_file, "owner", user)
+        frappe.set_user(user)
+
+        report = import_signoff.build(import_signoff.sessions_of([session]))
+
+        [summary] = report["sessions"]
+        self.assertEqual((summary["rows"]["source"], summary["rows"]["imported"]), (1, 1))
+        self.assertEqual(list(summary["erpnext"]), ["problem"])
+        balances = report["opening_balances"][self.company]
+        self.assertEqual((balances["receivables"]["file"], balances["receivables"]["erpnext"]), (10, None))
+        self.assertEqual(set(balances["trial_balance"]), {"as_of", "problem"})
+        self.assertIn("can't read", " ".join(report["open_points"]))
+        self.assertFalse(report["ready_to_sign"])
+
     def test_no_query_asks_get_all_for_a_sql_function(self):
         session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
 
