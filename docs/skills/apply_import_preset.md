@@ -4,8 +4,8 @@
 
 Recognises an export from another accounting system by its headers, cleans it, and opens one
 import session per target with the mapping applied. The user's upload is not changed: each
-session works on a cleaned copy attached to it. Call it first for any spreadsheet the user wants
-to import; when it answers `matched: false`, carry on with `start_import_session`.
+session works on a cleaned copy attached to it. Call it first for any spreadsheet (.csv, .xlsx,
+.xls) or Tally XML export (.xml) the user wants to import; when it answers `matched: false`, carry on with `start_import_session`.
 
 Systems: Tally Prime, Zoho Books, Busy, Marg, QuickBooks Online and Desktop. Exports: party
 masters, item masters, chart of accounts, trial balance, outstanding bills (or A/R and A/P
@@ -107,3 +107,4 @@ to export the masters from Tally, as XML or Excel.
 | `preset` | No | A preset id, when the user says which export it is |
 | `values` | No | Answers to `needs`, by name |
 | `targets` | No | Open only these targets |
+| `parts` | No | Tally XML only: the parts to import, `ledgers` and/or `stock_items`. Leave it out to list the parts first. |
