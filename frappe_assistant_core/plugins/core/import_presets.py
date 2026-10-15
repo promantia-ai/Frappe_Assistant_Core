@@ -462,7 +462,7 @@ def _read_csv(content: bytes) -> List[List[str]]:
     except UnicodeDecodeError:
         text = content.decode("cp1252", errors="replace")
     try:
-        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;	|")
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel
     return [list(row) for row in csv.reader(io.StringIO(text), dialect)]
