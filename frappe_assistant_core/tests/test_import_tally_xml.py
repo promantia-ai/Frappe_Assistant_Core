@@ -219,6 +219,32 @@ class TestSurvey(XmlCase):
         self.assertEqual(tally._text("\x04 Primary"), "Primary")
         self.assertEqual(tally._text("Ravi\nTraders\t\r\nPvt"), "Ravi Traders Pvt")
 
+    def test_text_drops_del_and_the_c1_range(self):
+        self.assertEqual(tally._text("Pri\x7fmary"), "Primary")
+        self.assertEqual(tally._text("Pri\x85mary"), "Primary")  # U+0085 (NEL)
+        self.assertEqual(tally._text("Pri\x80\x9fmary"), "Primary")
+
+    def test_the_name_attribute_is_preferred_in_the_survey_sample(self):
+        record = ledger("Ravi Traders", "Sundry Debtors").replace(
+            "<NAME>Ravi Traders</NAME>", "<NAME>RT Old Name</NAME>"
+        )
+        found = tally.survey(self._upload(export(record)))
+        self.assertEqual(found.parts["ledgers"].sample, ["Ravi Traders"])
+
+    def test_an_external_dtd_is_not_loaded(self):
+        # The DTD is never loaded: the document is read as if it had none, and nothing from the
+        # file the DTD points at reaches the result.
+        content = (
+            b'<?xml version="1.0"?><!DOCTYPE ENVELOPE SYSTEM "file:///etc/passwd">'
+            b"<ENVELOPE><BODY><IMPORTDATA><REQUESTDATA><TALLYMESSAGE>"
+            b'<LEDGER NAME="X"><PARENT>Sundry Debtors</PARENT></LEDGER>'
+            b"</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>"
+        )
+        found = tally.survey(self._upload(content))
+        self.assertEqual(found.parts["ledgers"].count, 1)
+        self.assertEqual(found.parts["ledgers"].sample, ["X"])
+        self.assertEqual(dict(found.parts["ledgers"].by_parent), {"Sundry Debtors": 1})
+
     def test_control_character_reference_in_a_record_is_dropped(self):
         found = tally.survey(self._upload(export(group("Debtors", parent="Pri&#4;mary"))))
         self.assertEqual(dict(found.parts["groups"].by_parent), {"Primary": 1})
@@ -324,6 +350,35 @@ class TestPartSheet(XmlCase):
             ["Steel Rod 10mm", "Raw Material", "Nos", "7214", "10mm TMT", "Steel", "10 Nos", "100.00/Nos"],
         )
         self.assertEqual(sheet.rows[2][3], "3208")
+
+    def test_the_name_attribute_is_preferred_to_the_language_list(self):
+        record = ledger("Ravi Traders", "Sundry Debtors").replace(
+            "<NAME>Ravi Traders</NAME>", "<NAME>RT Old Name</NAME>"
+        )
+        sheet = tally.part_sheet(self._upload(export(record)), "ledgers")
+        self.assertEqual(sheet.rows[1][0], "Ravi Traders")
+
+    def test_a_namespaced_element_is_read_by_its_local_name(self):
+        record = ledger("Ravi Traders", "Sundry Debtors", **{"UDF:GSTIN": "29ABCDE1234F1Z5"})
+        self.assertIn("<UDF:GSTIN>29ABCDE1234F1Z5</UDF:GSTIN>", record)
+        sheet = tally.part_sheet(self._upload(export(record)), "ledgers")
+        self.assertEqual(sheet.rows[1][2], "29ABCDE1234F1Z5")
+
+    def test_each_fallback_candidate_lands_in_its_column(self):
+        mailing = "<MAILINGNAME.LIST><MAILINGNAME>Ravi Traders Pvt Ltd</MAILINGNAME></MAILINGNAME.LIST>"
+        doc = self._upload(
+            export(
+                ledger("Plain GSTIN", "Sundry Debtors", GSTIN="29ABCDE1234F1Z5"),
+                ledger("Plain State", "Sundry Debtors", STATENAME="Kerala"),
+                ledger("List Mailing", "Sundry Debtors", **{"MAILINGNAME.LIST": mailing}),
+                stock_item("Plain HSN", "Raw Material", HSNCODE="7214"),
+            )
+        )
+        rows = tally.part_sheet(doc, "ledgers").rows
+        self.assertEqual(rows[1][2], "29ABCDE1234F1Z5")
+        self.assertEqual(rows[2][6], "Kerala")
+        self.assertEqual(rows[3][7], "Ravi Traders Pvt Ltd")
+        self.assertEqual(tally.part_sheet(doc, "stock_items").rows[1][3], "7214")
 
     def test_the_tally_presets_match_the_sheets(self):
         presets.clear_cache()

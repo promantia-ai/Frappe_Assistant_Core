@@ -125,6 +125,40 @@ class TestImport(TallyXmlToolCase):
         self.assertIn("ledgers (Tally XML)", session.steps[0].message)
         self.assertTrue(session.file_name.startswith(f"Master-{self.tag} - Customers"))
 
+    def test_each_part_carries_its_warning_and_source(self):
+        result = self._ok({"file_id": self._file().name, "parts": ["ledgers", "stock_items"]})
+        for part in result["results"]:
+            self.assertEqual(len(part["warnings"]), 1, part["part"])
+            self.assertIn("not checked against a real Tally Prime export", part["warnings"][0])
+            self.assertEqual(part["source"]["sheet"], f"{part['part']} (Tally XML)")
+            self.assertEqual(part["source"]["header_row"], 1)
+
+    def test_ledgers_are_routed_by_their_group(self):
+        result = self._ok({"file_id": self._file().name, "parts": ["ledgers"]})
+        by_target = {s["target"]: s for s in result["results"][0]["sessions"]}
+        self.assertEqual([r[0] for r in by_target["Customers"]["sample_rows"]], [f"Ravi Traders {self.tag}"])
+        self.assertEqual(
+            [r[0] for r in by_target["Suppliers"]["sample_rows"]], [f"Mehta Supplies {self.tag}"]
+        )
+
+    def test_a_part_with_no_data_rows_left_is_an_error_and_the_others_still_open(self):
+        real = presets.clean
+
+        def clean(sheet, match):
+            cleaned = real(sheet, match)
+            if sheet.rows[0][1] == "Parent":
+                for target in cleaned.targets:
+                    target.rows = []
+            return cleaned
+
+        with patch.object(presets, "clean", side_effect=clean):
+            result = self._ok({"file_id": self._file().name, "parts": ["ledgers", "stock_items"]})
+        by_part = {r["part"]: r for r in result["results"]}
+        self.assertEqual(by_part["ledgers"]["error"], "No data rows were left in the Tally ledgers.")
+        self.assertNotIn("sessions", by_part["ledgers"])
+        self.assertEqual(len(by_part["stock_items"]["sessions"]), 1)
+        self.assertIn("1 import session(s) from 1 of 2 part(s)", result["message"])
+
     def test_a_second_call_opens_only_accounts(self):
         doc = self._file()
         self._ok({"file_id": doc.name, "parts": ["ledgers"]})
@@ -223,6 +257,33 @@ class TestRefusals(TallyXmlToolCase):
     def test_a_non_tally_xml_is_refused_and_writes_nothing(self):
         doc = self._upload(b"<customers><customer><name>A</name></customer></customers>")
         self._refused({"file_id": doc.name}, "not a Tally export")
+
+    def test_an_xml_over_50_mb_is_refused_and_writes_nothing(self):
+        doc = self._file()
+        frappe.db.set_value("File", doc.name, "file_size", 51 * 1024 * 1024)
+        self._refused({"file_id": doc.name}, "The file is larger than 50 MB.")
+        self._refused({"file_id": doc.name, "parts": ["ledgers"]}, "The file is larger than 50 MB.")
+
+    def test_an_unreadable_xml_is_refused_and_writes_nothing(self):
+        doc = self._upload(b"\x00\x01 not xml at all")
+        self._refused({"file_id": doc.name}, "not a Tally export")
+        self._refused({"file_id": doc.name, "parts": ["ledgers"]}, "not a Tally export")
+        # An empty read (Frappe will not store an empty File, so it is swapped in at read time).
+        doc = self._file()
+        before = self._counts()
+        with patch.object(type(doc), "get_content", return_value=b""):
+            reply = self._run({"file_id": doc.name})
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Could not read the XML", reply["error"])
+        self.assertEqual(self._counts(), before)
+
+    def test_a_truncated_xml_is_read_as_far_as_it_goes_and_writes_nothing(self):
+        # recover=True keeps what was well formed, so this is a listing, not a refusal.
+        doc = self._upload(b"<ENVELOPE><BODY><IMPORTDATA><REQUESTDATA><TALLYMESSAGE><LEDGER NAME='x'")
+        before = self._counts()
+        result = self._ok({"file_id": doc.name})
+        self.assertEqual(result["parts"][0]["count"], 1)
+        self.assertEqual(self._counts(), before)
 
     def test_vouchers_only_is_refused(self):
         self._refused({"file_id": self._upload(export(VOUCHER)).name}, "no ledgers, groups or stock items")
