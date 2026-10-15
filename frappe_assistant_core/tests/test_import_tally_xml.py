@@ -147,6 +147,15 @@ class TestSurvey(XmlCase):
             tally.survey(self._upload(export(VOUCHER, VOUCHER)))
         self.assertEqual(str(raised.exception), tally.NO_MASTERS.format("VOUCHER 2"))
 
+    def test_the_tags_named_in_the_refusal_are_capped(self):
+        records = [f"<TALLYMESSAGE><TAG{i:02d}/></TALLYMESSAGE>" for i in range(12)]
+        with self.assertRaises(FileProblem) as raised:
+            tally.survey(self._upload(export(*records)))
+        message = str(raised.exception)
+        self.assertIn("TAG09 1", message)
+        self.assertNotIn("TAG10", message)
+        self.assertIn("and 2 more", message)
+
     def test_external_entities_are_not_read(self):
         content = (
             b'<?xml version="1.0"?><!DOCTYPE ENVELOPE [<!ENTITY secret SYSTEM "file:///etc/passwd">]>'

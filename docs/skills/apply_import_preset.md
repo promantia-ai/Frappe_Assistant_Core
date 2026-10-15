@@ -64,7 +64,9 @@ convert it to Excel.
 1. Call `apply_import_preset(file_id)` without `parts`. The reply has `kind: "tally_xml"`,
    `source` (the file and the company) and `parts`: ledgers (with a count per parent group), stock
    items and groups, each with a count and up to 10 names. `other_records` counts what is not read
-   (vouchers, units, godowns). Nothing is written. Show the counts as a table and ask which parts
+   (vouchers, units, godowns). Both count tables show the 50 biggest entries and then one
+   "(N more)" entry. `warnings` says the tag names were not checked against a real export: show
+   it to the user. Nothing is written. Show the counts as a table and ask which parts
    to import.
 2. Call it again with `parts`, e.g. `["ledgers", "stock_items"]`. The reply has `results`, one
    per part, each with its `part` name. Each has the same keys as a spreadsheet's reply (`preset`,
@@ -75,8 +77,9 @@ convert it to Excel.
 3. To answer `needs`, call again with the same `parts`, `values` and `targets` set to those
    targets only.
 
-Groups are listed, not imported. For Accounts, a ledger's group becomes its parent account; Customers
-and Suppliers do not keep it. Vouchers are not imported. For XML, `preset` and `sheet` are refused,
+Groups are listed, not imported. A ledger's group decides where it goes: Sundry Debtors become
+Customers, Sundry Creditors become Suppliers, and every other group becomes an Account whose parent
+the dry run maps to an ERPNext group. Vouchers are not imported. For XML, `preset` and `sheet` are refused,
 and `parts` is refused for a spreadsheet. The Tally XML tag names were not checked against a real
 export, so the results carry the same "unverified" warning as the Tally presets: ask the user to
 check the mapping.

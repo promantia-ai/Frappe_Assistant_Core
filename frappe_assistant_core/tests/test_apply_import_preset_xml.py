@@ -3,10 +3,13 @@ apply_import_preset on a Tally XML export (#34001): listing its parts (AC1), and
 import session per target for the parts the user chooses, with the Tally presets (AC2).
 """
 
+from unittest.mock import patch
+
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core import import_presets as presets
+from frappe_assistant_core.plugins.core import import_tally_xml as tally_xml
 from frappe_assistant_core.tests.test_import_tally_xml import (
     GSTIN_NEW,
     VOUCHER,
@@ -77,8 +80,24 @@ class TestListing(TallyXmlToolCase):
         self.assertEqual(parts["groups"]["count"], 2)
         self.assertFalse(parts["groups"]["importable"])
         self.assertIn("not imported", parts["groups"]["note"])
+        self.assertIn("Sundry Debtors become Customers", parts["groups"]["note"])
+        self.assertIn("not checked against a real TallyPrime export", result["warnings"][0])
         self.assertEqual(result["other_records"], {"VOUCHER": 1})
         self.assertIn("3 ledgers", result["message"])
+
+    def test_the_count_tables_are_capped(self):
+        parents = [ledger(f"L{i}", f"Parent {i:03d}") for i in range(120)]
+        tags = [f"<TALLYMESSAGE><TAG{i:03d}/></TALLYMESSAGE>" for i in range(120)]
+        result = self._ok({"file_id": self._file(*parents, *tags).name})
+        by_parent = result["parts"][0]["by_parent"]
+        self.assertEqual(len(by_parent), 51)
+        self.assertEqual(by_parent["(70 more)"], 70)
+        self.assertEqual(len(result["other_records"]), 51)
+        self.assertEqual(result["other_records"]["(70 more)"], 70)
+
+    def test_a_blank_parent_shows_as_none(self):
+        result = self._ok({"file_id": self._file(ledger("A {tag}", "")).name})
+        self.assertEqual(result["parts"][0]["by_parent"], {"(none)": 1})
 
     def test_a_part_with_no_records_is_left_out(self):
         result = self._ok({"file_id": self._file(ledger("A {tag}", "Sundry Debtors")).name})
@@ -135,15 +154,55 @@ class TestImport(TallyXmlToolCase):
     def test_both_parts_in_one_call(self):
         result = self._ok({"file_id": self._file().name, "parts": ["ledgers", "stock_items"]})
         self.assertEqual([r["part"] for r in result["results"]], ["ledgers", "stock_items"])
-        self.assertIn("3 import session(s) from 2 part(s)", result["message"])
+        self.assertIn("3 import session(s) from 2 of 2 part(s)", result["message"])
+
+    def test_empty_targets_mean_all_targets(self):
+        doc = self._file()
+        every = self._ok({"file_id": doc.name, "parts": ["ledgers"]})
+        empty = self._ok({"file_id": doc.name, "parts": ["ledgers"], "targets": []})
+
+        def names(reply):
+            return sorted(s["target"] for s in reply["results"][0]["sessions"])
+
+        self.assertEqual(names(empty), names(every))
+        self.assertTrue(names(empty))
+
+    def test_duplicate_parts_open_once(self):
+        result = self._ok({"file_id": self._file().name, "parts": ["ledgers", "ledgers"]})
+        self.assertEqual([r["part"] for r in result["results"]], ["ledgers"])
+        self.assertEqual(len(result["results"][0]["sessions"]), 2)
+
+    def test_a_part_no_preset_matches_is_an_error_and_the_others_still_open(self):
+        real = presets.match_sheet
+
+        def match(rows, available):
+            return [] if rows[0][1] == "Parent" else real(rows, available)
+
+        with patch.object(presets, "match_sheet", side_effect=match), patch("frappe.log_error") as logged:
+            result = self._ok({"file_id": self._file().name, "parts": ["ledgers", "stock_items"]})
+        by_part = {r["part"]: r for r in result["results"]}
+        self.assertIn("could not be read; please report it", by_part["ledgers"]["error"])
+        self.assertTrue(logged.called)
+        self.assertEqual(len(by_part["stock_items"]["sessions"]), 1)
+        self.assertIn("1 import session(s) from 1 of 2 part(s)", result["message"])
+
+    def test_a_part_over_the_row_limit_is_an_error(self):
+        records = [ledger(f"L{i} {{tag}}", "Sundry Debtors") for i in range(6)]
+        doc = self._file(*records)
+        with patch.object(tally_xml, "MAX_PRESET_ROWS", 5):
+            result = self._ok({"file_id": doc.name, "parts": ["ledgers"]})
+        self.assertIn("more than 5 ledgers", result["results"][0]["error"])
 
     def test_targets_for_one_part_skip_the_other(self):
-        result = self._ok(
-            {"file_id": self._file().name, "parts": ["ledgers", "stock_items"], "targets": ["Items"]}
-        )
+        doc = self._file()
+        before = self._counts()
+        result = self._ok({"file_id": doc.name, "parts": ["ledgers", "stock_items"], "targets": ["Items"]})
         by_part = {r["part"]: r for r in result["results"]}
         self.assertIn("skipped", by_part["ledgers"])
         self.assertEqual([s["target"] for s in by_part["stock_items"]["sessions"]], ["Items"])
+        # Only the Items session (and its cleaned file) is new; nothing for the skipped ledgers.
+        self.assertEqual(frappe.db.count("FAC Import Session"), before[0] + 1)
+        self.assertEqual(frappe.db.count("File"), before[1] + 1)
 
     def test_the_dry_run_accepts_a_customers_session(self):
         result = self._ok({"file_id": self._file().name, "parts": ["ledgers"]})
@@ -185,6 +244,12 @@ class TestRefusals(TallyXmlToolCase):
         self.assertFalse(reply["success"], reply)
         self.assertIn("parts must be a list", reply["error"])
         self.assertEqual(self._counts(), before)
+
+    def test_no_parts_is_refused(self):
+        doc = self._file()
+        self._refused(
+            {"file_id": doc.name, "parts": []}, "Give at least one part to import: ledgers, stock_items."
+        )
 
     def test_preset_and_sheet_are_refused_for_xml(self):
         doc = self._file()

@@ -31,6 +31,8 @@ from frappe_assistant_core.plugins.core.import_session import MAX_FILE_SIZE, Fil
 PARTS = {"LEDGER": "ledgers", "STOCKITEM": "stock_items", "GROUP": "groups"}
 IMPORTABLE = {"ledgers": "tally_prime.ledgers", "stock_items": "tally_prime.stock_items"}
 SAMPLE = 10
+MAX_LISTED = 50  # entries of a count table in the listing reply
+MAX_NAMED = 10  # tags named in the vouchers-only refusal
 
 NOT_TALLY = (
     "This XML is not a Tally export. Export it from Tally as XML (Masters), or as Excel, and upload that."
@@ -86,6 +88,17 @@ class Survey:
     company: Optional[str]
     parts: Dict[str, Part]
     other_records: Dict[str, int]
+
+
+def capped(counter: Counter, limit: int = MAX_LISTED) -> Dict[str, int]:
+    """The ``limit`` biggest entries (ties in first-seen order), a blank key shown as (none). When
+    more were left out, one more entry "(N more)" holds the records under them."""
+    ranked = counter.most_common()
+    shown = {(key or "(none)"): count for key, count in ranked[:limit]}
+    rest = ranked[limit:]
+    if rest:
+        shown[_("({0} more)").format(len(rest))] = sum(count for _key, count in rest)
+    return shown
 
 
 def is_xml(file_doc) -> bool:
@@ -183,7 +196,10 @@ def survey(file_doc) -> Survey:
             found.by_parent[_value(element, "PARENT")] += 1
     if not parts:
         if other:
-            held = ", ".join(f"{tag} {count}" for tag, count in other.most_common())
+            ranked = other.most_common()
+            held = ", ".join(f"{tag} {count}" for tag, count in ranked[:MAX_NAMED])
+            if len(ranked) > MAX_NAMED:
+                held += _(" and {0} more").format(len(ranked) - MAX_NAMED)
             raise FileProblem(_(NO_MASTERS).format(held))
         raise FileProblem(_(NOT_TALLY))
     return Survey(company[0] if company else None, parts, dict(other))

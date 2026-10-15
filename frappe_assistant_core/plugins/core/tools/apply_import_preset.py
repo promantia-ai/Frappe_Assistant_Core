@@ -18,6 +18,7 @@ is the normal import flow.
 import csv
 import io
 import os
+from collections import Counter
 from typing import Any, Dict, List
 
 import frappe
@@ -44,6 +45,10 @@ from frappe_assistant_core.plugins.core.import_session import (
 
 # Translated where it is used, not here: _() at import time would run before the language is set.
 UNVERIFIED = "This preset was not checked against a real {0} export. Check the mapping with the user before the dry run."
+LISTING_UNVERIFIED = (
+    "The Tally XML tag names were read from Tally's documented layout and were not checked against a real "
+    "TallyPrime export. Check the mapping with the user before the dry run."
+)
 
 
 class ApplyImportPreset(BaseTool):
@@ -215,14 +220,14 @@ class ApplyImportPreset(BaseTool):
             return {"success": False, "error": problem}
 
         by_id = {p["id"]: p for p in presets.load_presets()}
-        wanted = arguments.get("targets")
+        wanted = arguments.get("targets") or None  # [] means all, as for a spreadsheet
         names = {part: [t["name"] for t in by_id[tally_xml.IMPORTABLE[part]]["targets"]] for part in parts}
         unknown = [t for t in wanted or [] if not any(t in n for n in names.values())]
         if unknown:
             known = ", ".join(n for part in parts for n in names[part])
             return {"success": False, "error": _("No target '{0}'. Targets: {1}.").format(unknown[0], known)}
 
-        results, opened = [], 0
+        results, opened, parts_opened = [], 0, 0
         for part in parts:
             if wanted is not None and not [t for t in wanted if t in names[part]]:
                 results.append({"part": part, "skipped": _("none of the requested targets is in this part")})
@@ -262,15 +267,16 @@ class ApplyImportPreset(BaseTool):
             result.pop("success", None)
             result.pop("matched", None)
             opened += len(result["sessions"])
+            parts_opened += 1 if result["sessions"] else 0
             results.append({"part": part, **result})
 
         return {
             "success": True,
             "matched": True,
             "kind": "tally_xml",
-            "message": _("Tally masters export: opened {0} import session(s) from {1} part(s).").format(
-                opened, len(parts)
-            ),
+            "message": _(
+                "Tally masters export: opened {0} import session(s) from {1} of {2} part(s)."
+            ).format(opened, parts_opened, len(parts)),
             "source": source,
             "results": results,
         }
@@ -290,11 +296,12 @@ class ApplyImportPreset(BaseTool):
             if part in tally_xml.IMPORTABLE:
                 item["preset"] = tally_xml.IMPORTABLE[part]
             if part in ("ledgers", "groups"):
-                item["by_parent"] = {(k or "(none)"): v for k, v in entry.by_parent.most_common()}
+                item["by_parent"] = tally_xml.capped(entry.by_parent)
             if part == "groups":
                 item["note"] = _(
-                    "Groups are not imported; ledgers keep their group as the parent, which the dry run "
-                    "maps to an ERPNext group."
+                    "Groups are listed, not imported. A ledger's group decides where it goes: Sundry Debtors "
+                    "become Customers, Sundry Creditors become Suppliers, and every other group becomes an "
+                    "Account whose parent the dry run maps to an ERPNext group."
                 )
             listed.append(item)
             counts.append(f"{entry.count} {tally_xml.LABELS[part]}")
@@ -306,7 +313,8 @@ class ApplyImportPreset(BaseTool):
             "message": _("Tally masters export{0}: {1}.").format(where, ", ".join(counts)),
             "source": source,
             "parts": listed,
-            "other_records": found.other_records,
+            "other_records": tally_xml.capped(Counter(found.other_records)),
+            "warnings": [_(LISTING_UNVERIFIED)],
             "next": "apply_import_preset with parts",
         }
 
