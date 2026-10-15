@@ -461,7 +461,11 @@ def _read_csv(content: bytes) -> List[List[str]]:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = content.decode("cp1252", errors="replace")
-    return [list(row) for row in csv.reader(io.StringIO(text))]
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;	|")
+    except csv.Error:
+        dialect = csv.excel
+    return [list(row) for row in csv.reader(io.StringIO(text), dialect)]
 
 
 def read_sheets(file_doc) -> List[Sheet]:

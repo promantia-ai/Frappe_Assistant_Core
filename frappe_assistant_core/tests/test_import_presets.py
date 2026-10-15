@@ -771,3 +771,18 @@ class TestReadAndCarry(BaseAssistantTest):
         }
         rows = [["Particulars", "Closing Balance", ""], ["", "Debit", "Credit"]]
         self.assertEqual(presets.missing_groups(rows, two), [["Nope"]])
+
+    def test_a_semicolon_separated_csv_reads_into_the_right_cells(self):
+        doc = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "semi.csv",
+                "content": b"Name;Under;GSTIN\nRavi Traders;Sundry Debtors;29ABCDE1234F1Z5\n",
+                "is_private": 1,
+            }
+        ).insert(ignore_permissions=True)
+        self._files.append(doc.name)
+        self.assertEqual(
+            presets.read_sheets(doc)[0].rows,
+            [["Name", "Under", "GSTIN"], ["Ravi Traders", "Sundry Debtors", "29ABCDE1234F1Z5"]],
+        )
