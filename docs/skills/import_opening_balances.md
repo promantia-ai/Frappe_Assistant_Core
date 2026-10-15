@@ -28,7 +28,9 @@ Pass exactly what the last check reported, so the approval card shows it: `sessi
 ## Order with opening stock and opening invoices
 
 Any order. Temporary Opening holds the balance until all three are in, and nets to zero when they
-are. If everything is in and it still isn't zero, the report says how much is unaccounted for.
+are, unless rows were left out: their net amount is not brought in, so Temporary Opening does not
+net to zero by that amount, and the report's message says so. If everything is in and it still
+isn't zero, the report says how much is unaccounted for.
 
 ## The reply
 

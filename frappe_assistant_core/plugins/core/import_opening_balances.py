@@ -752,6 +752,17 @@ def _erpnext_check(
     return []
 
 
+CHART_HINT = (
+    "This company has no transactions yet. If its chart of accounts should be replaced to match the "
+    "old system, do it first with ERPNext's Chart of Accounts Importer; it refuses once any "
+    "transaction exists."
+)
+
+
+def _has_transactions(company: str) -> bool:
+    return bool(frappe.db.exists("GL Entry", {"company": company, "is_cancelled": 0}))
+
+
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """The dry run of an opening-balances session: the file's balance, every row checked, ERPNext's
     own validation of the entry, the result stored the dry run's way, with the totals."""
@@ -804,6 +815,10 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
         "profit_and_loss": balances.get("profit_and_loss", "stop"),
     }
     summary["balance"] = {**balance, "balanced": balanced}
+    if any(key[0] == dry_run.CAUSE_MISSING_LINK for key in checker.groups) and not _has_transactions(
+        balances["company"]
+    ):
+        summary["opening_balances"]["chart_hint"] = CHART_HINT
     frappe.db.set_value(
         dry_run.SESSION_DOCTYPE,
         session_name,
@@ -1157,6 +1172,21 @@ def report(session) -> Dict[str, Any]:
                 flt(sum(group["credit"] for group in not_brought_in), precision),
             )
         )
+        left_net = flt(
+            sum(group["debit"] for group in not_brought_in)
+            - sum(group["credit"] for group in not_brought_in),
+            precision,
+        )
+        if left_net:
+            parts.append(
+                _(
+                    "Rows left out (net {0} {1}) were not brought in, so Temporary Opening will not net "
+                    "to zero by that amount."
+                ).format(
+                    f"{abs(left_net):.{precision}f}",
+                    _("debit") if left_net > 0 else _("credit"),
+                )
+            )
     out.update(
         {
             "accounts": differences[:DIFFERENCES_SHOWN],
