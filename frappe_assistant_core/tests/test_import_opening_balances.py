@@ -356,3 +356,98 @@ class TestSetup(OpeningBalancesCase):
             reply = self._setup(session)
             self.assertFalse(reply["success"], key)
             self.assertIn("new session", frappe.as_json(reply))
+
+
+class TestReadingLines(OpeningBalancesCase):
+    def test_balance_of(self):
+        balance_of = opening_balances.balance_of
+        self.assertEqual(balance_of({"balance": "1,250.50"}), (1250.5, 0))
+        self.assertEqual(balance_of({"balance": "(12)"}), (0, 12))
+        self.assertEqual(balance_of({"balance": "-5"}), (0, 5))
+        self.assertEqual(balance_of({"debit": "1,000", "credit": ""}), (1000, 0))
+        self.assertEqual(balance_of({"debit": "", "credit": "(7)"}), (0, -7))
+        self.assertEqual(balance_of({"debit": "3", "credit": "4"}), (3, 4))  # the check reports it
+        self.assertEqual(balance_of({"debit": "", "credit": "", "balance": ""}), (0, 0))
+        self.assertEqual(balance_of({}), (0, 0))
+        with self.assertRaises(ValueError):
+            balance_of({"debit": "ten"})
+        with self.assertRaises(ValueError):
+            balance_of({"balance": "ten"})
+
+    def test_totals_rows(self):
+        totals = opening_balances.is_totals_row
+        self.assertTrue(totals({"account": "Grand Total", "debit": "500"}))
+        self.assertTrue(totals({"account": "Total", "balance": "500"}))
+        self.assertTrue(totals({"account": "", "credit": "500"}))
+        self.assertFalse(totals({"account": "Cash", "debit": "500"}))
+        self.assertFalse(totals({"account": "Total", "debit": ""}))
+        self.assertFalse(totals({"account": "", "debit": ""}))
+
+    def test_lines_with_debit_and_credit_and_value_maps(self):
+        session = self._session(['Old Bank,"1,250.50",,', ",,,", f'{self.capital},,"1,250.50",'])
+        self._setup(session)
+        doc = self._doc(session)
+        doc.transformation_rules = frappe.as_json(
+            {
+                "value_maps": [
+                    {
+                        "parent": "Journal Entry Account",
+                        "field": "account",
+                        "label": "Account",
+                        "from": "Old Bank",
+                        "to": self.bank,
+                    }
+                ]
+            }
+        )
+        doc.save()
+        lines = opening_balances.read_lines(doc)
+        self.assertEqual([line.row for line in lines], [2, 4])  # the blank row is skipped
+        self.assertEqual(lines[0].cells["account"], self.bank)
+        self.assertEqual(lines[0].cells["debit"], "1,250.50")
+        self.assertEqual(lines[0].cells["credit"], "")
+        self.assertEqual(lines[1].cells["credit"], "1,250.50")
+
+    def test_lines_with_a_balance_column(self):
+        session = self._session([f"{self.bank},,,100", f"{self.capital},,,(100)"])
+        self._setup(session, columns={"Account": "account", "Balance": "balance"})
+        lines = opening_balances.read_lines(self._doc(session))
+        self.assertEqual([line.cells["balance"] for line in lines], ["100", "(100)"])
+        self.assertEqual(lines[0].cells["account"], self.bank)
+        self.assertNotIn("debit", lines[0].cells)
+
+    def _find(self, text):
+        return opening_balances.find_account(self.company, self.abbr, text)
+
+    def test_find_by_exact_name(self):
+        found = self._find(self.bank)
+        self.assertEqual(found.name, self.bank)
+        self.assertEqual(found.company, self.company)
+        self.assertEqual(found.account_type, "Bank")
+        self.assertEqual(found.root_type, "Asset")
+        self.assertEqual(found.report_type, "Balance Sheet")
+        self.assertFalse(found.is_group)
+        self.assertFalse(found.disabled)
+        self.assertTrue(found.account_currency)
+
+    def test_find_by_name_without_the_abbreviation(self):
+        self.assertEqual(self._find(f"Debtors {self.tag}").name, self.debtors)
+
+    def test_find_by_account_number(self):
+        number = f"9{self.tag}"
+        account = self._account("Numbered", "Asset", account_number=number)
+        self.assertEqual(self._find(number).name, account)
+
+    def test_find_by_unique_account_name_when_a_number_is_in_the_name(self):
+        account = self._account("Prepaid", "Asset", account_number=f"7{self.tag}")
+        self.assertNotEqual(account, f"Prepaid {self.tag} - {self.abbr}")
+        self.assertEqual(self._find(f"Prepaid {self.tag}").name, account)
+
+    def test_ambiguous_account_name_is_not_found(self):
+        self._account("Twin", "Asset", account_number=f"1{self.tag}")
+        self._account("Twin", "Liability", account_number=f"2{self.tag}")
+        self.assertIsNone(self._find(f"Twin {self.tag}"))
+
+    def test_nothing_found(self):
+        self.assertIsNone(self._find(f"No such account {self.tag}"))
+        self.assertIsNone(self._find(""))

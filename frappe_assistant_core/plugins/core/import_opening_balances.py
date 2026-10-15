@@ -19,14 +19,16 @@ through ``import_dry_run.special_engine``. An opening-balances session keeps its
 checks, creation and report are added on top.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
 from frappe.utils import cstr, getdate
 
 from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
+from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
 
 TARGET = "Journal Entry"
 VOUCHER_TYPE = "Opening Entry"
@@ -245,6 +247,85 @@ def check_can_run(session) -> None:
                 session.file_name
             )
         )
+
+
+# -- reading the file ------------------------------------------------------------------------
+
+
+def balance_of(cells: Dict[str, str]) -> Tuple[float, float]:
+    """(debit, credit) of a row. From the debit and credit cells when either has a number, else
+    from the signed balance (positive is a debit; negative or in parentheses, a credit). A row
+    with both a debit and a credit is returned as is: the check reports it. Raises ValueError
+    when a number can't be read."""
+    debit = opening_stock.number(cells.get("debit"))
+    credit = opening_stock.number(cells.get("credit"))
+    if debit is None and credit is None:
+        balance = opening_stock.number(cells.get("balance"))
+        if balance is None:
+            return 0, 0
+        return (balance, 0) if balance >= 0 else (0, -balance)
+    return debit or 0, credit or 0
+
+
+def is_totals_row(cells: Dict[str, str]) -> bool:
+    account = cstr(cells.get("account")).strip()
+    has_amount = any(cstr(cells.get(name)).strip() for name in ("debit", "credit", "balance"))
+    return has_amount and (not account or bool(opening_stock.TOTALS.match(account)))
+
+
+def read_lines(session) -> List[opening_stock.Line]:
+    """Every non-blank row of the session's sheet, as field -> text, with value maps applied."""
+    from frappe_assistant_core.plugins.core.import_dry_run import column_to_field_map
+    from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
+
+    rows = apply_value_maps(session, read_sheet_rows(readable_session_file(session), session.sheet or None))
+    fields = {target: field for field, target in MAPPED.items()}
+    positions = {
+        int(position): fields[target]
+        for position, target in column_to_field_map(session).items()
+        if str(position).isdigit() and target in fields
+    }
+    positions.update({int(p): f for f, p in (settings(session).get("columns") or {}).items()})
+    lines = []
+    for index, row in enumerate(rows[1:], start=2):
+        cells = {f: cstr(row[p]).strip() if p < len(row) else "" for p, f in positions.items()}
+        if any(cells.values()):
+            lines.append(opening_stock.Line(index, cells))
+    return lines
+
+
+# -- finding accounts ------------------------------------------------------------------------
+
+ACCOUNT_FIELDS = ["name", "company", "is_group", "disabled", "report_type", "account_type", "root_type"]
+
+
+def find_account(company: str, abbr: str, text: str) -> Optional[frappe._dict]:
+    """The account the file means, in order: the exact account name; '<text> - <abbreviation>';
+    the account number; the one ledger account of the company with that account name. None when
+    nothing matches or several do."""
+    text = cstr(text).strip()
+    if not text:
+        return None
+    found = None
+    for name in (text, f"{text} - {abbr}"):
+        found = frappe.db.get_value("Account", name, ACCOUNT_FIELDS, as_dict=True)
+        if found:
+            break
+    if not found:
+        for field, extra in (("account_number", {}), ("account_name", {"is_group": 0})):
+            matches = frappe.get_all(
+                "Account", filters={"company": company, field: text, **extra}, fields=ACCOUNT_FIELDS, limit=2
+            )
+            if len(matches) == 1:
+                found = matches[0]
+                break
+            if matches:  # several: a missing link, not a guess
+                return None
+    if not found:
+        return None
+    found = frappe._dict(found)
+    found["account_currency"] = frappe.get_cached_value("Account", found.name, "account_currency")
+    return found
 
 
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
