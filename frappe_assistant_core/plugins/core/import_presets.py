@@ -127,8 +127,8 @@ def _parse_one(text: str, kind: str, spec: Dict[str, Any]) -> str:
         number = _signed(text)
         if number is None:
             return text
-        if spec.get("sign") == "credit_positive":
-            number = -number
+        if spec.get("sign") == "credit_positive" and _SIDE.search(text.strip()):
+            number = -number  # only a value that says Dr or Cr is flipped; a plain number is as written
         if kind == "debit":
             return _plain(number) if number > 0 else ""
         if kind == "credit":
@@ -287,6 +287,11 @@ def validate_preset(preset: Any) -> Optional[str]:
             return f"column '{name}': parse 'map' needs 'values'"
         if spec.get("fallback") and spec["fallback"] not in columns:
             return f"column '{name}': fallback '{spec['fallback']}' is not a column"
+        joined = spec.get("join")
+        if joined is not None and not (
+            isinstance(joined, list) and joined and all(isinstance(c, str) and c in columns for c in joined)
+        ):
+            return f"column '{name}': join must be a list of columns"
         if "from" in spec and not (
             isinstance(spec["from"], list) and all(isinstance(a, str) and a.strip() for a in spec["from"])
         ):
@@ -311,6 +316,12 @@ def validate_preset(preset: Any) -> Optional[str]:
             return "groups.carry_to must be a column"
         if groups.get("names") is not None and not _string_list(groups["names"]):
             return "groups.names must be a list of strings"
+    flag = preset.get("group_flag")
+    if flag is not None and not (
+        isinstance(flag, dict)
+        and all(isinstance(flag.get(k), str) and flag[k] in columns for k in ("column", "name", "parent"))
+    ):
+        return "group_flag needs column, name and parent, each a column"
     skip = preset.get("skip") or {}
     if not isinstance(skip, dict):
         return "skip must be an object"
@@ -563,6 +574,7 @@ def match_sheet(rows: List[List[str]], presets: List[Dict[str, Any]]) -> List[Ma
         signature = preset["signature"]
         optional = signature.get("optional") or []
         has_title = 1 if signature.get("title") else 0
+        best: Optional[Match] = None
         for index in range(min(header.get("search_rows", SEARCH_ROWS), len(rows))):
             headers = _header_cells(rows, index, depth)
             names = {normalise(h) for h in headers if h.strip()}
@@ -572,8 +584,11 @@ def match_sheet(rows: List[List[str]], presets: List[Dict[str, Any]]) -> List[Ma
                 continue
             hits = len(signature["required"]) + sum(_found(g, names) for g in optional) + has_title
             total = len(signature["required"]) + len(optional) + has_title
-            found.append(Match(preset, index, headers, hits / total, hits))
-            break
+            # The header is the row with the most groups found; a tie goes to the earlier row.
+            if best is None or hits > best.hits:
+                best = Match(preset, index, headers, hits / total, hits)
+        if best:
+            found.append(best)
     found.sort(key=lambda m: -m.score)  # stable: equal scores keep load order
     return found
 
@@ -740,6 +755,10 @@ def clean(sheet: Sheet, match: Match) -> Cleaned:
         for column, spec in preset["columns"].items():
             if spec.get("fallback") and not values[column]:
                 values[column] = values.get(spec["fallback"], "")
+        for column, spec in preset["columns"].items():
+            if spec.get("join"):
+                parts = [values[c] for c in spec["join"] if values[c].strip()]
+                values[column] = spec.get("sep", ":").join(parts)
         built.append(values)
 
     if preset.get("distinct_by"):
@@ -752,6 +771,13 @@ def clean(sheet: Sheet, match: Match) -> Cleaned:
             seen.add(key)
             unique.append(values)
         built = unique
+
+    flag = preset.get("group_flag")
+    if flag:
+        parents = {normalise(v[flag["parent"]]) for v in built if v[flag["parent"]].strip()}
+        for values in built:
+            name = values[flag["name"]]
+            values[flag["column"]] = "1" if name.strip() and normalise(name) in parents else "0"
 
     columns = list(preset["columns"])
     targets = [TargetRows(t, list(columns)) for t in preset["targets"]]

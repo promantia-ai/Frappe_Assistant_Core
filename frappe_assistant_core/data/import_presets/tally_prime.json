@@ -71,7 +71,7 @@
     "verified": false,
     "signature": {
       "required": [["Debit", "Closing Balance"]],
-      "optional": [["Particulars"], ["Credit"]],
+      "optional": [["Credit"], ["Particulars"]],
       "title": ["*-*-* to *-*-*"]
     },
     "skip": {"totals": ["Grand Total", "Total"]},

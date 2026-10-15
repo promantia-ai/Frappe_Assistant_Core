@@ -57,6 +57,10 @@ class TestParse(BaseAssistantTest):
         self.assertEqual(self.p("5,000 Cr", "amount", sign="credit_positive"), "5000")
         self.assertEqual(self.p("5,000 Dr", "amount", sign="credit_positive"), "-5000")
 
+    def test_credit_positive_leaves_a_plain_number_as_written(self):
+        self.assertEqual(self.p("500.00", "amount", sign="credit_positive"), "500")
+        self.assertEqual(self.p("-500.00", "amount", sign="credit_positive"), "-500")
+
     def test_debit_and_credit_split_one_dr_cr_column(self):
         self.assertEqual(self.p("8,45,000 Dr", "debit"), "845000")
         self.assertEqual(self.p("8,45,000 Dr", "credit"), "")
@@ -172,6 +176,13 @@ class TestValidate(BaseAssistantTest):
             ),
             (preset(groups={"method": "telepathy", "column": "Client"}), "groups.method"),
             (preset(distinct_by=["Missing"]), "distinct_by"),
+            (preset(columns={"Client": {"from": ["Client"], "join": ["Nope"]}}), "column 'Client': join"),
+            (preset(columns={"Client": {"from": [], "join": []}}), "column 'Client': join"),
+            (
+                preset(group_flag={"column": "Client", "name": "Client", "parent": "Nope"}),
+                "group_flag",
+            ),
+            (preset(group_flag={"column": "Client"}), "group_flag"),
         ]
         for bad, text in cases:
             problem = presets.validate_preset(bad)
@@ -544,6 +555,19 @@ class TestMatch(BaseAssistantTest):
         found = presets.match_sheet([["Name", "Under", "GSTIN"]], [LEDGERS, twin])
         self.assertEqual([m.preset["id"] for m in found], ["test.ledgers", "test.twin"])
 
+    def test_the_header_is_the_row_with_the_most_groups_found(self):
+        tally = {
+            **TB,
+            "signature": {"required": [["Debit", "Closing Balance"]], "optional": [["Credit"]]},
+        }
+        rows = [["Co"], ["", "Closing Balance"], ["", "Debit", "Credit"], ["Cash", "10", ""]]
+        self.assertEqual(presets.match_sheet(rows, [tally])[0].header_row, 2)
+        # a tie goes to the earlier row
+        rows = [["Co"], ["", "Debit", "Credit"], ["", "Debit", "Credit"], ["Cash", "10", ""]]
+        self.assertEqual(presets.match_sheet(rows, [tally])[0].header_row, 1)
+        # a row still needs every required group
+        self.assertEqual(presets.match_sheet([["", "Credit"], ["Cash", "10"]], [tally]), [])
+
     def test_two_row_headers_join_with_the_cell_above(self):
         two = {
             **TB,
@@ -653,6 +677,87 @@ class TestClean(BaseAssistantTest):
         )
         self.assertEqual(cleaned.dropped["groups"], 1)
         self.assertEqual(cleaned.dropped["no_target"], 1)  # Zero Co: nonzero filter
+
+    def test_join_builds_a_column_from_the_non_blank_values_of_others(self):
+        aging = {
+            "id": "test.join",
+            "system": "Test",
+            "export": "Aging",
+            "signature": {"required": [["Customer"], ["Total"]]},
+            "skip": {"totals": ["TOTAL", "Total for *"]},
+            "groups": {"method": "empty_amounts", "column": "Customer", "carry_to": "Parent"},
+            "columns": {
+                "Customer": {"from": ["Customer"]},
+                "Parent": {"from": []},
+                "Party": {"from": [], "join": ["Parent", "Customer"]},
+                "Total": {"from": ["Total"], "parse": "amount"},
+            },
+            "targets": [
+                {
+                    "name": "Open",
+                    "engine": "opening_invoices",
+                    "invoice_type": "Sales",
+                    "columns": {"Party": "party", "Total": "outstanding_amount"},
+                }
+            ],
+        }
+        self.assertIsNone(presets.validate_preset(aging))
+        rows = [
+            ["Customer", "Total"],
+            ["Amy's Bird Sanctuary", "239.00"],
+            ["Freeman Sporting Goods", ""],
+            ["0969 Ocean View Road", "477.50"],
+            ["Total for Freeman Sporting Goods", "477.50"],
+        ]
+        cleaned = self._clean(rows, aging)
+        self.assertEqual(
+            [r[2] for r in cleaned.targets[0].rows],
+            ["Amy's Bird Sanctuary", "Freeman Sporting Goods:0969 Ocean View Road"],
+        )
+        with_sep = {
+            **aging,
+            "columns": {**aging["columns"], "Party": {**aging["columns"]["Party"], "sep": " / "}},
+        }
+        cleaned = self._clean(rows, with_sep)
+        self.assertEqual(cleaned.targets[0].rows[1][2], "Freeman Sporting Goods / 0969 Ocean View Road")
+
+    def test_group_flag_marks_the_accounts_that_are_a_parent(self):
+        accounts = {
+            "id": "test.accounts",
+            "system": "Test",
+            "export": "Accounts",
+            "signature": {"required": [["Full name"], ["Type"]]},
+            "columns": {
+                "Account": {"from": ["Full name"], "parse": "last_segment"},
+                "Type": {"from": ["Type"]},
+                "Parent": {"from": ["Full name"], "parse": "parent_segment", "fallback": "Type"},
+                "Is Group": {"from": []},
+            },
+            "group_flag": {"column": "Is Group", "name": "Account", "parent": "Parent"},
+            "targets": [
+                {
+                    "name": "Accounts",
+                    "doctype": "Account",
+                    "mapping": {
+                        "Account": "account_name",
+                        "Parent": "parent_account",
+                        "Is Group": "is_group",
+                    },
+                }
+            ],
+        }
+        self.assertIsNone(presets.validate_preset(accounts))
+        rows = [
+            ["Full name", "Type"],
+            ["Checking", "Bank"],
+            ["Truck", "Fixed Assets"],
+            ["Truck:Depreciation", "Fixed Assets"],
+        ]
+        cleaned = self._clean(rows, accounts)
+        self.assertEqual(
+            {r[0]: r[3] for r in cleaned.targets[0].rows},
+            {"Checking": "0", "Truck": "1", "Depreciation": "0"},
+        )
 
     def test_distinct_by_keeps_the_first_row_of_each_document(self):
         lines = {

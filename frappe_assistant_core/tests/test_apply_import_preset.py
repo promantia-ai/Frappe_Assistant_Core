@@ -387,8 +387,9 @@ SHIPPED = {
             ["1-Apr-24 to 31-Mar-25"],
             ["Date", "Ref. No.", "Party's Name", "Pending Amount", "Due on"],
             ["2-Mar-25", "P-77", "Mehta Supplies", "500.00 Cr", "1-Apr-25"],
+            ["3-Mar-25", "P-78", "Mehta Supplies", "250.00", "2-Apr-25"],
         ],
-        {"Open bills": 1},
+        {"Open bills": 2},
     ),
     "quickbooks_online.account_list": (
         [
@@ -490,6 +491,22 @@ SHIPPED = {
 }
 
 
+# Tally's real Trial Balance export: a two-row Closing Balance header and Particulars in a column
+# with no header.
+TALLY_TB_REAL = [
+    ["Acme Pvt Ltd", "", ""],
+    ["", "1-Apr-24 to 31-Mar-25", ""],
+    ["", "Closing Balance", ""],
+    ["", "Debit", "Credit"],
+    ["Current Assets", "1,500.00", ""],
+    ["  Cash", "500.00", ""],
+    ["  HDFC Bank", "1,000.00", ""],
+    ["Capital Account", "", "1,500.00"],
+    ["  Owner Capital", "", "1,500.00"],
+    ["Grand Total", "1,500.00", "1,500.00"],
+]
+
+
 def as_xlsx_file(case, name, rows):
     return case._upload(name, xlsx([[str(c) for c in row] for row in rows]))
 
@@ -538,6 +555,37 @@ class TestShippedPresets(PresetToolCase):
         self.assertEqual(
             [r[0] for r in result["sessions"][0]["sample_rows"]], ["Cash", "HDFC Bank", "Owner Capital"]
         )
+
+    def test_tally_trial_balance_with_the_real_two_row_header(self):
+        result, _ = self._check("tally_prime.trial_balance", TALLY_TB_REAL, {"Trial balance": 3})
+        self.assertEqual(result["source"]["header_row"], 4)  # 1-based: the Debit/Credit row
+        self.assertEqual(result["dropped"]["groups"], 2)
+        sample = result["sessions"][0]["sample_rows"]
+        self.assertEqual(
+            [r[:3] for r in sample],
+            [["Cash", "500", ""], ["HDFC Bank", "1000", ""], ["Owner Capital", "", "1500"]],
+        )
+        self.assertNotIn("Debit", [r[0] for r in sample])
+
+    def test_a_tally_trial_balance_is_not_claimed_by_quickbooks(self):
+        rows = [
+            ["Acme Pvt Ltd"],
+            ["Trial Balance"],
+            ["1-Apr-24 to 31-Mar-25"],
+            *SHIPPED["tally_prime.trial_balance"][0][3:],
+        ]
+        self._check("tally_prime.trial_balance", rows, {"Trial balance": 3})
+
+    def test_tally_bills_payable_reads_dr_cr_and_plain_amounts(self):
+        rows, expected = SHIPPED["tally_prime.bills_payable"]
+        result, _ = self._check("tally_prime.bills_payable", rows, expected)
+        self.assertEqual([r[3] for r in result["sessions"][0]["sample_rows"]], ["500", "250"])
+
+    def test_quickbooks_aging_parties_join_parent_and_child(self):
+        rows, expected = SHIPPED["quickbooks_online.ar_aging_summary"]
+        result, _ = self._check("quickbooks_online.ar_aging_summary", rows, expected)
+        parties = [r[2] for r in result["sessions"][0]["sample_rows"]]
+        self.assertEqual(parties, ["Amy's Bird Sanctuary", "Freeman Sporting Goods:0969 Ocean View Road"])
 
     def test_tally_stock_summary_asks_for_the_warehouse_then_opens(self):
         rows, _ = SHIPPED["tally_prime.stock_summary"]
@@ -610,6 +658,7 @@ class TestPresetIntoTheEngines(OpeningBalancesCase):
         result = self._run("apply_import_preset", {"file_id": file_doc.name})["result"]
         session = result["sessions"][0]
         self.assertEqual(result["preset"]["id"], "quickbooks_online.trial_balance")
+        self.assertEqual(session["rows"], 2)
         setup = self._setup(session["session_id"], columns=session["columns"])
         self.assertTrue(setup["success"], setup)
         checked = self._run("dry_run_import", {"session": session["session_id"]})
