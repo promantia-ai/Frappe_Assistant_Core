@@ -20,6 +20,7 @@ checks, creation and report are added on top.
 """
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
@@ -420,12 +421,19 @@ def _line_problem(line: opening_stock.Line, balances: Dict[str, Any], find, seen
             "cause": opening_stock.CAUSE_TOTALS_ROW,
             "message": _("A totals row, not an account."),
         }
-    for name, field in AMOUNT_FIELDS:
+    # the cells balance_of reads: the balance cell only when debit and credit are both blank
+    cells_read, fields = ["debit", "credit"], dict(AMOUNT_FIELDS)
+    if not cstr(cells.get("debit")).strip() and not cstr(cells.get("credit")).strip():
+        cells_read.append("balance")
+    for name in cells_read:
         try:
             opening_stock.number(cells.get(name))
         except ValueError:
             return _problem(
-                dry_run.CAUSE_BAD_VALUE, field, cells[name], _("'{0}' isn't a number.").format(cells[name])
+                dry_run.CAUSE_BAD_VALUE,
+                fields[name],
+                cells[name],
+                _("'{0}' isn't a number.").format(cells[name]),
             )
     debit, credit = balance_of(cells)
     if debit and credit:
@@ -493,9 +501,12 @@ def _line_problem(line: opening_stock.Line, balances: Dict[str, Any], find, seen
             CAUSE_PROFIT_AND_LOSS,
             "account",
             text,
-            _("{0} is a Profit and Loss account, which ERPNext doesn't take in an opening entry.").format(
-                name
-            ),
+            _(
+                "{0} is a Profit and Loss account, which ERPNext doesn't take in an opening entry. "
+                "To bring these rows in, run set_opening_balances again with "
+                'profit_and_loss="retained_earnings" and a retained-earnings account: their net is '
+                "then added to that account."
+            ).format(name),
         )
     if name in seen:
         return _problem(
@@ -725,12 +736,15 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
             frappe.format_value(balance["credit"], {"fieldtype": "Float", "precision": precision}),
             frappe.format_value(abs(balance["difference"]), {"fieldtype": "Float", "precision": precision}),
         )
+        info = {"cause": CAUSE_NOT_BALANCED, "message": message, "fix_in_file": True}
         for row in ready:
-            checker.fail(
-                row.row,
-                (CAUSE_NOT_BALANCED,),
-                {"cause": CAUSE_NOT_BALANCED, "message": message, "fix_in_file": True},
-            )
+            checker.fail(row.row, (CAUSE_NOT_BALANCED,), info)
+        if not ready:
+            # no row to fail with it: the group still shows, on the first row that failed
+            first = next((r for r in checker.rows if r["status"] == "failed"), None)
+            if first:
+                payload = SimpleNamespace(rows=[SimpleNamespace(row_number=first["row"])])
+                first["groups"].append(checker._group_of(checker, (CAUSE_NOT_BALANCED,), info, payload))
         ready = []
     else:
         ready = _erpnext_check(session, ready, checker, balances)
@@ -749,7 +763,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
         "balancing": balancing_line(balances, lines_of_entry),
         "profit_and_loss": balances.get("profit_and_loss", "stop"),
     }
-    summary["balance"] = balance
+    summary["balance"] = {**balance, "balanced": balanced}
     frappe.db.set_value(
         dry_run.SESSION_DOCTYPE,
         session_name,

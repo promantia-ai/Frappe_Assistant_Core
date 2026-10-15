@@ -503,7 +503,7 @@ class TestCheck(OpeningBalancesCase):
         self.assertEqual((totals["total_debit"], totals["total_credit"]), (100, 100))
         self.assertIsNone(totals["balancing"])
         self.assertEqual(totals["profit_and_loss"], "stop")
-        self.assertEqual(result["balance"], {"debit": 100, "credit": 100, "difference": 0})
+        self.assertEqual(result["balance"], {"debit": 100, "credit": 100, "difference": 0, "balanced": True})
         self.assertEqual(self._doc(session).status, "Ready to Import")
         self.assertEqual(self._counts(), before)
 
@@ -593,12 +593,14 @@ class TestCheck(OpeningBalancesCase):
         _, result = self._ready([f"{self.bank},60,,", f"{self.bank},40,,", f"{self.capital},,100,"])
         group = self._groups(result)[opening_balances.CAUSE_ACCOUNT_TWICE]
         self.assertEqual([e["row"] for e in group["examples"]], [3])
-        self.assertIn("2", group["message"])
+        self.assertIn("row 2", group["message"])
         self.assertEqual(result["ready"], 2)
 
     def test_profit_and_loss_stops_by_default(self):
         _, result = self._ready([f"{self.bank},100,,", f"{self.expense},30,,", f"{self.capital},,130,"])
         group = self._groups(result)[opening_balances.CAUSE_PROFIT_AND_LOSS]
+        self.assertIn("retained_earnings", group["message"])
+        self.assertIn("set_opening_balances", group["message"])
         self.assertEqual(group["count"], 1)
 
     def test_profit_and_loss_folds_into_retained_earnings(self):
@@ -688,7 +690,7 @@ class TestCheck(OpeningBalancesCase):
         before = self._counts()
         session, result = self._ready([f"{self.bank},100,,", f"{self.capital},,90,"])
         self.assertEqual(result["ready"], 0, result)
-        self.assertEqual(result["balance"], {"debit": 100, "credit": 90, "difference": 10})
+        self.assertEqual(result["balance"], {"debit": 100, "credit": 90, "difference": 10, "balanced": False})
         group = self._groups(result)[opening_balances.CAUSE_NOT_BALANCED]
         self.assertEqual(group["count"], 2)
         self.assertIn("10", group["message"])
@@ -742,6 +744,7 @@ class TestCheck(OpeningBalancesCase):
         before = self._counts()
         _, result = self._ready([f"{self.bank},100,,", f"{self.capital},,100,"])
         rejected = self._groups(result)[dry_run.CAUSE_REJECTED]
+        self.assertIn("closed Accounting Period", rejected["message"])
         self.assertEqual(rejected["count"], 2)
         self.assertEqual(result["ready"], 0)
         self.assertEqual(self._counts(), before)
@@ -764,3 +767,63 @@ class TestCheck(OpeningBalancesCase):
         )
         self.assertIsNone(error)
         self.assertEqual(self._counts(), before)
+
+    # -- rows left out, junk balance cells, an unbalanced file with nothing ready ---------
+
+    def _leave_out(self, session, *rows):
+        doc = self._doc(session)
+        doc.excluded_rows = frappe.as_json(list(rows))
+        doc.save()
+
+    def test_leaving_a_row_out_does_not_change_the_balance_check(self):
+        session = self._session([f"{self.bank},100,,", f"{self.capital},,90,"])
+        self.assertTrue(self._setup(session)["success"])
+        self._leave_out(session, 2)
+        result = self._check(session)
+        self.assertEqual(result["ready"], 0, result)
+        self.assertEqual(result["excluded"], 1)
+        self.assertEqual(result["balance"], {"debit": 100, "credit": 90, "difference": 10, "balanced": False})
+        self.assertIn(opening_balances.CAUSE_NOT_BALANCED, self._groups(result))
+
+    def test_a_row_left_out_is_not_in_the_entry_and_goes_through_the_balancing_line(self):
+        session = self._session([f"{self.bank},100,,", f"{self.retained},30,,", f"{self.capital},,130,"])
+        self.assertTrue(self._setup(session)["success"])
+        self._leave_out(session, 3)
+        result = self._check(session)
+        self.assertEqual((result["ready"], result["excluded"], result["failed"]), (2, 1, 0), result)
+        self.assertTrue(result["balance"]["balanced"])
+        lines = self._lines_of(session)
+        self.assertNotIn(self.retained, [line["account"] for line in lines])
+        last = lines[-1]
+        self.assertEqual(last["account"], self.temporary)
+        self.assertEqual(last["debit_in_account_currency"], 30)
+        self.assertEqual(last["credit_in_account_currency"], 0)
+        self.assertEqual(
+            result["opening_balances"]["balancing"], {"account": self.temporary, "debit": 30, "credit": 0}
+        )
+
+    def test_a_junk_balance_cell_is_ignored_when_debit_is_given(self):
+        session = self._session([f"{self.bank},100,,junk", f"{self.capital},,100,"])
+        columns = {**COLUMNS, "Balance": "balance"}
+        self.assertTrue(self._setup(session, columns=columns)["success"])
+        result = self._check(session)
+        self.assertNotIn(dry_run.CAUSE_BAD_VALUE, self._groups(result))
+        self.assertEqual(result["ready"], 2, result)
+        self.assertEqual(result["balance"]["debit"], 100)
+
+    def test_a_junk_balance_cell_is_not_a_number_when_it_is_the_only_amount(self):
+        session = self._session([f"{self.bank},,,junk", f"{self.capital},,100,"])
+        columns = {**COLUMNS, "Balance": "balance"}
+        self.assertTrue(self._setup(session, columns=columns)["success"])
+        result = self._check(session)
+        self.assertIn(dry_run.CAUSE_BAD_VALUE, self._groups(result))
+        self.assertEqual(result["balance"]["debit"], 0)
+
+    def test_an_unbalanced_file_with_nothing_ready_still_says_so_once(self):
+        _, result = self._ready([f"Old A {self.tag},100,,", f"Old B {self.tag},,90,"])
+        self.assertEqual(result["ready"], 0)
+        self.assertFalse(result["balance"]["balanced"])
+        groups = [g for g in result["groups"] if g["cause"] == opening_balances.CAUSE_NOT_BALANCED]
+        self.assertEqual(len(groups), 1, result)
+        self.assertEqual(groups[0]["count"], 1)
+        self.assertEqual(result["failed"], 2)  # the two rows, each counted once
