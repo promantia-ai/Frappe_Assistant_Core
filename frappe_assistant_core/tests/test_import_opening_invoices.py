@@ -1005,3 +1005,122 @@ class TestReport(OpeningInvoicesCase):
             report = opening_invoices.report(self._doc(session))
         self.assertEqual(report["status"], "Partially Completed")
         self.assertIn("stopped", report["message"])
+
+
+class TestReportEdges(OpeningInvoicesCase):
+    def _imported(self, lines):
+        session, result = self._ready(lines)
+        reply = self._run("import_opening_invoices", self._card(session, result))
+        self.assertTrue(reply["success"], reply)
+        return session
+
+    def _importing(self, session, updated_on="2000-01-01 00:00:00"):
+        doc = self._doc(session)
+        doc.db_set("status", "Importing")
+        doc.db_set(
+            "progress",
+            frappe.as_json(
+                {"step": "Import", "state": "running", "done": 1, "total": 5, "updated_on": updated_on}
+            ),
+        )
+
+    def _fail_rows(self, session, entries):
+        doc = self._doc(session)
+        options = frappe.parse_json(doc.template_options)
+        options["opening_invoices"]["failed"] = entries
+        doc.db_set("template_options", frappe.as_json(options))
+
+    def test_a_stopped_import_with_failed_rows_says_it_stopped(self):
+        session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        self._fail_rows(session, {"3": {"message": "Refused", "error": None, "amount": 5, "party": "x"}})
+        doc = self._doc(session)
+        doc.db_set("status", "Partially Completed")
+        doc.db_set("progress", opening_invoices._progress("stopped", 1, 5))
+        report = opening_invoices.report(self._doc(session))
+        self.assertIn("stopped after 1 invoices were created (1 rows refused)", report["message"])
+        self.assertEqual(report["totals"]["Customer"]["file"], 10)
+
+    def test_an_all_failed_import_creates_no_invoices_and_says_so(self):
+        session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        options = frappe.parse_json(self._doc(session).template_options)
+        options["opening_invoices"]["created"] = {}
+        self._doc(session).db_set("template_options", frappe.as_json(options))
+        self._fail_rows(session, {"2": {"message": "Refused", "error": None, "amount": 10, "party": "x"}})
+        self._doc(session).db_set("status", "Failed")
+        report = opening_invoices.report(self._doc(session))
+        self.assertTrue(report["message"].startswith("No invoices were created; 1 rows were refused"))
+
+    def test_a_job_that_finished_is_not_marked_stopped(self):
+        session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        stale = self._doc(session)
+        self._importing(session)
+        stale.status = "Importing"
+        stale.progress = self._doc(session).progress
+        self._doc(session).db_set("status", "Completed")
+        with patch.object(opening_invoices, "_job_running", return_value=False):
+            report = opening_invoices.report(stale)
+        self.assertEqual(report["status"], "Completed")
+        self.assertEqual(self._doc(session).status, "Completed")
+
+    def test_a_running_job_with_stale_progress_is_not_settled(self):
+        session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        self._importing(session)
+        with patch.object(opening_invoices, "_job_running", return_value=True):
+            report = opening_invoices.report(self._doc(session))
+        self.assertEqual(report["status"], "Importing")
+
+    def test_fresh_progress_with_no_job_is_not_settled(self):
+        session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        self._importing(session, str(frappe.utils.now_datetime()))
+        with patch.object(opening_invoices, "_job_running", return_value=False):
+            report = opening_invoices.report(self._doc(session))
+        self.assertEqual(report["status"], "Importing")
+
+    def test_a_queue_that_raises_does_not_break_the_report(self):
+        session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        self._importing(session)
+        with patch("frappe.utils.background_jobs.is_job_enqueued", side_effect=RuntimeError("redis down")):
+            report = opening_invoices.report(self._doc(session))
+        self.assertEqual(report["status"], "Importing")
+
+    def test_an_invoice_cancelled_since_is_listed_and_left_out_of_the_totals(self):
+        session = self._imported(
+            [
+                f"{self.customer},{self._number(1)},{self.date},,10",
+                f"{self.customer},{self._number(2)},{self.date},,20",
+            ]
+        )
+        frappe.db.set_value("Sales Invoice", self._number(1), "docstatus", 2)
+        report = opening_invoices.report(self._doc(session))
+        self.assertEqual(report["no_longer_submitted_count"], 1)
+        self.assertEqual(
+            report["no_longer_submitted"], [{"invoice": self._number(1), "row": 2, "amount": 10}]
+        )
+        self.assertEqual(report["totals"]["Customer"]["file"], 20)
+        self.assertIn("1 invoices made earlier were cancelled or deleted since", report["message"])
+
+    def test_a_capped_list_of_differences_says_so(self):
+        session = self._imported(
+            [
+                f"{self.customer},{self._number(1)},{self.date},,10",
+                f"{self.customer},{self._number(2)},{self.date},,20",
+            ]
+        )
+        frappe.db.set_value("Sales Invoice", self._number(1), "outstanding_amount", 7)
+        frappe.db.set_value("Sales Invoice", self._number(2), "outstanding_amount", 5)
+        with patch.object(opening_invoices, "DIFFERENCES_SHOWN", 1):
+            report = opening_invoices.report(self._doc(session))
+        self.assertEqual((len(report["differences"]), report["differences_count"]), (1, 2))
+        self.assertIn("the first 1 of 2 are listed", report["message"])
+
+    def test_failed_amounts_are_rounded(self):
+        session = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        self._fail_rows(
+            session,
+            {
+                "3": {"message": "Refused", "error": None, "amount": 0.1, "party": "x"},
+                "4": {"message": "Refused", "error": None, "amount": 0.2, "party": "x"},
+            },
+        )
+        report = opening_invoices.report(self._doc(session))
+        self.assertEqual(report["failed"][0]["amount"], 0.3)

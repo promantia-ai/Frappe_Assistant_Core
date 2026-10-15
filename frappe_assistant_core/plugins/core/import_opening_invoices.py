@@ -948,6 +948,8 @@ def _stopped(session_name: str, reason: str) -> None:
     """A background import that stopped before its end: what it committed is in."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
+    if frappe.db.get_value(dry_run.SESSION_DOCTYPE, session_name, "status") != "Importing":
+        return  # it finished (or was stopped already) in the meantime
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     session.status = "Partially Completed" if settings(session).get("created") else "Failed"
     last = frappe.parse_json(session.progress or "{}") or {}
@@ -969,7 +971,10 @@ DIFFERENCES_SHOWN = 50
 def _job_running(session) -> bool:
     from frappe.utils.background_jobs import is_job_enqueued
 
-    return bool(is_job_enqueued(JOB.format(session.name)))
+    try:
+        return bool(is_job_enqueued(JOB.format(session.name)))
+    except Exception:
+        return True  # the queue can't be asked (Redis down, say): don't call the job stopped
 
 
 def _settle(session) -> None:
@@ -985,7 +990,7 @@ def _settle(session) -> None:
     session.reload()
 
 
-def _failed_groups(failed: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _failed_groups(failed: Dict[str, Any], precision: int) -> List[Dict[str, Any]]:
     from frappe_assistant_core.plugins.core.import_fixes import row_ranges
 
     groups: Dict[str, Dict[str, Any]] = {}
@@ -996,7 +1001,10 @@ def _failed_groups(failed: Dict[str, Any]) -> List[Dict[str, Any]]:
         )
         group["rows"].append(int(row))
         group["amount"] += flt(entry.get("amount"))
-    return [{**g, "count": len(g["rows"]), "rows": row_ranges(g["rows"])} for g in groups.values()]
+    return [
+        {**g, "amount": flt(g["amount"], precision), "count": len(g["rows"]), "rows": row_ranges(g["rows"])}
+        for g in groups.values()
+    ]
 
 
 def report(session) -> Dict[str, Any]:
@@ -1033,29 +1041,51 @@ def report(session) -> Dict[str, Any]:
         ),
         key=lambda d: d["row"],
     )
-    failed = _failed_groups(invoices.get("failed") or {})
+    failed = _failed_groups(invoices.get("failed") or {}, precision)
     progress = frappe.parse_json(session.progress or "{}") or {}
+    gone = [n for n in created if n not in submitted]  # cancelled or deleted since
+    refused = sum(g["count"] for g in failed)
+    stopped = session.status in ("Partially Completed", "Failed") and progress.get("state") == "stopped"
 
     if session.status == "Importing":
         message = _("Creating the invoices in the background: {0} of {1} done.").format(
             progress.get("done", 0), progress.get("total", "?")
         )
-    elif session.status in ("Partially Completed", "Failed") and not failed:
-        message = _("The import stopped before its end. Check the file again to import the rest.")
     else:
-        message = _("{0} opening {1} invoices in ERPNext, outstanding {2} against {3} in the file.").format(
-            len(submitted), _(invoices["invoice_type"]), erpnext_total, file_total
-        )
-        if differences:
-            message += " " + _("{0} differ from the file; they are listed row by row.").format(
-                len(differences)
-            )
-        elif submitted:
-            message += " " + _("Every invoice matches the file.")
-        if failed:
-            message += " " + _("{0} rows were refused by ERPNext: fix them and check the file again.").format(
-                sum(g["count"] for g in failed)
-            )
+        if stopped:
+            message = _(
+                "The import stopped after {0} invoices were created ({1} rows refused). "
+                "Check the file again to import the rest."
+            ).format(len(submitted), refused)
+        elif not submitted and failed:
+            message = _(
+                "No invoices were created; {0} rows were refused by ERPNext: fix them and check the file again."
+            ).format(refused)
+        elif not submitted and session.status in ("Partially Completed", "Failed"):
+            message = _("The import stopped before its end. Check the file again to import the rest.")
+        else:
+            message = ""
+        if submitted:
+            message += " " + _(
+                "{0} opening {1} invoices in ERPNext, outstanding {2} against {3} in the file."
+            ).format(len(submitted), _(invoices["invoice_type"]), erpnext_total, file_total)
+            if len(differences) > DIFFERENCES_SHOWN:
+                message += " " + _("{0} differ from the file; the first {1} of {0} are listed.").format(
+                    len(differences), DIFFERENCES_SHOWN
+                )
+            elif differences:
+                message += " " + _("{0} differ from the file; they are listed row by row.").format(
+                    len(differences)
+                )
+            else:
+                message += " " + _("Every invoice matches the file.")
+            if failed and not stopped:
+                message += " " + _(
+                    "{0} rows were refused by ERPNext: fix them and check the file again."
+                ).format(refused)
+        if gone:
+            message += " " + _("{0} invoices made earlier were cancelled or deleted since.").format(len(gone))
+        message = message.strip()
     out = {
         "status": session.status,
         "invoice_type": invoices["invoice_type"],
@@ -1070,7 +1100,11 @@ def report(session) -> Dict[str, Any]:
         },
         "differences": differences[:DIFFERENCES_SHOWN],
         "differences_count": len(differences),
-        "no_longer_submitted": [n for n in created if n not in submitted],  # cancelled or deleted since
+        "no_longer_submitted": [
+            {"invoice": n, "row": created[n]["row"], "amount": flt(created[n]["amount"], precision)}
+            for n in gone[:DIFFERENCES_SHOWN]
+        ],
+        "no_longer_submitted_count": len(gone),
         "failed": failed,
         "left_out": left_out_report(session),
         "message": message,
