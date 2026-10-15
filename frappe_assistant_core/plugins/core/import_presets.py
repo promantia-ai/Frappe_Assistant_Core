@@ -16,14 +16,28 @@ cleans. It writes nothing: apply_import_preset writes the cleaned files and open
 """
 
 import datetime
+import fnmatch
 import glob
+import io
 import json
 import os
 import re
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import frappe
+from frappe import _
+from openpyxl import load_workbook
+
+from frappe_assistant_core.plugins.core.import_session import (
+    MAX_FILE_SIZE,
+    SUPPORTED_EXTENSIONS,
+    FileProblem,
+    _as_text,
+    _describe_read_error,
+    _iter_sheets,
+)
 
 PARSERS = (
     "amount",
@@ -411,3 +425,330 @@ def load_presets() -> List[Dict[str, Any]]:
 
 def clear_cache() -> None:
     frappe.local.fac_import_presets = None
+
+
+# -- reading ---------------------------------------------------------------------------------
+
+SEARCH_ROWS = 20
+DROP_REASONS = ("title", "blank", "repeated_header", "totals", "footer", "groups", "merged", "no_target")
+
+
+@dataclass
+class Sheet:
+    name: Optional[str]
+    rows: List[List[str]]
+    indents: Optional[List[List[int]]] = None  # xlsx cell indent per cell, when a preset needs it
+
+
+def _extension(file_doc) -> str:
+    return (file_doc.get_extension()[1] or "").lstrip(".").lower()
+
+
+def _content(file_doc) -> bytes:
+    if _extension(file_doc) not in SUPPORTED_EXTENSIONS:
+        raise FileProblem(_("Only .csv, .xlsx or .xls files can be imported."))
+    if (file_doc.file_size or 0) > MAX_FILE_SIZE:
+        raise FileProblem(_("The file is larger than 50 MB."))
+    content = file_doc.get_content()
+    return content.encode("utf-8") if isinstance(content, str) else content
+
+
+def read_sheets(file_doc) -> List[Sheet]:
+    """Every sheet of the file, every row as text, title rows and all."""
+    content = _content(file_doc)
+    try:
+        return [
+            Sheet(name, [[_as_text(v) for v in row] for row in rows])
+            for name, rows in _iter_sheets(content, _extension(file_doc))
+        ]
+    except FileProblem:
+        raise
+    except Exception as e:
+        raise FileProblem(_("Could not read the file: {0}").format(_describe_read_error(e)))
+
+
+def read_indents(file_doc, sheet_name: Optional[str]) -> Optional[List[List[int]]]:
+    """Each cell's indent in an .xlsx sheet. Read-only mode doesn't load cell styles, so the
+    workbook is opened in full; only done when a matched preset finds groups by indent."""
+    if _extension(file_doc) != "xlsx":
+        return None
+
+    workbook = load_workbook(io.BytesIO(_content(file_doc)), data_only=True)
+    try:
+        worksheet = workbook[sheet_name] if sheet_name else workbook.worksheets[0]
+        return [[int(cell.alignment.indent or 0) for cell in row] for row in worksheet.iter_rows(min_row=1)]
+    finally:
+        workbook.close()
+
+
+def uses_indent(preset: Dict[str, Any]) -> bool:
+    methods = (preset.get("groups") or {}).get("method") or []
+    return "indent" in (methods if isinstance(methods, list) else [methods])
+
+
+# -- matching --------------------------------------------------------------------------------
+
+
+@dataclass
+class Match:
+    preset: Dict[str, Any]
+    header_row: int  # 0-based index of the (first) header row
+    headers: List[str]
+    score: float
+    hits: int
+
+
+def _cell(row: List[str], index: Optional[int]) -> str:
+    return row[index] if index is not None and index < len(row) else ""
+
+
+def _header_cells(rows: List[List[str]], index: int, depth: int) -> List[str]:
+    upper = rows[index]
+    if depth == 1:
+        return [c.strip() for c in upper]
+    lower = rows[index + 1] if index + 1 < len(rows) else []
+    out, carried = [], ""
+    for i in range(max(len(upper), len(lower))):
+        above, below = _cell(upper, i).strip(), _cell(lower, i).strip()
+        # A merged cell reads as blanks to its right: carry it over the cells that have a header below.
+        carried = above or (carried if below else "")
+        out.append(f"{carried}{JOIN}{below}" if carried and below else (carried or below))
+    return out
+
+
+def _found(group: List[str], names) -> bool:
+    return any(normalise(alias) in names for alias in group)
+
+
+def _like(text: str, patterns: Iterable[str]) -> bool:
+    value = normalise(text)
+    return any(fnmatch.fnmatchcase(value, normalise(p)) for p in patterns)
+
+
+def _title_ok(signature: Dict[str, Any], rows: List[List[str]], index: int) -> bool:
+    patterns = signature.get("title")
+    if not patterns:
+        return True
+    return any(_like(c, patterns) for row in rows[:index] for c in row if c.strip())
+
+
+def match_sheet(rows: List[List[str]], presets: List[Dict[str, Any]]) -> List[Match]:
+    """Every preset whose signature this sheet has, best first; load order breaks ties."""
+    found: List[Match] = []
+    for preset in presets:
+        header = preset.get("header") or {}
+        depth = header.get("rows", 1)
+        signature = preset["signature"]
+        optional = signature.get("optional") or []
+        has_title = 1 if signature.get("title") else 0
+        for index in range(min(header.get("search_rows", SEARCH_ROWS), len(rows))):
+            headers = _header_cells(rows, index, depth)
+            names = {normalise(h) for h in headers if h.strip()}
+            if not all(_found(g, names) for g in signature["required"]):
+                continue
+            if not _title_ok(signature, rows, index):
+                continue
+            hits = len(signature["required"]) + sum(_found(g, names) for g in optional) + has_title
+            total = len(signature["required"]) + len(optional) + has_title
+            found.append(Match(preset, index, headers, hits / total, hits))
+            break
+    found.sort(key=lambda m: (-m.score, -m.hits))  # sort is stable
+    return found
+
+
+def missing_groups(rows: List[List[str]], preset: Dict[str, Any]) -> List[List[str]]:
+    """The required header groups no row in the search window has, for a preset the user named."""
+    limit = min((preset.get("header") or {}).get("search_rows", SEARCH_ROWS), len(rows))
+    names = {normalise(c) for row in rows[:limit] for c in row if c.strip()}
+    return [g for g in preset["signature"]["required"] if not _found(g, names)]
+
+
+# -- cleaning --------------------------------------------------------------------------------
+
+
+@dataclass
+class TargetRows:
+    target: Dict[str, Any]
+    header: List[str]
+    rows: List[List[str]] = field(default_factory=list)
+
+
+@dataclass
+class Cleaned:
+    targets: List[TargetRows]
+    dropped: Dict[str, int]
+    no_target_values: Dict[str, List[str]]
+    rows_read: int
+
+
+def _positions(preset: Dict[str, Any], headers: List[str]) -> Dict[str, List[int]]:
+    """Output column -> the source positions to read it from (the first filled one wins)."""
+    names = [normalise(h) for h in headers]
+    out: Dict[str, List[int]] = {}
+    for column, spec in preset["columns"].items():
+        for alias in spec.get("from") or []:
+            if normalise(alias) in names:
+                out[column] = [names.index(normalise(alias))]
+                break
+        else:
+            index = spec.get("from_index")
+            if index is not None:
+                out[column] = [i for i in (index if isinstance(index, list) else [index]) if i < len(headers)]
+    return out
+
+
+def _read(row: List[str], positions: List[int]) -> str:
+    for i in positions:
+        if _cell(row, i).strip():
+            return _cell(row, i)
+    return ""
+
+
+def _level(sheet: Sheet, r: int, positions: List[int]) -> int:
+    col = next((i for i in positions if _cell(sheet.rows[r], i).strip()), positions[0] if positions else 0)
+    text = _cell(sheet.rows[r], col)
+    indent = 0
+    if sheet.indents and r < len(sheet.indents) and col < len(sheet.indents[r]):
+        indent = sheet.indents[r][col]
+    return indent * 100 + len(text) - len(text.lstrip(" "))
+
+
+def _group_rows(sheet: Sheet, kept: List[int], preset: Dict[str, Any], positions) -> set:
+    spec = preset.get("groups")
+    if not spec:
+        return set()
+    methods = spec["method"] if isinstance(spec["method"], list) else [spec["method"]]
+    at = positions.get(spec["column"], [])
+    numeric = [
+        positions[c]
+        for c, s in preset["columns"].items()
+        if c in positions
+        and set([s.get("parse")] if isinstance(s.get("parse"), str) else s.get("parse") or [])
+        & set(NUMERIC_PARSERS)
+    ]
+    names = {normalise(n) for n in spec.get("names") or []}
+    out = set()
+    for i, r in enumerate(kept):
+        row = sheet.rows[r]
+        name = _read(row, at)
+        if not name.strip():
+            continue
+        if "empty_amounts" in methods and numeric and not any(_read(row, p).strip() for p in numeric):
+            out.add(r)
+        elif "known_names" in methods and normalise(name) in names:
+            out.add(r)
+        elif (
+            "indent" in methods
+            and i + 1 < len(kept)
+            and _level(sheet, kept[i + 1], at) > _level(sheet, r, at)
+        ):
+            out.add(r)
+    return out
+
+
+def _when(when: Optional[Dict[str, Any]], values: Dict[str, str]) -> bool:
+    if not when:
+        return True
+    value = values.get(when["column"], "")
+    if "in" in when:
+        return normalise(value) in {normalise(v) for v in when["in"]}
+    if "not_in" in when:
+        return normalise(value) not in {normalise(v) for v in when["not_in"]}
+    number = _number(value) if value else None
+    return number is not None and number != 0
+
+
+def clean(sheet: Sheet, match: Match) -> Cleaned:
+    """The sheet's data rows, read the preset's way and split by target: title, blank, repeated
+    header, total, footer and group rows out, and counted."""
+    preset = match.preset
+    depth = (preset.get("header") or {}).get("rows", 1)
+    skip = preset.get("skip") or {}
+    positions = _positions(preset, match.headers)
+    header_row = [normalise(c) for c in sheet.rows[match.header_row]]
+    dropped = dict.fromkeys(DROP_REASONS, 0)
+    dropped["title"] = match.header_row
+
+    kept: List[int] = []
+    first_data = match.header_row + depth
+    for r in range(first_data, len(sheet.rows)):
+        row = sheet.rows[r]
+        filled = [c for c in row if c.strip()]
+        if not filled:
+            dropped["blank"] += 1
+        elif [normalise(c) for c in row[: len(header_row)]] + [""] * (
+            len(header_row) - len(row)
+        ) == header_row:
+            dropped["repeated_header"] += 1
+        elif _like(filled[0], skip.get("totals") or []):
+            dropped["totals"] += 1
+        elif len(filled) == 1 and _like(filled[0], skip.get("footer") or []):
+            dropped["footer"] += 1
+        else:
+            kept.append(r)
+
+    groups = _group_rows(sheet, kept, preset, positions)
+    group_spec = preset.get("groups") or {}
+    carry = group_spec.get("carry_to")
+    current_group = ""
+    built: List[Dict[str, str]] = []
+    for r in kept:
+        row = sheet.rows[r]
+        if r in groups:
+            dropped["groups"] += 1
+            current_group = _read(row, positions.get(group_spec["column"], [])).strip()
+            continue
+        values = {}
+        for column, spec in preset["columns"].items():
+            if column == carry:
+                values[column] = current_group
+            else:
+                values[column] = parse(_read(row, positions.get(column, [])), spec)
+        for column, spec in preset["columns"].items():
+            if spec.get("fallback") and not values[column]:
+                values[column] = values.get(spec["fallback"], "")
+        built.append(values)
+
+    if preset.get("distinct_by"):
+        seen, unique = set(), []
+        for values in built:
+            key = tuple(values[c] for c in preset["distinct_by"])
+            if key in seen:
+                dropped["merged"] += 1
+                continue
+            seen.add(key)
+            unique.append(values)
+        built = unique
+
+    columns = list(preset["columns"])
+    targets = [TargetRows(t, list(columns)) for t in preset["targets"]]
+    split_on = list(dict.fromkeys(t["when"]["column"] for t in preset["targets"] if t.get("when")))
+    no_target: Dict[str, List[str]] = {}
+    for values in built:
+        for target in targets:
+            if _when(target.target.get("when"), values):
+                target.rows.append([values[c] for c in columns])
+                break
+        else:
+            dropped["no_target"] += 1
+            for column in split_on:
+                seen_values = no_target.setdefault(column, [])
+                if values[column] not in seen_values and len(seen_values) < 20:
+                    seen_values.append(values[column])
+    return Cleaned(targets, dropped, no_target, rows_read=max(len(sheet.rows) - first_data, 0))
+
+
+def missing_inputs(target: Dict[str, Any], values: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The inputs a target needs that the user hasn't given yet."""
+    return [i for i in target.get("inputs") or [] if not str((values or {}).get(i["name"]) or "").strip()]
+
+
+def finish(rows: TargetRows, values: Dict[str, Any]) -> TargetRows:
+    """The target's rows with its constant and input columns added."""
+    extra: List[Tuple[str, str]] = [(c["column"], c["value"]) for c in rows.target.get("constants") or []]
+    extra += [(i["column"], str(values[i["name"]]).strip()) for i in rows.target.get("inputs") or []]
+    return TargetRows(
+        rows.target,
+        rows.header + [column for column, _value in extra],
+        [row + [value for _column, value in extra] for row in rows.rows],
+    )

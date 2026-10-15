@@ -14,6 +14,7 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.plugins.core import import_presets as presets
+from frappe_assistant_core.plugins.core.import_presets import Sheet
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
 
@@ -410,3 +411,278 @@ class TestLoad(BaseAssistantTest):
         self.assertIn("odd.one", logged)
         self.assertIn("odd.two", logged)
         self.assertEqual(log.call_count, 2)
+
+
+LEDGERS = {
+    "id": "test.ledgers",
+    "system": "Test",
+    "export": "Ledgers",
+    "signature": {"required": [["Name"], ["Under", "Group Name"]], "optional": [["GSTIN"], ["Missing"]]},
+    "skip": {"totals": ["Grand Total"], "footer": ["* GMT*"]},
+    "columns": {
+        "Name": {"from": ["Name"]},
+        "Group": {"from": ["Under", "Group Name"]},
+        "GSTIN": {"from": ["GSTIN"]},
+        "Opening": {"from": ["Opening Balance"], "parse": "amount"},
+    },
+    "targets": [
+        {
+            "name": "Customers",
+            "when": {"column": "Group", "in": ["Sundry Debtors"]},
+            "doctype": "Customer",
+            "mapping": {"Name": "customer_name"},
+            "constants": [{"column": "Customer Type", "field": "customer_type", "value": "Company"}],
+        },
+        {
+            "name": "Suppliers",
+            "when": {"column": "Group", "in": ["sundry creditors"]},
+            "doctype": "Supplier",
+            "mapping": {"Name": "supplier_name"},
+        },
+        {
+            "name": "Accounts",
+            "when": {"column": "Group", "not_in": ["Sundry Debtors", "Sundry Creditors"]},
+            "doctype": "Account",
+            "mapping": {"Name": "account_name"},
+            "inputs": [{"name": "company", "column": "Company", "field": "company", "ask": "Which company?"}],
+        },
+    ],
+}
+
+TB = {
+    "id": "test.tb",
+    "system": "Test",
+    "export": "Trial balance",
+    "signature": {"required": [["Debit"], ["Credit"]], "title": ["*trial balance*"]},
+    "skip": {"totals": ["Grand Total", "Total for *"]},
+    "groups": {"method": ["indent", "known_names"], "column": "Account", "names": ["Current Assets"]},
+    "columns": {
+        "Account": {"from": ["Particulars"], "from_index": [0, 1]},
+        "Debit": {"from": ["Debit"], "parse": "amount"},
+        "Credit": {"from": ["Credit"], "parse": "amount"},
+    },
+    "targets": [
+        {
+            "name": "Trial balance",
+            "engine": "opening_balances",
+            "columns": {"Account": "account", "Debit": "debit", "Credit": "credit"},
+        }
+    ],
+}
+
+
+def ledger_rows():
+    return [
+        ["Acme Pvt Ltd", "", ""],
+        ["Ledgers", "", ""],
+        ["", "", ""],
+        ["Name", "Under", "GSTIN", "Opening Balance"],
+        ["Ravi Traders", "Sundry Debtors", "29ABCDE1234F1Z5", "1,000 Dr"],
+        ["", "", "", ""],
+        ["Mehta Supplies", "Sundry Creditors", "", "500 Cr"],
+        ["Name", "Under", "GSTIN", "Opening Balance"],
+        ["HDFC Bank", "Bank Accounts", "", ""],
+        ["Grand Total", "", "", "500"],
+        [" Wednesday, March 04, 2026 10:53 PM GMTZ"],
+    ]
+
+
+class TestMatch(BaseAssistantTest):
+    def test_the_header_row_is_found_under_title_rows(self):
+        for titles in (0, 3, 4):
+            rows = [["Title"]] * titles + [["Name", "Under", "GSTIN"], ["A", "Sundry Debtors", ""]]
+            found = presets.match_sheet(rows, [LEDGERS])
+            self.assertEqual(found[0].header_row, titles)
+
+    def test_score_counts_optional_groups(self):
+        found = presets.match_sheet([["Name", "Under", "GSTIN"]], [LEDGERS])[0]
+        self.assertAlmostEqual(found.score, 3 / 4)
+
+    def test_no_match_without_every_required_group(self):
+        self.assertEqual(presets.match_sheet([["Name", "GSTIN"], ["A", "B"]], [LEDGERS]), [])
+        self.assertEqual(presets.missing_groups([["Name", "GSTIN"]], LEDGERS), [["Under", "Group Name"]])
+
+    def test_a_title_pattern_is_required_above_the_header(self):
+        rows = [["Particulars", "Debit", "Credit"], ["Cash", "10", ""]]
+        self.assertEqual(presets.match_sheet(rows, [TB]), [])
+        found = presets.match_sheet([["Acme"], ["Trial Balance"], *rows], [TB])
+        self.assertEqual(found[0].header_row, 2)
+
+    def test_header_aliases_are_compared_normalised(self):
+        found = presets.match_sheet([["NAME", "Group  Name"]], [LEDGERS])
+        self.assertEqual(len(found), 1)
+
+    def test_ties_keep_load_order(self):
+        twin = {**LEDGERS, "id": "test.twin"}
+        found = presets.match_sheet([["Name", "Under", "GSTIN"]], [LEDGERS, twin])
+        self.assertEqual([m.preset["id"] for m in found], ["test.ledgers", "test.twin"])
+
+    def test_two_row_headers_join_with_the_cell_above(self):
+        two = {
+            **TB,
+            "header": {"rows": 2},
+            "signature": {"required": [["Closing Balance › Debit"], ["Closing Balance › Credit"]]},
+        }
+        rows = [["Particulars", "Closing Balance", ""], ["", "Debit", "Credit"], ["Cash", "10", ""]]
+        found = presets.match_sheet(rows, [two])[0]
+        self.assertEqual(
+            found.headers, ["Particulars", "Closing Balance › Debit", "Closing Balance › Credit"]
+        )
+
+
+class TestClean(BaseAssistantTest):
+    def _clean(self, rows, preset, indents=None):
+        found = presets.match_sheet(rows, [preset])[0]
+        return presets.clean(Sheet("Sheet1", rows, indents), found)
+
+    def test_rows_are_split_by_target_and_junk_is_counted(self):
+        cleaned = self._clean(ledger_rows(), LEDGERS)
+        by_name = {t.target["name"]: t for t in cleaned.targets}
+        self.assertEqual(by_name["Customers"].header, ["Name", "Group", "GSTIN", "Opening"])
+        self.assertEqual(
+            by_name["Customers"].rows, [["Ravi Traders", "Sundry Debtors", "29ABCDE1234F1Z5", "1000"]]
+        )
+        self.assertEqual(by_name["Suppliers"].rows[0][3], "-500")
+        self.assertEqual(by_name["Accounts"].rows[0][0], "HDFC Bank")
+        self.assertEqual(
+            {k: v for k, v in cleaned.dropped.items() if v},
+            {"title": 3, "blank": 1, "repeated_header": 1, "totals": 1, "footer": 1},
+        )
+        self.assertEqual(cleaned.rows_read, 7)
+
+    def test_a_row_that_fits_no_target_is_counted_with_its_value(self):
+        only_customers = {**LEDGERS, "targets": LEDGERS["targets"][:1]}
+        cleaned = self._clean(ledger_rows(), only_customers)
+        self.assertEqual(cleaned.dropped["no_target"], 2)
+        self.assertEqual(cleaned.no_target_values, {"Group": ["Sundry Creditors", "Bank Accounts"]})
+
+    def test_known_group_names_and_indented_groups_are_dropped(self):
+        rows = [
+            ["Acme"],
+            ["Trial Balance"],
+            ["Particulars", "Debit", "Credit"],
+            ["Current Assets", "1,500.00", ""],
+            ["  Cash", "500.00", ""],
+            ["Fixed Assets", "1,000.00", ""],
+            ["   Furniture", "1,000.00", ""],
+            ["Capital Account", "", "1,500.00"],
+            ["Grand Total", "1,500.00", "1,500.00"],
+        ]
+        cleaned = self._clean(rows, TB)
+        accounts = [r[0] for r in cleaned.targets[0].rows]
+        self.assertEqual(accounts, ["Cash", "Furniture", "Capital Account"])
+        self.assertEqual(cleaned.dropped["groups"], 2)
+
+    def test_xlsx_cell_indents_mark_groups(self):
+        rows = [
+            ["Trial Balance"],
+            ["Particulars", "Debit", "Credit"],
+            ["Loans", "", "900"],
+            ["Bank Loan", "", "900"],
+        ]
+        indents = [[0], [0, 0, 0], [0, 0, 0], [2, 0, 0]]
+        cleaned = self._clean(rows, TB, indents)
+        self.assertEqual([r[0] for r in cleaned.targets[0].rows], ["Bank Loan"])
+
+    def test_empty_amount_groups_carry_their_name_down(self):
+        aging = {
+            "id": "test.aging",
+            "system": "Test",
+            "export": "Aging",
+            "signature": {"required": [["Customer"], ["Total"]]},
+            "skip": {"totals": ["TOTAL", "Total for *"]},
+            "groups": {"method": "empty_amounts", "column": "Customer", "carry_to": "Parent"},
+            "columns": {
+                "Customer": {"from": ["Customer"]},
+                "Parent": {"from": []},
+                "Total": {"from": ["Total"], "parse": "amount"},
+            },
+            "targets": [
+                {
+                    "name": "Open",
+                    "engine": "opening_invoices",
+                    "invoice_type": "Sales",
+                    "when": {"column": "Total", "nonzero": True},
+                    "columns": {"Customer": "party", "Total": "outstanding_amount"},
+                }
+            ],
+        }
+        rows = [
+            ["Customer", "CURRENT", "Total"],
+            ["Amy's Bird Sanctuary", "239.00", "239.00"],
+            ["Freeman Sporting Goods", "", ""],
+            ["0969 Ocean View Road", "477.50", "477.50"],
+            ["Total for Freeman Sporting Goods", "477.50", "$477.50"],
+            ["Zero Co", "0.00", "0.00"],
+            ["TOTAL", "", "-$716.50"],
+        ]
+        cleaned = self._clean(rows, aging)
+        self.assertEqual(
+            cleaned.targets[0].rows,
+            [
+                ["Amy's Bird Sanctuary", "", "239"],
+                ["0969 Ocean View Road", "Freeman Sporting Goods", "477.5"],
+            ],
+        )
+        self.assertEqual(cleaned.dropped["groups"], 1)
+        self.assertEqual(cleaned.dropped["no_target"], 1)  # Zero Co: nonzero filter
+
+    def test_distinct_by_keeps_the_first_row_of_each_document(self):
+        lines = {
+            "id": "test.lines",
+            "system": "Test",
+            "export": "Invoices",
+            "signature": {"required": [["Invoice Number"], ["Balance"]]},
+            "distinct_by": ["Invoice"],
+            "columns": {
+                "Invoice": {"from": ["Invoice Number"]},
+                "Balance": {"from": ["Balance"], "parse": "amount"},
+            },
+            "targets": [
+                {
+                    "name": "Open",
+                    "engine": "opening_invoices",
+                    "invoice_type": "Sales",
+                    "columns": {"Balance": "outstanding_amount", "Invoice": "invoice_number"},
+                }
+            ],
+        }
+        rows = [["Invoice Number", "Balance"], ["INV-1", "100"], ["INV-1", "100"], ["INV-2", "50"]]
+        cleaned = self._clean(rows, lines)
+        self.assertEqual(cleaned.targets[0].rows, [["INV-1", "100"], ["INV-2", "50"]])
+        self.assertEqual(cleaned.dropped["merged"], 1)
+
+    def test_fallback_and_from_index_list(self):
+        spec = {
+            "id": "test.fb",
+            "system": "Test",
+            "export": "Accounts",
+            "signature": {"required": [["Type"]]},
+            "columns": {
+                "Account": {"from": [], "from_index": [0, 1]},
+                "Type": {"from": ["Type"]},
+                "Parent": {"from": ["Full"], "parse": "parent_segment", "fallback": "Type"},
+            },
+            "targets": [{"name": "A", "doctype": "Account", "mapping": {"Account": "account_name"}}],
+        }
+        rows = [
+            ["", "", "Type", "Full"],
+            ["", "Checking", "Bank", "Checking"],
+            ["Truck", "", "Fixed", "Assets:Truck"],
+        ]
+        cleaned = self._clean(rows, spec)
+        self.assertEqual(
+            cleaned.targets[0].rows, [["Checking", "Bank", "Bank"], ["Truck", "Fixed", "Assets"]]
+        )
+
+    def test_finish_adds_constants_and_inputs(self):
+        cleaned = self._clean(ledger_rows(), LEDGERS)
+        accounts = next(t for t in cleaned.targets if t.target["name"] == "Accounts")
+        self.assertEqual(presets.missing_inputs(accounts.target, {}), accounts.target["inputs"])
+        self.assertEqual(presets.missing_inputs(accounts.target, {"company": "PBSPL"}), [])
+        done = presets.finish(accounts, {"company": "PBSPL"})
+        self.assertEqual(done.header[-1], "Company")
+        self.assertEqual(done.rows[0][-1], "PBSPL")
+        customers = presets.finish(cleaned.targets[0], {})
+        self.assertEqual(customers.header[-1], "Customer Type")
+        self.assertEqual(customers.rows[0][-1], "Company")
