@@ -456,14 +456,18 @@ class TestUndo(UndoToolsCase):
         progress["updated_on"] = str(add_to_date(now_datetime(), seconds=-seconds))
         doc.db_set("progress", frappe.as_json(progress), update_modified=False)
 
+    def _queue_holds_no_job(self):
+        """The queue answers that it has no job (as in production between the enqueue and the
+        commit), whether or not Redis is up: _job_running's own code runs."""
+        return patch("frappe.utils.background_jobs.is_job_enqueued", return_value=False)
+
     def test_a_queued_job_is_reported_running_though_the_queue_does_not_hold_it_yet(self):
-        # Neither inline nor _job_running patched: the queue really has no job, as in production
-        # between the enqueue and the commit.
+        # Neither inline nor _job_running patched: the queue has no job.
         session, names = self._session_with_groups(2)
         before = self._doc(session).status
         preview = self._preview(session)
 
-        with patch.object(import_undo.frappe, "enqueue") as enqueue:
+        with patch.object(import_undo.frappe, "enqueue") as enqueue, self._queue_holds_no_job():
             reply = self._undo(session, preview["records"], preview["blocked"], "all")
             followed = self._undo(session, preview["records"], preview["blocked"], "all")
 
@@ -486,7 +490,7 @@ class TestUndo(UndoToolsCase):
             self._undo(session, preview["records"], preview["blocked"], "all")
         self._silent_for(session, import_undo.STALL_SECONDS + 60)
 
-        with patch.object(import_undo.frappe, "enqueue") as enqueue:
+        with patch.object(import_undo.frappe, "enqueue") as enqueue, self._queue_holds_no_job():
             reply = self._undo(session, 0, 0, "unblocked")
 
         enqueue.assert_not_called()
@@ -510,7 +514,8 @@ class TestUndo(UndoToolsCase):
         self.assertEqual(rerun["result"]["state"], "running")
         self._silent_for(session, import_undo.STALL_SECONDS + 60)
 
-        reply = self._undo(session, preview["records"], preview["blocked"], "unblocked")
+        with self._queue_holds_no_job():
+            reply = self._undo(session, preview["records"], preview["blocked"], "unblocked")
 
         self.assertTrue(reply["success"], reply)
         self.assertEqual(reply["result"]["state"], "stopped")
