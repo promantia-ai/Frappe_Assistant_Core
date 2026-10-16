@@ -464,3 +464,60 @@ class TestUpdateRun(UpdateCase):
 
         self.assertFalse(response["success"], response)
         self.assertFalse(self._doc(session).data_imports)
+
+
+class TestPrices(UpdateCase):
+    def test_prices_update_keyed_on_item_code_and_price_list(self):
+        group = frappe.get_all("Item Group", filters={"is_group": 0}, pluck="name", limit=1)[0]
+        item = frappe.get_doc(
+            {"doctype": "Item", "item_code": f"ITEM-{self.tag}", "item_group": group, "stock_uom": "Nos"}
+        ).insert()
+        lists = []
+        for label in ("Retail", "Wholesale"):
+            price_list = frappe.get_doc(
+                {
+                    "doctype": "Price List",
+                    "price_list_name": f"{label} {self.tag}",
+                    "currency": "INR",
+                    "selling": 1,
+                }
+            ).insert()
+            lists.append(price_list.name)
+            frappe.get_doc(
+                {
+                    "doctype": "Item Price",
+                    "item_code": item.name,
+                    "price_list": price_list.name,
+                    "price_list_rate": 100,
+                }
+            ).insert()
+        file_doc = self._csv([f"{item.name},{lists[1]},125"], "Item Code,Price List,Rate")
+        session = self._run("start_import_session", {"file_id": file_doc.name, "import_type": UPDATE})
+        session = session["result"]["session_id"]
+        mapped = self._run(
+            "set_column_mapping",
+            {
+                "session": session,
+                "mapping": {"Item Code": "item_code", "Price List": "price_list", "Rate": "price_list_rate"},
+                "doctype": "Item Price",
+                "match_on": ["item_code", "price_list"],
+            },
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        label = frappe.get_meta("Item Price").get_label("price_list_rate")
+        self.assertEqual(checked["update"]["by_field"], {label: 1}, checked)
+
+        response = self._run(
+            "start_import",
+            {"session": session, "doctype": "Item Price", "rows": checked["ready"], "import_type": UPDATE},
+        )
+
+        self.assertTrue(response["success"], response)
+        rates = frappe.get_all(
+            "Item Price",
+            filters={"item_code": item.name},
+            fields=["price_list", "price_list_rate"],
+            as_list=True,
+        )
+        self.assertEqual(dict(rates), {lists[0]: 100, lists[1]: 125})
