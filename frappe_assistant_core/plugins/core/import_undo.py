@@ -26,6 +26,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 import frappe
 from frappe import _
 from frappe.utils import cint, get_datetime, get_time, getdate
+from pypika import Case
 from pypika import functions as fn
 from pypika.terms import Tuple as Row
 
@@ -256,14 +257,17 @@ def _not_among(doctype_col, name_col, groups: Dict[str, List[str]]) -> list:
 def _contacts_inside(in_set: Set[Key], session) -> Set[Key]:
     """Contacts and Addresses made with the import, whose every Dynamic Link row points to a
     record in the set: ERPNext deletes them with the party, so they don't block. Made with the
-    import: by the session's user, at most UNDO_GRACE_MINUTES after it finished, and not edited
-    since by another user or after that. One added or edited by someone else, or later, is not
-    the import's as it stands and blocks as linked, or the undo would delete it silently.
+    import: by the session's user, after the session started and at most UNDO_GRACE_MINUTES
+    after it finished, and not edited since by another user or after that. One made before the
+    session (a pre-existing party's, whose links a merge rewrote by SQL), added or edited by
+    someone else, or later, is not the import's as it stands and blocks as linked, or the undo
+    would delete it silently.
     Batched: one query per set doctype for the candidates, one per Contact/Address doctype for
     all their rows and one for their owners and edits."""
     if session is None or not frappe.db.exists("DocType", "Dynamic Link"):
         return set()
     user = session.user or session.owner
+    started = get_datetime(session.creation)
     latest = finished_at(session) + timedelta(minutes=UNDO_GRACE_MINUTES)
     link = frappe.qb.DocType("Dynamic Link")
     candidates: Set[Key] = set()
@@ -301,6 +305,7 @@ def _contacts_inside(in_set: Set[Key], session) -> Set[Key]:
                 if (
                     row.owner != user
                     or (row.modified_by and row.modified_by != user)
+                    or get_datetime(row.creation) < started
                     or get_datetime(row.creation) > latest
                     or get_datetime(row.modified) > latest
                 ):
@@ -403,7 +408,15 @@ def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List
             # A ledger row is named by its voucher, which the user can cancel, and counted by it
             by_voucher = linker_dt is None
         if by_voucher:
-            voucher = fn.Concat(table.voucher_type, VOUCHER_SEPARATOR, table.voucher_no)
+            # "Doctype|name" of the voucher, or of the row itself when it names no voucher
+            voucher = (
+                Case()
+                .when(
+                    (fn.Coalesce(table.voucher_type, "") != "") & (fn.Coalesce(table.voucher_no, "") != ""),
+                    fn.Concat(table.voucher_type, VOUCHER_SEPARATOR, table.voucher_no),
+                )
+                .else_(fn.Concat(link_dt, VOUCHER_SEPARATOR, table.name))
+            )
             columns = [
                 target.as_("target"),
                 fn.Count(voucher).distinct().as_("n"),
@@ -1025,7 +1038,13 @@ def start(session, mode: str, fingerprint: Optional[str] = None) -> str:
     if reason:
         raise UndoProblem(reason)
     undo = _undo_options(session)
-    undo.pop("result", None)
+    earlier = undo.pop("result", None)
+    if earlier:
+        # A Partially Undone session undone again: what the earlier passes removed is kept
+        undo["earlier"] = {
+            "removed": list(earlier.get("removed") or []),
+            "already_removed_records": list(earlier.get("already_removed_records") or []),
+        }
     undo.pop("stopped", None)
     undo.pop("approved_fingerprint", None)
     if fingerprint:
@@ -1099,8 +1118,8 @@ def _run(session, mode: str) -> None:
     records = delete_order(plan.to_delete)
     total, deleted = len(records), 0
     removed: List[str] = []  # the labels of the records removed, kept in the result
-    # Records deleted by hand before the undo: counted, and their Created Records rows dropped
-    gone = len(plan.already_removed)
+    # Records deleted by hand before the undo: named, and their Created Records rows dropped
+    gone = [_label(r.doctype, r.name) for r in plan.already_removed]
     for record in plan.already_removed:
         _drop_row(session, record)
     held: Set[Key] = set()  # kept because a record that failed needs them
@@ -1114,7 +1133,8 @@ def _run(session, mode: str) -> None:
                 deleted += 1
                 removed.append(_label(record.doctype, record.name))
             elif error is GONE:
-                gone += 1  # deleted by hand since the plan: already removed, not a failure
+                # deleted by hand since the plan: already removed, not a failure
+                gone.append(_label(record.doctype, record.name))
             else:
                 failed = Blocker(record, "delete_failed", error)
                 blocked.append(failed)
@@ -1141,7 +1161,7 @@ def _run(session, mode: str) -> None:
     else:
         message, outcome, failed_rows = _("Removed {0} records.").format(deleted), "Success", 0
     if gone:
-        message += " " + _("{0} were already removed by hand.").format(gone)
+        message += " " + _("{0} were already removed by hand.").format(len(gone))
     session.log_step(STEP, outcome, message, rows_ok=deleted, rows_failed=failed_rows)
     session.save()
 
@@ -1152,21 +1172,27 @@ def _store_result(
     kept: List[Tuple[Record, str]],
     blocked: List[Blocker],
     removed: Iterable[str] = (),
-    already_removed: int = 0,
+    already_removed: Iterable[str] = (),
 ) -> None:
     """The undo's result, kept on the session: the counts, the blocked records with their
-    reasons, and the labels ("Doctype name") of the records removed, which outlive their Created
-    Records rows."""
+    reasons, and the labels ("Doctype name") of the records removed and of those already
+    removed by hand, which outlive their Created Records rows. Those lists start with what the
+    session's earlier passes removed (undo["earlier"], kept by start()); ``deleted`` is this
+    pass's count."""
     undo = _undo_options(session)
+    earlier = undo.get("earlier") or {}
+    removed = list(earlier.get("removed") or []) + list(removed)
+    gone = list(earlier.get("already_removed_records") or []) + list(already_removed)
     undo["result"] = {
         "deleted": deleted,
-        "already_removed": already_removed,
+        "already_removed": len(gone),
         "kept": len(kept),
         "blocked": [
             {"record": _label(b.record.doctype, b.record.name), "reason": b.reason, "detail": b.detail}
             for b in blocked
         ],
-        "removed": list(removed),
+        "removed": removed,
+        "already_removed_records": gone,
     }
     _store_undo(session, undo)
 
@@ -1278,6 +1304,8 @@ def _remove(session, record: Record):
         try:
             doc = frappe.get_doc(record.doctype, record.name)
         except frappe.DoesNotExistError:
+            if frappe.db.exists(record.doctype, record.name):
+                raise  # something else it needs is missing: a failure, with its message
             frappe.local.message_log = list(frappe.local.message_log or [])[:since]  # "not found"
             return GONE
         if doc.docstatus == 1:
@@ -1360,5 +1388,6 @@ def report(session) -> dict:
         "kept": cint(result.get("kept")),
         "blocked": list(result.get("blocked") or []),
         "removed": list(result.get("removed") or []),
+        "already_removed_records": list(result.get("already_removed_records") or []),
         "reason": undo.get("stopped") if state == "stopped" else None,
     }

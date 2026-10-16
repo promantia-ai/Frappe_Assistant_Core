@@ -48,6 +48,7 @@ The approval card shows `records`, `blocked` and `mode`, so the user sees what g
   "blocked": [{"record": "Customer Acme Ltd", "reason": "linked", "detail": "Sales Invoice SINV-0042 links to it."}],
   "blocked_count": 1,
   "removed": ["Customer Beta Traders", "Customer Gamma Stores", "(245 more)"],
+  "already_removed_records": ["Customer Delta Mart"],
   "reason": null,
   "message": "Removed 247 records; 1 kept. 1 can't be removed. 1 were already removed by hand."
 }
@@ -55,7 +56,7 @@ The approval card shows `records`, `blocked` and `mode`, so the user sees what g
 
 The `blocked` list shows the first 50 records and ends with one entry whose `record` is "(N more)" (its `reason` and `detail` are null) when longer; `blocked_count` is the full number.
 
-`removed` names the records the undo removed ("DocType name"), the first 50 and then "(N more)"; `deleted` is the full number. The session keeps the list after the undo, so a later call still says what went. `already_removed` counts records of the import that were deleted by hand before the undo reached them: they are not an error.
+`removed` names the records the undo removed ("DocType name"), the first 50 and then "(N more)". The session keeps the list after the undo, so a later call still says what went; when a Partially Undone session is undone again, the list keeps what the earlier passes removed and adds this pass's, while `deleted` counts this pass only. `already_removed` counts records of the import that were deleted by hand before the undo reached them (they are not an error), and `already_removed_records` names them, capped the same way.
 
 ## When it can't start
 

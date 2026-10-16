@@ -24,6 +24,15 @@ from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
 
 
+def _capped(labels) -> list:
+    """Up to MAX_LISTED labels, then "(N more)"."""
+    labels = list(labels)
+    shown = labels[: import_undo.MAX_LISTED]
+    if len(labels) > len(shown):
+        shown.append(_("({0} more)").format(len(labels) - len(shown)))
+    return shown
+
+
 class UndoImport(BaseTool):
     """Delete the records an import session created, as previewed, or report the undo's progress."""
 
@@ -176,6 +185,7 @@ class UndoImport(BaseTool):
                 "kept": 0,
                 "blocked": [],
                 "removed": [],
+                "already_removed_records": [],
                 "reason": None,
             }
         else:
@@ -187,10 +197,7 @@ class UndoImport(BaseTool):
             shown.append(
                 {"record": _("({0} more)").format(len(blocked) - len(shown)), "reason": None, "detail": None}
             )
-        removed = list(report["removed"])
-        removed_shown = removed[: import_undo.MAX_LISTED]
-        if len(removed) > len(removed_shown):
-            removed_shown.append(_("({0} more)").format(len(removed) - len(removed_shown)))
+        removed_shown = _capped(report["removed"])
         state = report["state"]
         if state == "running":
             message = _(
@@ -219,6 +226,7 @@ class UndoImport(BaseTool):
             "blocked": shown,
             "blocked_count": len(blocked),
             "removed": removed_shown,
+            "already_removed_records": _capped(report["already_removed_records"]),
             "reason": report["reason"],
             "message": message,
         }

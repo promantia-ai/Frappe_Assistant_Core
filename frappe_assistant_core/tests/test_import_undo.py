@@ -691,6 +691,26 @@ class TestBlockers(BlockerCase):
         )
         self.assertIn(f"Journal Entry UNDO-JE-OUT-{self.tag}", blocker.detail)
 
+    def test_a_ledger_row_with_an_empty_voucher_is_named_itself(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        entry = self._gl_entry("novoucher", alpha, "", "")
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"GL Entry {entry}"))
+
+    def test_ledger_rows_without_a_voucher_are_counted(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        self._gl_entry("outside", alpha, "Journal Entry", f"UNDO-JE-OUT-{self.tag}")
+        self._gl_entry("null", alpha, None, None)
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual(blocker.reason, "linked")
+        self.assertIn("(1 more)", blocker.detail)
+
     def test_a_contact_of_records_in_the_set_only_does_not_block(self):
         session = self._session_with_customers()
         n = self._names()
@@ -760,6 +780,20 @@ class TestBlockers(BlockerCase):
             minutes=import_undo.UNDO_GRACE_MINUTES + 1
         )
         frappe.db.set_value("Contact", contact, "modified", late, update_modified=False)
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Contact {contact}"))
+
+    def test_a_contact_older_than_the_session_blocks(self):
+        # A pre-existing Customer merged into an imported one: Frappe rewrites its Contact's
+        # Dynamic Link by SQL, so the Contact, made before the import by the same user and not
+        # modified since, links only to the imported Customer.
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        contact = self._contact(alpha)
+        before = get_datetime(self._doc(session).creation) - timedelta(minutes=1)
+        frappe.db.set_value("Contact", contact, "creation", before, update_modified=False)
 
         blocker = self._blocked(self._plan(session))[("Customer", alpha)]
 
@@ -1078,6 +1112,7 @@ class TestRun(BlockerCase):
             (result["deleted"], result["already_removed"], result["kept"], result["blocked"]), (1, 1, 0, [])
         )
         self.assertEqual(result["removed"], [f"Customer Group {names[1]}"])
+        self.assertEqual(result["already_removed_records"], [f"Customer Group {names[0]}"])
         self.assertFalse(self._exists("Customer Group", names[1]))
 
     def test_a_record_deleted_by_hand_before_the_undo_is_already_removed(self):
@@ -1091,6 +1126,53 @@ class TestRun(BlockerCase):
         self.assertEqual(doc.created_records, [])
         result = self._undo_options(session)["result"]
         self.assertEqual((result["deleted"], result["already_removed"], result["blocked"]), (1, 1, []))
+        self.assertEqual(result["already_removed_records"], [f"Customer Group {names[0]}"])
+
+    def test_a_not_found_error_for_a_record_that_exists_is_delete_failed(self):
+        session, names = self._session_with_groups(2)
+        real = frappe.get_doc
+
+        def get_doc(*args, **kwargs):
+            if args[1:2] == (names[0],):
+                raise frappe.DoesNotExistError("A linked record was not found")
+            return real(*args, **kwargs)
+
+        with patch.object(import_undo.frappe, "get_doc", side_effect=get_doc):
+            self._start(session, "unblocked")
+
+        self.assertTrue(self._exists("Customer Group", names[0]))
+        result = self._undo_options(session)["result"]
+        self.assertEqual(
+            [(b["record"], b["reason"]) for b in result["blocked"]],
+            [(f"Customer Group {names[0]}", "delete_failed")],
+        )
+        self.assertIn("not found", result["blocked"][0]["detail"])
+        self.assertEqual((result["already_removed"], result["already_removed_records"]), (0, []))
+        self.assertIn(names[0], [r.record_name for r in self._doc(session).created_records])
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+
+    def test_a_second_pass_keeps_what_the_first_removed(self):
+        session, names = self._session_with_groups(3)
+        frappe.db.delete("Customer Group", {"name": names[2]})  # by hand, before the undo
+        self._edited_by_someone_else("Customer Group", names[0])
+        self._start(session, "unblocked")
+        first = self._undo_options(session)["result"]
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+        self.assertEqual(first["removed"], [f"Customer Group {names[1]}"])
+
+        # the blocker is cleared, and the rest is undone
+        frappe.db.set_value("Customer Group", names[0], "modified_by", "Administrator", update_modified=False)
+        self._start(session, "unblocked")
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undone", doc.steps[-1].message)
+        result = self._undo_options(session)["result"]
+        self.assertEqual(result["deleted"], 1)  # this pass
+        self.assertEqual(result["removed"], [f"Customer Group {names[1]}", f"Customer Group {names[0]}"])
+        self.assertEqual(
+            (result["already_removed"], result["already_removed_records"]),
+            (1, [f"Customer Group {names[2]}"]),
+        )
 
     def test_unblocked_mode_keeps_blocked_records_and_removes_the_rest(self):
         session, names = self._session_with_groups(2)
@@ -1147,7 +1229,15 @@ class TestRun(BlockerCase):
         result = self._undo_options(session)["result"]
         removed = [f"Customer Group {n}" for n in reversed(names)]  # in delete order
         self.assertEqual(
-            result, {"deleted": 3, "already_removed": 0, "kept": 0, "blocked": [], "removed": removed}
+            result,
+            {
+                "deleted": 3,
+                "already_removed": 0,
+                "kept": 0,
+                "blocked": [],
+                "removed": removed,
+                "already_removed_records": [],
+            },
         )
         report = import_undo.report(self._doc(session))
         self.assertEqual(
@@ -1160,6 +1250,7 @@ class TestRun(BlockerCase):
                 "kept": 0,
                 "blocked": [],
                 "removed": removed,
+                "already_removed_records": [],
                 "reason": None,
             },
         )

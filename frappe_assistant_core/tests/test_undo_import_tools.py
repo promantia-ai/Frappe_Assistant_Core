@@ -490,6 +490,20 @@ class TestUndo(UndoToolsCase):
 
         self.assertEqual(set(again["result"]["removed"]), labels)
 
+    def test_the_reply_names_the_records_already_removed_capped(self):
+        session, names = self._session_with_groups(3)
+        for name in names[:2]:
+            frappe.db.delete("Customer Group", {"name": name})  # by hand, before the undo
+
+        with patch.object(import_undo, "MAX_LISTED", 1):
+            reply = self._approved(session, "all")
+
+        result = reply["result"]
+        self.assertEqual((result["state"], result["deleted"], result["already_removed"]), ("done", 1, 2))
+        self.assertEqual(len(result["already_removed_records"]), 2)  # 1 and "(1 more)"
+        self.assertIn(result["already_removed_records"][0], {f"Customer Group {n}" for n in names[:2]})
+        self.assertEqual(result["already_removed_records"][-1], "(1 more)")
+
     def test_undo_after_the_job_reports_the_result(self):
         session, names = self._session_with_groups(2)
         preview = self._preview(session)
