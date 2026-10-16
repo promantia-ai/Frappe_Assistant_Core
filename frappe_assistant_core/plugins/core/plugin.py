@@ -78,6 +78,8 @@ class CorePlugin(BasePlugin):
             "import_opening_stock",
             "set_opening_invoices",
             "import_opening_invoices",
+            "set_opening_balances",
+            "import_opening_balances",
         ]
 
     def validate_environment(self):

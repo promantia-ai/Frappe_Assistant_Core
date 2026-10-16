@@ -31,6 +31,7 @@ from frappe_assistant_core.plugins.core.import_mapping import save_mapping, sess
 from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
 
 TARGET = "Stock Reconciliation"
+IMPORT_TOOL = "import_opening_stock"
 ITEM_TABLE = "Stock Reconciliation Item"
 PURPOSE = "Opening Stock"
 DEFAULT_TIME = "23:59:59"
@@ -154,7 +155,12 @@ def setup(
         raise OpeningStockProblem(
             _("This session brought in opening invoices. Start a new session for the stock.")
         )
-    options.pop("opening_invoices", None)  # a session is one kind of special import
+    if (options.get("opening_balances") or {}).get("created"):
+        raise OpeningStockProblem(
+            _("This session brought in opening balances. Start a new session for the stock.")
+        )
+    for other in ("opening_invoices", "opening_balances"):  # a session is one kind of special import
+        options.pop(other, None)
     if settings(session).get("created"):  # what the earlier documents held stays on the session
         stock["created"] = settings(session)["created"]
     options["opening_stock"] = stock

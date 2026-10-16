@@ -223,3 +223,33 @@ of those names and add it to the entry's `data` before calling `create_document`
 
 Sales: the invoice number becomes the invoice name. Purchase: it becomes the supplier's bill number
 (`bill_no`), and ERPNext names the invoice.
+
+## Opening balances
+
+For a session set up with `set_opening_balances`, the check first adds up the file's debits and
+credits. If they don't balance, nothing is ready: one group "Debits and credits don't balance" is
+reported with no fixes, because the file itself is wrong. Correct the file (or its balance column)
+and check again. The reply's `balance` has `debit`, `credit`, `difference` and `balanced`.
+
+The rows are then checked: an account not in the chart of accounts (`map` it to an existing
+account, or `leave_out`; accounts are not created), an account of another company, a group account
+or a disabled account (each account is its own group; `map` to an enabled ledger account of the
+company, or `leave_out`), the Temporary Opening account, an account in another currency, a row with
+both a debit and a credit, a negative amount, the same account twice, and a totals row. Profit and
+Loss accounts are one group when `profit_and_loss` is `stop`: `leave_out`, or run
+`set_opening_balances` again with `retained_earnings` and a retained-earnings account. ERPNext's own
+validation of the whole entry then runs inside a rolled-back save and submit, and a refusal is
+reported on the rows. The check also refuses to run when the company has a submitted Period Closing
+Voucher, when an opening Journal Entry already exists at the cut-off date, or when the session
+already made its entry.
+
+The reply's `opening_balances` has `cut_off`, `rows`, `lines` (the entry's lines), `total_debit`,
+`total_credit`, `covered` (a count of the Receivable, Payable and Stock rows, left to the other opening
+imports),
+`balancing` (the Temporary Opening line) and `profit_and_loss`. Pass `rows`, `total_debit` and
+`total_credit` to `import_opening_balances`.
+
+When an account is missing and the company has no transactions at all, `opening_balances` also
+carries `chart_hint`: if the chart of accounts should be replaced to match the old system, do it
+first with ERPNext's Chart of Accounts Importer, which refuses once any transaction exists. It is
+absent otherwise.

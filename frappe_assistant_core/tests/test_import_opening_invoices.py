@@ -1218,3 +1218,31 @@ class TestFinalFixes(OpeningInvoicesCase):
     def test_the_check_never_commits_when_not_asked_to(self):
         session, _ = self._ready(self._lines(5))
         self.assertEqual(self._count_commits(session, False), [])
+
+
+class TestSessionIsOneKind(OpeningInvoicesCase):
+    def _with_balances(self, session, **kept):
+        doc = self._doc(session)
+        options = frappe.parse_json(doc.template_options or "{}") or {}
+        options["opening_balances"] = {"company": self.company, **kept}
+        doc.db_set("template_options", frappe.as_json(options))
+
+    def test_a_stale_balances_setting_is_dropped(self):
+        session = self._session(self._lines_for_setup())
+        self._with_balances(session)
+        self.assertTrue(self._setup(session)["success"])
+        options = frappe.parse_json(self._doc(session).template_options)
+        self.assertNotIn("opening_balances", options)
+        self.assertIn("opening_invoices", options)
+
+    def test_balances_already_made_refuse_the_invoices_setup(self):
+        session = self._session(self._lines_for_setup())
+        self._with_balances(session, created={"ACC-JV-1": {}})
+        before = self._doc(session).template_options
+        reply = self._setup(session)
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("opening balances", reply["error"])
+        self.assertEqual(self._doc(session).template_options, before)
+
+    def _lines_for_setup(self):
+        return [f"{self.customer},{self._number(1)},{self.date},,10"]
