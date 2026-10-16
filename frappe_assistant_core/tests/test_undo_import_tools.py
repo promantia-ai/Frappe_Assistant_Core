@@ -1,0 +1,497 @@
+# Frappe Assistant Core - AI Assistant integration for Frappe Framework
+# Copyright (C) 2025 Paul Clinton
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+"""
+The two tools that undo an import (#34002): preview_import_undo (read-only) and undo_import
+(write, one approval). Both are thin wrappers over import_undo, whose engine is tested in
+test_import_undo.py: these tests cover what the tools say and refuse.
+
+The run tests need the bench's Redis queue up: import_undo.start enqueues with deduplicate=True,
+and Frappe asks the queue for the job before it honours now=True.
+"""
+
+import unittest
+from unittest.mock import patch
+
+import frappe
+from frappe.utils import add_to_date, now_datetime
+
+from frappe_assistant_core.core.tool_registry import get_tool_registry
+from frappe_assistant_core.plugins.core import import_undo
+from frappe_assistant_core.plugins.core.plugin import CorePlugin
+from frappe_assistant_core.tests.test_import_undo import BlockerCase
+from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class UndoToolsCase(BlockerCase):
+    def setUp(self):
+        super().setUp()
+        self.registry = get_tool_registry()
+
+    def _preview(self, session):
+        reply = self._run("preview_import_undo", {"session": session})
+        self.assertTrue(reply["success"], reply)
+        return reply["result"]
+
+    def _undo(self, session, records, blocked, mode):
+        return self._run(
+            "undo_import", {"session": session, "records": records, "blocked": blocked, "mode": mode}
+        )
+
+    def _approved(self, session, mode):
+        """Preview the session, then undo it with the figures the preview gave."""
+        preview = self._preview(session)
+        return self._undo(session, preview["records"], preview["blocked"], mode)
+
+    def _exists(self, doctype, name):
+        return bool(frappe.db.exists(doctype, name))
+
+    def _stored_fingerprint(self, session):
+        options = frappe.parse_json(self._doc(session).template_options or "{}") or {}
+        return (options.get("undo") or {}).get("fingerprint")
+
+    def _a_kept_group_session(self):
+        """Three Customers and their Customer Group; alpha was changed by someone else."""
+        session = self._session_with_customers()
+        self._add(session, "Customer Group", self.group, "All Customer Groups")
+        self._edited_by_someone_else("Customer", self._names()["alpha"])
+        return session
+
+
+class TestPreview(UndoToolsCase):
+    def test_preview_lists_counts_by_doctype_and_the_blockers(self):
+        session = self._a_kept_group_session()
+        alpha = self._names()["alpha"]
+
+        preview = self._preview(session)
+
+        self.assertEqual((preview["session"], preview["status"]), (session, self._doc(session).status))
+        self.assertEqual((preview["can_undo"], preview["refused"]), (True, None))
+        self.assertEqual((preview["records"], preview["blocked"], preview["kept"]), (4, 1, 1))
+        self.assertEqual(
+            {(d["doctype"], d["count"]) for d in preview["by_doctype"]},
+            {("Customer", 3), ("Customer Group", 1)},
+        )
+        customers = next(d for d in preview["by_doctype"] if d["doctype"] == "Customer")
+        self.assertEqual(set(customers["sample"]), set(self._names().values()) - {self._names()["beta"]})
+        self.assertEqual(len(preview["blockers"]), 1)
+        blockers = preview["blockers"][0]
+        self.assertEqual((blockers["reason"], blockers["count"]), ("changed", 1))
+        self.assertEqual(blockers["doctypes"], ["Customer"])
+        self.assertEqual(blockers["sample"][0]["record"], f"Customer {alpha}")
+        self.assertEqual(
+            preview["kept_records"],
+            [
+                {
+                    "record": f"Customer Group {self.group}",
+                    "kept_because": preview["kept_records"][0]["kept_because"],
+                }
+            ],
+        )
+        self.assertIn(alpha, preview["kept_records"][0]["kept_because"])
+        self.assertEqual(preview["already_removed"], 0)
+        self.assertTrue(preview["next"])
+
+    def test_preview_names_what_each_blocker_is_blocked_by(self):
+        session, names = self._session_with_groups(2)
+        outside = self._outside_customer(names[0])
+
+        preview = self._preview(session)
+
+        self.assertEqual((preview["records"], preview["blocked"], preview["kept"]), (2, 1, 0))
+        blockers = preview["blockers"][0]
+        self.assertEqual((blockers["reason"], blockers["count"]), ("linked", 1))
+        self.assertEqual(
+            {k: blockers["sample"][0][k] for k in ("record", "blocked_by")},
+            {"record": f"Customer Group {names[0]}", "blocked_by": f"Customer {outside}"},
+        )
+        self.assertEqual(preview["window"]["days"], 30)
+        self.assertEqual(
+            preview["window"]["ends_on"], str(import_undo.window_ends(self._doc(session)).date())
+        )
+
+    def test_preview_stores_the_fingerprint_on_the_session(self):
+        session, _names = self._session_with_groups(2)
+        before = self._doc(session).status
+
+        self._preview(session)
+
+        self.assertEqual(self._stored_fingerprint(session), self._plan(session).fingerprint)
+        self.assertEqual(self._doc(session).status, before)
+
+    def test_preview_is_capped_for_a_long_list(self):
+        session, names = self._session_with_groups(60)
+        for name in names:
+            self._edited_by_someone_else("Customer Group", name)
+
+        preview = self._preview(session)
+
+        self.assertEqual((preview["records"], preview["blocked"]), (60, 60))
+        sample = preview["by_doctype"][0]["sample"]
+        self.assertEqual(len(sample), import_undo.MAX_NAMED + 1)
+        self.assertEqual(sample[-1], "(50 more)")
+        blockers = preview["blockers"][0]
+        self.assertEqual(blockers["count"], 60)
+        self.assertEqual(len(blockers["sample"]), import_undo.MAX_NAMED + 1)
+        self.assertEqual(blockers["sample"][-1]["record"], "(50 more)")
+
+    def test_preview_caps_the_doctype_and_kept_lists(self):
+        session = self._a_kept_group_session()  # Customers, their group kept for alpha
+        top, child = f"Undo Top {self.tag}", f"Undo Child {self.tag}"
+        for name, parent, is_group in ((top, "All Customer Groups", 1), (child, top, 0)):
+            frappe.get_doc(
+                {
+                    "doctype": "Customer Group",
+                    "customer_group_name": name,
+                    "parent_customer_group": parent,
+                    "is_group": is_group,
+                }
+            ).insert()
+            self._add(session, "Customer Group", name, parent)
+        self._edited_by_someone_else("Customer Group", child)  # blocked, so its parent is kept
+
+        with patch.object(import_undo, "MAX_LISTED", 1):
+            preview = self._preview(session)
+
+        self.assertEqual(preview["kept"], 2)
+        self.assertEqual(len(preview["by_doctype"]), 2)
+        self.assertEqual(preview["by_doctype"][-1]["doctype"], "(1 more)")
+        self.assertEqual(preview["by_doctype"][-1]["count"], 3)
+        self.assertEqual(len(preview["kept_records"]), 2)
+        self.assertEqual(preview["kept_records"][-1], {"record": "(1 more)"})
+
+    def test_preview_refuses_a_session_past_the_window_with_the_reason(self):
+        session = self._session_with_customers()
+        self._set_step_time(session, add_to_date(now_datetime(), hours=-1))
+
+        with patch.dict(frappe.conf, {"fac_import_undo_days": 0}):
+            preview = self._preview(session)
+
+        self.assertFalse(preview["can_undo"])
+        self.assertIn("0 days", preview["refused"])
+        self.assertEqual(preview["window"]["days"], 0)
+        self.assertIsNone(self._stored_fingerprint(session))
+
+    def test_preview_refuses_without_write_permission_on_the_session(self):
+        session, _names = self._session_with_groups(1)
+        frappe.set_user(self.make_throwaway_user("undo", roles=("Sales User",)))
+
+        reply = self._run("preview_import_undo", {"session": session})
+
+        self.assertFalse(reply["success"])
+        self.assertEqual(reply["result"]["error_type"], "permission_error")
+
+    def test_preview_does_not_change_the_session_status(self):
+        session = self._a_kept_group_session()
+        before = self._doc(session)
+
+        self._preview(session)
+        after = self._doc(session)
+
+        self.assertEqual(after.status, before.status)
+        self.assertEqual(len(after.steps), len(before.steps))
+        self.assertTrue(self._exists("Customer", self._names()["alpha"]))
+
+    def test_preview_notes_an_update_session(self):
+        session = self._session_with_customers()
+        self._doc(session).db_set("import_type", "Update Existing Records")
+
+        preview = self._preview(session)
+
+        self.assertFalse(preview["can_undo"])
+        self.assertEqual(preview["records"], 0)
+        self.assertIn("never deleted", preview["import_type_note"])
+        self.assertIn("never deleted", preview["refused"])
+
+    def test_preview_of_a_session_that_is_all_blocked_cannot_undo(self):
+        session, names = self._session_with_groups(1)
+        self._edited_by_someone_else("Customer Group", names[0])
+
+        preview = self._preview(session)
+
+        self.assertFalse(preview["can_undo"])
+        self.assertEqual((preview["records"], preview["blocked"]), (1, 1))
+        self.assertTrue(preview["refused"])
+
+    def test_preview_counts_records_already_removed(self):
+        session, names = self._session_with_groups(2)
+        frappe.db.delete("Customer Group", {"name": names[0]})
+
+        preview = self._preview(session)
+
+        self.assertEqual((preview["records"], preview["already_removed"]), (1, 1))
+        self.assertTrue(preview["can_undo"])
+
+
+class TestUndo(UndoToolsCase):
+    def test_undo_refuses_figures_that_do_not_match_the_preview(self):
+        session, names = self._session_with_groups(2)
+        before = self._doc(session).status
+        self._preview(session)
+
+        for records, blocked in ((99, 0), (2, 1)):
+            reply = self._undo(session, records, blocked, "all")
+
+            self.assertFalse(reply["success"])
+            self.assertIn("preview_import_undo", reply["error"])
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+        self.assertEqual(self._doc(session).status, before)
+
+    def test_undo_refuses_when_the_records_changed_since_the_preview(self):
+        session, names = self._session_with_groups(2)
+        preview = self._preview(session)
+        # Same count, different records: one removed by hand, another made and listed.
+        frappe.db.delete("Customer Group", {"name": names[0]})
+        other = frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": f"Other {self.tag}",
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+        self._add(session, "Customer Group", other.name, "All Customer Groups")
+        self.assertEqual(len(self._plan(session).records), preview["records"])
+
+        reply = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        self.assertFalse(reply["success"])
+        self.assertIn("changed since", reply["error"])
+        self.assertIn("preview_import_undo", reply["error"])
+        self.assertTrue(self._exists("Customer Group", names[1]))
+
+    def test_undo_refuses_a_session_that_was_never_previewed(self):
+        session, names = self._session_with_groups(2)
+
+        reply = self._undo(session, 2, 0, "all")
+
+        self.assertFalse(reply["success"])
+        self.assertIn("preview_import_undo", reply["error"])
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+
+    def test_mode_all_with_blockers_refuses_and_names_unblocked(self):
+        session, names = self._session_with_groups(2)
+        self._outside_customer(names[0])
+        before = self._doc(session).status
+
+        reply = self._approved(session, "all")
+
+        self.assertFalse(reply["success"])
+        self.assertIn("unblocked", reply["error"])
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+        self.assertEqual(self._doc(session).status, before)
+
+    def test_mode_unblocked_runs_the_job(self):
+        session, names = self._session_with_groups(2)
+        self._outside_customer(names[0])
+
+        reply = self._approved(session, "unblocked")
+
+        self.assertTrue(reply["success"], reply)
+        result = reply["result"]
+        self.assertEqual(
+            (result["state"], result["deleted"], result["status"]), ("done", 1, "Partially Undone")
+        )
+        self.assertEqual(result["blocked"][0]["record"], f"Customer Group {names[0]}")
+        self.assertEqual(result["blocked"][0]["reason"], "linked")
+        self.assertTrue(self._exists("Customer Group", names[0]))
+        self.assertFalse(self._exists("Customer Group", names[1]))
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+
+    def test_mode_all_without_blockers_removes_everything(self):
+        session, names = self._session_with_groups(2)
+
+        reply = self._approved(session, "all")
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual((reply["result"]["state"], reply["result"]["deleted"]), ("done", 2))
+        self.assertEqual(reply["result"]["status"], "Undone")
+        self.assertFalse(any(self._exists("Customer Group", n) for n in names))
+
+    def test_undo_reports_progress_on_a_second_call_and_does_not_run_twice(self):
+        session, names = self._session_with_groups(2)
+        preview = self._preview(session)
+
+        with patch.object(import_undo, "_job_running", return_value=True), patch.object(
+            import_undo.frappe, "enqueue"
+        ) as first:
+            started = self._undo(session, preview["records"], preview["blocked"], "all")
+        self.assertEqual(first.call_count, 1)
+        self.assertTrue(started["success"], started)
+        self.assertEqual(started["result"]["state"], "running")
+        self.assertEqual(self._doc(session).status, "Undoing")
+
+        with patch.object(import_undo, "_job_running", return_value=True), patch.object(
+            import_undo.frappe, "enqueue"
+        ) as again:
+            second = self._undo(session, preview["records"], preview["blocked"], "all")
+            third = self._undo(session, 0, 0, "unblocked")  # whatever it echoes: it only reports
+
+        again.assert_not_called()
+        for reply in (second, third):
+            self.assertTrue(reply["success"], reply)
+            self.assertEqual((reply["result"]["state"], reply["result"]["status"]), ("running", "Undoing"))
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+
+    def test_undo_after_the_job_reports_the_result(self):
+        session, names = self._session_with_groups(2)
+        preview = self._preview(session)
+        self.assertTrue(self._undo(session, preview["records"], preview["blocked"], "all")["success"])
+        self.assertEqual(self._doc(session).status, "Undone")
+
+        with patch.object(import_undo.frappe, "enqueue") as enqueue:
+            reply = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        enqueue.assert_not_called()
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(
+            (reply["result"]["state"], reply["result"]["status"], reply["result"]["deleted"]),
+            ("done", "Undone", 2),
+        )
+
+    def test_a_partially_undone_session_reports_the_result_for_the_old_figures(self):
+        session, names = self._session_with_groups(2)
+        self._outside_customer(names[0])
+        preview = self._preview(session)
+        self.assertTrue(self._undo(session, preview["records"], preview["blocked"], "unblocked")["success"])
+
+        with patch.object(import_undo.frappe, "enqueue") as enqueue:
+            reply = self._undo(session, preview["records"], preview["blocked"], "unblocked")
+
+        enqueue.assert_not_called()
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual((reply["result"]["state"], reply["result"]["deleted"]), ("done", 1))
+
+    def test_a_stopped_job_is_reported_and_undo_can_be_run_again(self):
+        session, names = self._session_with_groups(2)
+        preview = self._preview(session)
+        with patch.object(import_undo, "_job_running", return_value=True), patch.object(
+            import_undo.frappe, "enqueue"
+        ):
+            self._undo(session, preview["records"], preview["blocked"], "all")
+
+        with patch.object(import_undo, "_job_running", return_value=False):
+            reply = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(reply["result"]["state"], "stopped")
+        self.assertTrue(reply["result"]["reason"])
+        self.assertNotEqual(self._doc(session).status, "Undoing")
+        self.assertTrue(self._undo(session, preview["records"], preview["blocked"], "all")["success"])
+        self.assertFalse(any(self._exists("Customer Group", n) for n in names))
+
+    def test_undo_refuses_an_undone_session(self):
+        session, names = self._session_with_groups(2)
+        preview = self._preview(session)
+        self._doc(session).db_set("status", "Undone")  # no result stored: nothing to report
+
+        reply = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        self.assertFalse(reply["success"])
+        self.assertIn("already undone", reply["error"])
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+
+    def test_undo_refuses_a_session_past_the_window(self):
+        session = self._session_with_customers()
+        preview = self._preview(session)
+        self._set_step_time(session, add_to_date(now_datetime(), hours=-1))
+
+        with patch.dict(frappe.conf, {"fac_import_undo_days": 0}):
+            reply = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        self.assertFalse(reply["success"])
+        self.assertIn("0 days", reply["error"])
+
+    def test_undo_refuses_without_write_permission_on_the_session(self):
+        session, names = self._session_with_groups(1)
+        frappe.set_user(self.make_throwaway_user("undo", roles=("Sales User",)))
+
+        reply = self._undo(session, 1, 0, "all")
+
+        self.assertFalse(reply["success"])
+        self.assertEqual(reply["result"]["error_type"], "permission_error")
+        frappe.set_user("Administrator")
+        self.assertTrue(self._exists("Customer Group", names[0]))
+
+    def test_undo_refuses_when_every_record_is_blocked(self):
+        session, names = self._session_with_groups(1)
+        self._edited_by_someone_else("Customer Group", names[0])
+        before = self._doc(session).status
+
+        reply = self._approved(session, "unblocked")
+
+        self.assertFalse(reply["success"])
+        self.assertIn("nothing", reply["error"].lower())
+        self.assertEqual(self._doc(session).status, before)
+        self.assertTrue(self._exists("Customer Group", names[0]))
+
+    def test_the_reply_lists_are_capped(self):
+        session, names = self._session_with_groups(3)
+        for name in names:
+            self._edited_by_someone_else("Customer Group", name)
+        frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": f"Spare {self.tag}",
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+        self._add(session, "Customer Group", f"Spare {self.tag}", "All Customer Groups")
+
+        with patch.object(import_undo, "MAX_LISTED", 2):
+            reply = self._approved(session, "unblocked")
+
+        self.assertTrue(reply["success"], reply)
+        blocked = reply["result"]["blocked"]
+        self.assertEqual(len(blocked), 3)  # 2 and "(1 more)"
+        self.assertEqual(blocked[-1], {"record": "(1 more)"})
+
+
+class TestRegistration(UndoToolsCase):
+    def test_tools_are_registered(self):
+        self.assertIn("preview_import_undo", CorePlugin().get_tools())
+        self.assertIn("undo_import", CorePlugin().get_tools())
+        for name in ("preview_import_undo", "undo_import"):
+            tool = self.registry.get_tool(name)
+            self.assertIsNotNone(tool, name)
+            self.assertIsNone(tool.requires_permission)
+
+    def test_undo_import_is_a_write_tool_and_the_preview_is_not(self):
+        self.assertEqual(detect_tool_category(self.registry.get_tool("undo_import")), "write")
+        self.assertEqual(detect_tool_category(self.registry.get_tool("preview_import_undo")), "read_only")
+
+    def test_the_descriptions_carry_the_guidance(self):
+        preview = self.registry.get_tool("preview_import_undo").description
+        undo = self.registry.get_tool("undo_import").description
+        self.assertIn("undo_import", preview)
+        self.assertIn("blocked", preview)
+        for word in (
+            "preview_import_undo",
+            "records",
+            "blocked",
+            "mode",
+            "unblocked",
+            "background",
+            "restored",
+        ):
+            self.assertIn(word, undo)
+
+
+class TestUndoneSession(UndoToolsCase):
+    def test_an_undone_session_cannot_be_imported_again(self):
+        session, checked = self._ready_session()
+        self.assertTrue(self._import(session, checked)["success"])
+        self._approved(session, "all")
+        self.assertEqual(self._doc(session).status, "Undone")
+
+        again = self._import(session, checked)
+        rechecked = self._run("dry_run_import", {"session": session})
+
+        self.assertFalse(again["success"])
+        self.assertFalse(rechecked["success"])
+        self.assertEqual(self._imported(), set())

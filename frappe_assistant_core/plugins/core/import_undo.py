@@ -34,6 +34,8 @@ UPDATE = "Update Existing Records"
 UNDO_DAYS = 30  # default of the site config key fac_import_undo_days
 UNDO_GRACE_MINUTES = 10  # ERPNext may submit large opening documents in the background, later
 CHUNK = 1000  # names per IN (...) of one query
+MAX_LISTED = 50  # entries of a list in a tool reply; more are summed as "(N more)"
+MAX_NAMED = 10  # sample names under one entry of a tool reply
 # Ledger and repost entries (ERPNext's ignore_linked_doctypes on cancel): made by a voucher and
 # removed with it. A row whose voucher_type/voucher_no is in the undo set never blocks, whatever
 # it links to (the voucher, its Customer, its Account); a row made by a voucher outside does.
@@ -90,6 +92,11 @@ def _days() -> int:
 
 def window_ends(session) -> datetime:
     return finished_at(session) + timedelta(days=_days())
+
+
+def window(session) -> dict:
+    """The undo window as a tool reports it: its length in days and the day it ends."""
+    return {"days": _days(), "ends_on": str(window_ends(session).date())}
 
 
 def refusal(session) -> str:
@@ -812,6 +819,34 @@ def _store_undo(session, undo: dict) -> None:
     options = frappe.parse_json(session.template_options or "{}") or {}
     options["undo"] = undo
     session.template_options = frappe.as_json(options)
+
+
+def remember_fingerprint(session, fingerprint: str) -> None:
+    """Keep the plan the user was shown, so undo_import can tell the records changed since. Saved
+    on its own: the status, the steps and the modified time of the session stay as they are."""
+    undo = _undo_options(session)
+    undo["fingerprint"] = fingerprint
+    _store_undo(session, undo)
+    session.db_set("template_options", session.template_options, update_modified=False)
+
+
+def stored_fingerprint(session) -> Optional[str]:
+    return _undo_options(session).get("fingerprint")
+
+
+def has_result(session) -> bool:
+    """Whether an undo of this session ran to its end and left its result."""
+    return bool(_undo_options(session).get("result"))
+
+
+def plan_refusal(plan: Plan) -> str:
+    """Why this plan has nothing to remove, or "" when it has. A set whose records are all
+    removed already has something to do: the session is set as undone."""
+    if not plan.records and not plan.already_removed:
+        return plan.note or _("This session has no records to remove.")
+    if plan.records and not plan.to_delete:
+        return _("Nothing can be removed: every record is blocked or kept for one that is.")
+    return ""
 
 
 def _progress(state: str, done: int = 0, total: int = 0, deleted: int = 0) -> str:
