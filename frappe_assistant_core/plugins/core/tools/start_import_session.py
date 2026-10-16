@@ -54,7 +54,7 @@ class StartImportSession(BaseTool):
         )
         self.requires_permission = None  # file access and target permission are checked per call
         # what the user's file says reaches the model fenced (#34003)
-        self.untrusted_fields = ("file_name", "columns", "sheets", "sample_rows", "note", "error")
+        self.untrusted_fields = ("file_name", "sheet", "columns", "sheets", "sample_rows", "note", "error")
 
         self.inputSchema = {
             "type": "object",

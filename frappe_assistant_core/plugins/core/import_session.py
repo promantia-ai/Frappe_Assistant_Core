@@ -284,6 +284,14 @@ def _as_text(value: Any) -> str:
 DEFAULT_MAX_IMPORT_ROWS = 50000
 
 
+def holding_session(file_name: str) -> Optional[str]:
+    """The import session that holds File ``file_name``, or None (#34003). The import tools read
+    that file, showing the model its headers, samples and summaries only, never all its rows."""
+    return frappe.db.get_value(
+        "FAC Import Session", {"source_file": file_name, "status": ["!=", "Cancelled"]}, "name"
+    )
+
+
 def max_import_rows() -> int:
     """Assistant Core Settings' Max Rows per Import; 0 or blank is the default, never unlimited."""
     try:

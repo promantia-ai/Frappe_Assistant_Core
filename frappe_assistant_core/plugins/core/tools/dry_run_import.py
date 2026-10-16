@@ -60,7 +60,7 @@ class DryRunImport(BaseTool):
         )
         self.requires_permission = None  # checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)
-        self.untrusted_fields = ("groups", "masters_plan", "left_out", "problems", "error")
+        self.untrusted_fields = ("groups", "masters_plan", "left_out", "problems", "applied", "error")
 
         self.inputSchema = {
             "type": "object",

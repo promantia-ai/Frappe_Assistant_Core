@@ -23,6 +23,25 @@ from frappe_assistant_core.chat.api._untrusted import wrap_untrusted
 
 FENCE = "import_file_content"
 
+# Records that keep what a user's file said, and those fields: fenced when a tool returns the
+# record (get_document), as the import tools' replies are. A file checked in the background
+# leaves its result on the session, and the model reads it there.
+DOCUMENT_FIELDS = {
+    "FAC Import Session": (
+        "file_name",
+        "sheet",
+        "sheets",
+        "template_options",
+        "transformation_rules",
+        "excluded_rows",
+        "validation_summary",
+        "steps[].file",
+        "steps[].message",
+        "created_records[].record_name",
+        "created_records[].parent_record",
+    ),
+}
+
 
 def fence_fields(result: Dict[str, Any], fields: Iterable[str], kind: str = FENCE) -> Dict[str, Any]:
     """A copy of ``result`` with each of ``fields`` it holds replaced by its value, as JSON,
@@ -32,6 +51,12 @@ def fence_fields(result: Dict[str, Any], fields: Iterable[str], kind: str = FENC
     for path in fields:
         _fence(out, path.split("."), kind)
     return out
+
+
+def fence_document(doctype: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """``doc`` (a record as a dict) with the fields of DOCUMENT_FIELDS fenced, for its DocType."""
+    fields = DOCUMENT_FIELDS.get(doctype)
+    return fence_fields(doc, fields) if fields else doc
 
 
 def _fence(node: Dict[str, Any], parts: List[str], kind: str) -> None:

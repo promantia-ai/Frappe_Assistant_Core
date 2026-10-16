@@ -41,6 +41,7 @@ from frappe_assistant_core.plugins.core.import_session import (
     read_sheet_rows,
     read_spreadsheet,
     readable_session_file,
+    row_limit_problem,
 )
 
 SESSION_DOCTYPE = "FAC Import Session"
@@ -108,8 +109,6 @@ def special_engine(session):
 
 def check_can_run(session) -> None:
     """Raise DryRunProblem when ``session`` can't be checked yet, saying what to do."""
-    from frappe_assistant_core.plugins.core.import_session import row_limit_problem
-
     problem = row_limit_problem(row_count(session))  # a corrected file can be larger
     if problem:
         raise DryRunProblem(problem)
@@ -167,6 +166,10 @@ def link_site_file(session, file_doc) -> None:
                 ", ".join(own_columns(expected)), ", ".join(columns)
             )
         )
+    # Refused before the session changes: it keeps its file, and the rows it leaves out (#34003).
+    problem = row_limit_problem(read.chosen.row_count)
+    if problem:
+        raise FileProblem(problem)
     if expected:
         options = frappe.parse_json(session.template_options or "{}") or {}
         mapping = {
