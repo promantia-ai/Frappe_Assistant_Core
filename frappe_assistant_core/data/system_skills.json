@@ -210,6 +210,26 @@
     "content_file": "import_opening_balances.md"
   },
   {
+    "skill_id": "preview-import-undo-usage",
+    "title": "How to Use preview_import_undo",
+    "description": "Showing what undoing an import would delete before anything is deleted: the counts by DocType, the blockers and what each is blocked by, the kept records, the time window, and which mode to ask the user for",
+    "skill_type": "Tool Usage",
+    "linked_tool": "preview_import_undo",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "preview_import_undo.md"
+  },
+  {
+    "skill_id": "undo-import-usage",
+    "title": "How to Use undo_import",
+    "description": "Undoing an import with one approval: passing the preview's figures and the mode (all or unblocked), following the background undo by calling again, and reporting what was removed, kept and blocked",
+    "skill_type": "Tool Usage",
+    "linked_tool": "undo_import",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "undo_import.md"
+  },
+  {
     "skill_id": "migration-sign-off",
     "title": "Migration Sign-off",
     "description": "Use when asked what a data migration brought in, for a migration or sign-off report, whether the business can go live, or for a PDF of it: run the Migration Sign-off report, relay its numbers as they are, and make the PDF with generate_document.",
