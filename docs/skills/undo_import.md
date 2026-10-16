@@ -2,7 +2,7 @@
 
 ## Overview
 
-Deletes the records an import session created, in the background, after **one approval**. Submitted documents (opening invoices, opening stock, the opening Journal Entry) are cancelled first, then deleted. It is the step after `preview_import_undo`: only for records the user has seen previewed, and only when the user asks to undo the import.
+Deletes the records an import session created, in the background, after **one approval**. Submitted documents (opening invoices, opening stock, the opening Journal Entry) are cancelled first, then deleted, which also removes their own ledger entries (their GL, Payment Ledger and Stock Ledger entries): tell the user so before they approve. It is the step after `preview_import_undo`: only for records the user has seen previewed, and only when the user asks to undo the import.
 
 The audit trail stays: the session, its steps, the Data Imports and their logs. Only the business records are removed. A session that was fully undone cannot be imported again; the user starts a new import session.
 

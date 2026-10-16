@@ -687,6 +687,18 @@ def _cascade(records: List[Record], blocked: List[Blocker]) -> List[Tuple[Record
     return [(r, kept[_key(r)]) for r in records if _key(r) in kept]
 
 
+def submitted_count(records: List[Record]) -> int:
+    """How many of ``records`` are submitted: the undo cancels them and then deletes them, and
+    with them their own ledger entries (_remove_own_ledger_rows)."""
+    count = 0
+    for doctype, names in _by_doctype(records).items():
+        if not frappe.get_meta(doctype).is_submittable:
+            continue
+        for chunk in _chunks(names):
+            count += frappe.db.count(doctype, {"name": ["in", chunk], "docstatus": 1})
+    return count
+
+
 # -- build ---------------------------------------------------------------------------------
 
 

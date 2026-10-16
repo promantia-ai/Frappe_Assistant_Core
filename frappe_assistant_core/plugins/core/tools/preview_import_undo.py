@@ -192,14 +192,23 @@ class PreviewImportUndo(BaseTool):
         if refused:
             return _("Tell the user why nothing can be undone.")
         if plan.blocked:
-            return _(
+            text = _(
                 "Show the user the counts, the blockers and the kept records, and ask whether to stop or "
                 "to undo with mode unblocked. Then call undo_import with records, blocked and the mode."
             )
-        return _(
-            "Show the user the counts and the kept records. When they approve, call undo_import with "
-            "records, blocked and mode all."
-        )
+        else:
+            text = _(
+                "Show the user the counts and the kept records. When they approve, call undo_import with "
+                "records, blocked and mode all."
+            )
+        submitted = import_undo.submitted_count(plan.to_delete)
+        if submitted:
+            text += " " + _(
+                "{0} of them are submitted documents: they are cancelled, then deleted, which also removes "
+                "their own ledger entries (GL, Payment Ledger and Stock Ledger entries). Tell the user "
+                "before they approve."
+            ).format(submitted)
+        return text
 
 
 # Make sure class name matches file name for discovery

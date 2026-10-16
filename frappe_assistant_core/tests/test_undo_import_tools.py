@@ -243,6 +243,20 @@ class TestPreview(UndoToolsCase):
         self.assertEqual((preview["records"], preview["blocked"]), (1, 1))
         self.assertTrue(preview["refused"])
 
+    def test_preview_says_submitted_documents_go_with_their_ledger_entries(self):
+        session, _names = self._session_with_groups(1)
+        plain = self._preview(session)
+        self._journal_entry(session, nowdate())  # submitted
+
+        with self._books_open():
+            preview = self._preview(session)
+
+        self.assertNotIn("ledger", plain["next"])
+        self.assertEqual((preview["records"], preview["blocked"]), (2, 0))
+        self.assertIn("1 of them", preview["next"])
+        self.assertIn("cancelled, then deleted", preview["next"])
+        self.assertIn("ledger entries", preview["next"])
+
     def test_preview_counts_records_already_removed(self):
         session, names = self._session_with_groups(2)
         frappe.db.delete("Customer Group", {"name": names[0]})
@@ -614,6 +628,7 @@ class TestRegistration(UndoToolsCase):
             "unblocked",
             "background",
             "restored",
+            "ledger entries",
         ):
             self.assertIn(word, undo)
 
