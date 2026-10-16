@@ -21,6 +21,9 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_to_date, now_datetime, nowdate
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import (
+    FACImportSession,
+)
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.plugins.core.plugin import CorePlugin
@@ -257,6 +260,16 @@ class TestPreview(UndoToolsCase):
         self.assertIn("cancelled, then deleted", preview["next"])
         self.assertIn("ledger entries", preview["next"])
 
+    def test_preview_of_a_session_being_undone_points_to_undo_import(self):
+        session, _names = self._session_with_groups(1)
+        self._doc(session).db_set("status", "Undoing")
+
+        preview = self._preview(session)
+
+        self.assertFalse(preview["can_undo"])
+        self.assertIn("being undone", preview["refused"])
+        self.assertIn("undo_import", preview["next"])  # to follow it, or recover a stopped one
+
     def test_preview_counts_records_already_removed(self):
         session, names = self._session_with_groups(2)
         frappe.db.delete("Customer Group", {"name": names[0]})
@@ -424,6 +437,58 @@ class TestUndo(UndoToolsCase):
         self.assertTrue(reply["success"], reply)
         self.assertEqual((reply["result"]["state"], reply["result"]["status"]), ("running", "Undoing"))
         self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+
+    def test_a_racing_call_reading_an_old_snapshot_reports_the_undo_running(self):
+        session, names = self._session_with_groups(2)
+        preview = self._preview(session)
+        before = {k: self._doc(session).get(k) for k in ("status", "progress", "template_options")}
+        real_load = FACImportSession.load_from_db
+        real_start = import_undo.start
+
+        def snapshot(doc):
+            # This request's transaction reads the session as it was when the request began (a
+            # repeatable read); only a locking read sees the other call's commit.
+            real_load(doc)
+            if not doc.flags.for_update:
+                doc.update(before)
+
+        def raced(doc, mode, fingerprint=None):
+            # Another undo_import call started the undo, and committed, after this one loaded it.
+            frappe.db.set_value(
+                "FAC Import Session",
+                doc.name,
+                {"status": "Undoing", "progress": import_undo._progress("queued")},
+            )
+            return real_start(doc, mode, fingerprint=fingerprint)
+
+        with patch.object(FACImportSession, "load_from_db", snapshot), patch.object(
+            import_undo, "start", side_effect=raced
+        ), patch.object(import_undo.frappe, "enqueue") as enqueue, self._queue_holds_no_job():
+            reply = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        enqueue.assert_not_called()
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual((reply["result"]["state"], reply["result"]["status"]), ("running", "Undoing"))
+        self.assertIsNone(reply["result"]["reason"])
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+
+    def test_the_reply_lists_the_removed_records_capped_and_keeps_them(self):
+        session, names = self._session_with_groups(3)
+        labels = {f"Customer Group {n}" for n in names}
+
+        with patch.object(import_undo, "MAX_LISTED", 2):
+            reply = self._approved(session, "all")
+
+        result = reply["result"]
+        self.assertEqual((result["state"], result["deleted"], result["already_removed"]), ("done", 3, 0))
+        self.assertEqual(len(result["removed"]), 3)  # 2 and "(1 more)"
+        self.assertEqual(result["removed"][-1], "(1 more)")
+        self.assertLessEqual(set(result["removed"][:2]), labels)
+        self.assertEqual(self._doc(session).created_records, [])
+
+        again = self._undo(session, 0, 0, "all")  # the result, from the session
+
+        self.assertEqual(set(again["result"]["removed"]), labels)
 
     def test_undo_after_the_job_reports_the_result(self):
         session, names = self._session_with_groups(2)

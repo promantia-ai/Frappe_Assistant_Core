@@ -83,6 +83,16 @@ class PreviewImportUndo(BaseTool):
             }
             reason = import_undo.refusal(session)
             if reason:
+                if session.status == import_undo.UNDOING:
+                    # undo_import reports a running undo, and sets a stopped one back
+                    following = _(
+                        "Tell the user the undo is under way, then call undo_import (with the last "
+                        "preview's figures, or any) to follow it: it only reports while the undo "
+                        "runs, and if the undo stopped it says so and sets the session back, so the "
+                        "user can preview again."
+                    )
+                else:
+                    following = _("Tell the user why.")
                 return {
                     **reply,
                     "can_undo": False,
@@ -95,7 +105,7 @@ class PreviewImportUndo(BaseTool):
                     "kept_records": [],
                     "already_removed": 0,
                     "import_type_note": None,
-                    "next": _("Tell the user why."),
+                    "next": following,
                 }
             plan = import_undo.build_plan(session)
             reason = import_undo.plan_refusal(plan)

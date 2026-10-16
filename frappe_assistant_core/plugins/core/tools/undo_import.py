@@ -86,8 +86,12 @@ class UndoImport(BaseTool):
             return {"success": False, "error": str(e), "session": session_name}
         except frappe.TimestampMismatchError:
             # Another undo_import call saved the session first (it started the undo): report it.
+            # Read it with a locking read, which sees that call's commit: this transaction's
+            # snapshot predates it, and would show the session as before the undo, "stopped".
+            # Just queued, the job is reported running without asking the queue.
             frappe.clear_last_message()
-            return self._progress(session)
+            session.flags.for_update = True
+            return self._progress(session, queued=True)
         except Exception as e:
             frappe.log_error(title=_("Undo Import Error"), message=frappe.get_traceback())
             return {"success": False, "error": exception_message(e), "session": session_name}
@@ -166,10 +170,12 @@ class UndoImport(BaseTool):
             progress = frappe.parse_json(session.progress or "{}") or {}
             report = {
                 "state": "running",
-                "deleted": 0,
+                "deleted": cint(progress.get("deleted")),
+                "already_removed": 0,
                 "total": cint(progress.get("total")),
                 "kept": 0,
                 "blocked": [],
+                "removed": [],
                 "reason": None,
             }
         else:
@@ -181,6 +187,10 @@ class UndoImport(BaseTool):
             shown.append(
                 {"record": _("({0} more)").format(len(blocked) - len(shown)), "reason": None, "detail": None}
             )
+        removed = list(report["removed"])
+        removed_shown = removed[: import_undo.MAX_LISTED]
+        if len(removed) > len(removed_shown):
+            removed_shown.append(_("({0} more)").format(len(removed) - len(removed_shown)))
         state = report["state"]
         if state == "running":
             message = _(
@@ -191,6 +201,8 @@ class UndoImport(BaseTool):
             message = _("Removed {0} records; {1} kept.").format(report["deleted"], report["kept"])
             if blocked:
                 message += " " + _("{0} can't be removed.").format(len(blocked))
+            if report["already_removed"]:
+                message += " " + _("{0} were already removed by hand.").format(report["already_removed"])
             if already_ended:
                 message = _("This import was already undone. ") + message
         else:
@@ -201,10 +213,12 @@ class UndoImport(BaseTool):
             "status": session.status,
             "state": state,
             "deleted": report["deleted"],
+            "already_removed": report["already_removed"],
             "total": report["total"],
             "kept": report["kept"],
             "blocked": shown,
             "blocked_count": len(blocked),
+            "removed": removed_shown,
             "reason": report["reason"],
             "message": message,
         }
