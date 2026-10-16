@@ -56,7 +56,7 @@ Deleted records **cannot be restored**. Say so before the user approves.
 |---|---|
 | `records` | How many records the undo would look at: everything the session created that still exists. |
 | `by_doctype` | The count per DocType with up to 10 sample names. Long lists end with "(N more)". |
-| `blockers` | Records that can't be removed, grouped by `reason` with a count, the DocTypes and up to 10 sample records. Each sample has `record`, `detail` (a sentence saying why, to tell the user) and `blocked_by` (the document that blocks it). `blocked_by` is set only for `linked` blockers (it is null for the other reasons: read `detail`). Reasons: see below. |
+| `blockers` | Records that can't be removed, grouped by `reason` with a count, the DocTypes and up to 10 sample records. Each sample has `record`, `detail` (a sentence saying why, to tell the user) and `blocked_by` (the document that blocks it). `blocked_by` is set only for `linked` blockers (the linking document) and `later_stock` blockers (the stock transaction that moved the item afterwards); it is null for the other reasons: read `detail`. Reasons: see below. |
 | `kept` | How many records are not blocked themselves but stay because a blocked record needs them (a Customer Group of a kept Customer, the parent of a kept tree child). |
 | `kept_records` | Those records, each as `record` and `kept_because` (which blocked record keeps it). Show them to the user: they are not deleted either. |
 | `already_removed` | Records of the import that were deleted by hand since. They are not an error and are not counted in `records`. |
