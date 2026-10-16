@@ -4,8 +4,8 @@
 
 Recognises an export from another accounting system by its headers, cleans it, and opens one
 import session per target with the mapping applied. The user's upload is not changed: each
-session works on a cleaned copy attached to it. Call it first for any spreadsheet the user wants
-to import; when it answers `matched: false`, carry on with `start_import_session`.
+session works on a cleaned copy attached to it. Call it first for any spreadsheet (.csv, .xlsx,
+.xls) or Tally XML export (.xml) the user wants to import; when it answers `matched: false`, carry on with `start_import_session`.
 
 Systems: Tally Prime, Zoho Books, Busy, Marg, QuickBooks Online and Desktop. Exports: party
 masters, item masters, chart of accounts, trial balance, outstanding bills (or A/R and A/P
@@ -56,6 +56,37 @@ first call; tell the user which ones are current. Cell values in the reply (`sam
 - Each session's `session_id` is what `set_opening_*`, `set_column_mapping` and `dry_run_import`
   take as `session`.
 
+## Tally XML
+
+A Tally XML masters export (Alt+E > Masters, format XML) is read directly, with no need to
+convert it to Excel.
+
+1. Call `apply_import_preset(file_id)` without `parts`. The reply has `kind: "tally_xml"`,
+   `source` (the file and the company) and `parts`: ledgers (with a count per parent group), stock
+   items and groups, each with a count and up to 10 names. `other_records` counts what is not read
+   (vouchers, units, godowns). Both count tables show the 50 biggest entries and then one
+   "(N more)" entry. `warnings` says the tag names were not checked against a real export: show
+   it to the user. Nothing is written. Show the counts as a table and ask which parts
+   to import.
+2. Call it again with `parts`, e.g. `["ledgers", "stock_items"]`. The reply has `results`, one
+   per part, each with its `part` name. Each has the same keys as a spreadsheet's reply (`preset`,
+   `sessions`, `needs`, `dropped`, `warnings`, ...), or `error` for a part that could not be read,
+   or `skipped` when none of the requested `targets` is in that part. Ledgers open Customers
+   (Sundry Debtors) and Suppliers (Sundry Creditors); Accounts (every other group) needs the
+   company first. Stock items open Items.
+3. To answer `needs`, call again with the same `parts`, `values` and `targets` set to those
+   targets only.
+
+Groups are listed, not imported. A ledger's group decides where it goes: Sundry Debtors become
+Customers, Sundry Creditors become Suppliers, and every other group becomes an Account whose parent
+the dry run maps to an ERPNext group. Vouchers are not imported. For XML, `preset` and `sheet` are refused,
+and `parts` is refused for a spreadsheet. The Tally XML tag names were not checked against a real
+export, so the results carry the same "unverified" warning as the Tally presets: ask the user to
+check the mapping.
+
+An XML that is not a Tally export, or a Tally export with only vouchers, is refused; ask the user
+to export the masters from Tally, as XML or Excel.
+
 ## Not imported
 
 - Opening balances in party or ledger masters: bring openings in with the trial balance,
@@ -76,3 +107,4 @@ first call; tell the user which ones are current. Cell values in the reply (`sam
 | `preset` | No | A preset id, when the user says which export it is |
 | `values` | No | Answers to `needs`, by name |
 | `targets` | No | Open only these targets |
+| `parts` | No | Tally XML only: the parts to import, `ledgers` and/or `stock_items`. Leave it out to list the parts first. |

@@ -18,6 +18,7 @@ is the normal import flow.
 import csv
 import io
 import os
+from collections import Counter
 from typing import Any, Dict, List
 
 import frappe
@@ -25,6 +26,7 @@ from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
 from frappe_assistant_core.plugins.core import import_presets as presets
+from frappe_assistant_core.plugins.core import import_tally_xml as tally_xml
 from frappe_assistant_core.plugins.core.import_mapping import (
     DONT_IMPORT,
     SESSION_DOCTYPE,
@@ -43,6 +45,10 @@ from frappe_assistant_core.plugins.core.import_session import (
 
 # Translated where it is used, not here: _() at import time would run before the language is set.
 UNVERIFIED = "This preset was not checked against a real {0} export. Check the mapping with the user before the dry run."
+LISTING_UNVERIFIED = (
+    "The Tally XML tag names were read from Tally's documented layout and were not checked against a real "
+    "TallyPrime export. Check the mapping with the user before the dry run."
+)
 
 
 class ApplyImportPreset(BaseTool):
@@ -52,8 +58,13 @@ class ApplyImportPreset(BaseTool):
         super().__init__()
         self.name = "apply_import_preset"
         self.description = (
-            "Call this FIRST for any spreadsheet (.csv, .xlsx, .xls) the user wants to import, before "
-            "start_import_session. It recognises exports from Tally Prime, Zoho Books, Busy, Marg and "
+            "Call this FIRST for any spreadsheet (.csv, .xlsx, .xls) or Tally XML export (.xml) the user wants "
+            "to import, before start_import_session. For a Tally XML masters export, call it first without "
+            "parts: it lists the ledgers, stock items and groups with counts; show them and ask which parts "
+            "to import, then call again with parts (e.g. ['ledgers', 'stock_items']). Each part's result has "
+            "the same keys as a spreadsheet's, or an 'error' or 'skipped' instead of sessions. Groups are listed, not imported. "
+            "Show the listing's warnings to the user. "
+            "It recognises exports from Tally Prime, Zoho Books, Busy, Marg and "
             "QuickBooks (masters, chart of accounts, trial balance, outstanding bills, stock summary) by "
             "their headers, removes title, total and group rows, reads values like '8,45,000 Dr', "
             "'1-Apr-24' or '10 Nos', and opens one import session per target (for example Customers and "
@@ -95,6 +106,12 @@ class ApplyImportPreset(BaseTool):
                     "items": {"type": "string"},
                     "description": "Open only these targets (by name), e.g. after answering 'needs'.",
                 },
+                "parts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tally XML only: the parts to import, e.g. ['ledgers', 'stock_items']. "
+                    "Leave out to list the parts first.",
+                },
             },
         }
 
@@ -111,6 +128,9 @@ class ApplyImportPreset(BaseTool):
             isinstance(targets, list) and all(isinstance(t, str) for t in targets)
         ):
             return {"success": False, "error": _("targets must be a list of target names")}
+        parts = arguments.get("parts")
+        if parts is not None and not (isinstance(parts, list) and all(isinstance(p, str) for p in parts)):
+            return {"success": False, "error": _("parts must be a list of part names")}
 
         available = presets.load_presets()
         wanted = (arguments.get("preset") or "").strip()
@@ -129,6 +149,15 @@ class ApplyImportPreset(BaseTool):
 
         try:
             file_doc = find_site_file(file_id=file_id, file_url=file_url)
+        except FileProblem as e:
+            return {"success": False, "error": str(e)}
+        if tally_xml.is_xml(file_doc):
+            if arguments.get("preset") or arguments.get("sheet"):
+                return {"success": False, "error": _("preset and sheet are not used for Tally XML files.")}
+            return self._tally_xml(file_doc, arguments)
+        if parts is not None:
+            return {"success": False, "error": _("parts is only for Tally XML files.")}
+        try:
             # Only the top of each sheet is read to match; the matched sheet is read in full below.
             heads = presets.read_heads(file_doc)
         except FileProblem as e:
@@ -176,6 +205,119 @@ class ApplyImportPreset(BaseTool):
                 ).format(best.preset["system"], best.preset["export"]),
             }
         return self._open_all(file_doc, sheet, best, matches, cleaned, arguments)
+
+    def _tally_xml(self, file_doc, arguments) -> Dict[str, Any]:
+        """A Tally XML export: list its parts, or open the sessions of the parts asked for."""
+        try:
+            found = tally_xml.survey(file_doc)
+        except FileProblem as e:
+            return {"success": False, "error": str(e)}
+        source = {"file_name": file_doc.file_name, "company": found.company}
+        parts = list(dict.fromkeys(arguments.get("parts") or []))
+        if arguments.get("parts") is None:
+            return self._tally_xml_parts(found, source)
+        problem = tally_xml.parts_problem(parts, found)
+        if problem:
+            return {"success": False, "error": problem}
+
+        by_id = {p["id"]: p for p in presets.load_presets()}
+        wanted = arguments.get("targets") or None  # [] means all, as for a spreadsheet
+        names = {part: [t["name"] for t in by_id[tally_xml.IMPORTABLE[part]]["targets"]] for part in parts}
+        unknown = [t for t in wanted or [] if not any(t in n for n in names.values())]
+        if unknown:
+            known = ", ".join(n for part in parts for n in names[part])
+            return {"success": False, "error": _("No target '{0}'. Targets: {1}.").format(unknown[0], known)}
+
+        results, opened, parts_opened = [], 0, 0
+        for part in parts:
+            if wanted is not None and not [t for t in wanted if t in names[part]]:
+                results.append({"part": part, "skipped": _("none of the requested targets is in this part")})
+                continue
+            try:
+                sheet = tally_xml.part_sheet(file_doc, part)
+            except FileProblem as e:
+                results.append({"part": part, "error": str(e)})
+                continue
+            preset = by_id[tally_xml.IMPORTABLE[part]]
+            matches = presets.match_sheet(sheet.rows, [preset])
+            if not matches:
+                frappe.log_error(
+                    title="apply_import_preset: Tally XML",
+                    message=f"{part} did not match {preset['id']}: header {sheet.rows[0]}",
+                )
+                results.append(
+                    {
+                        "part": part,
+                        "error": _("The Tally {0} could not be read; please report it.").format(part),
+                    }
+                )
+                continue
+            cleaned = presets.clean(sheet, matches[0])
+            if not any(t.rows for t in cleaned.targets):
+                results.append(
+                    {"part": part, "error": _("No data rows were left in the Tally {0}.").format(part)}
+                )
+                continue
+            part_arguments = dict(arguments)
+            if wanted is not None:
+                part_arguments["targets"] = [t for t in wanted if t in names[part]]
+            result = self._open_all(file_doc, sheet, matches[0], matches, cleaned, part_arguments)
+            if not result.get("success"):
+                results.append({"part": part, "error": result.get("error")})
+                continue
+            result.pop("success", None)
+            result.pop("matched", None)
+            opened += len(result["sessions"])
+            parts_opened += 1 if result["sessions"] else 0
+            results.append({"part": part, **result})
+
+        return {
+            "success": True,
+            "matched": True,
+            "kind": "tally_xml",
+            "message": _(
+                "Tally masters export: opened {0} import session(s) from {1} of {2} part(s)."
+            ).format(opened, parts_opened, len(parts)),
+            "source": source,
+            "results": results,
+        }
+
+    def _tally_xml_parts(self, found, source) -> Dict[str, Any]:
+        listed, counts = [], []
+        for part in ("ledgers", "stock_items", "groups"):
+            entry = found.parts.get(part)
+            if not entry:
+                continue
+            item: Dict[str, Any] = {
+                "part": part,
+                "count": entry.count,
+                "importable": part in tally_xml.IMPORTABLE,
+                "sample": entry.sample,
+            }
+            if part in tally_xml.IMPORTABLE:
+                item["preset"] = tally_xml.IMPORTABLE[part]
+            if part in ("ledgers", "groups"):
+                item["by_parent"] = tally_xml.capped(entry.by_parent)
+            if part == "groups":
+                item["note"] = _(
+                    "Groups are listed, not imported. A ledger's group decides where it goes: Sundry Debtors "
+                    "become Customers, Sundry Creditors become Suppliers, and every other group becomes an "
+                    "Account whose parent the dry run maps to an ERPNext group."
+                )
+            listed.append(item)
+            counts.append(f"{entry.count} {tally_xml.LABELS[part]}")
+        where = _(" from {0}").format(found.company) if found.company else ""
+        return {
+            "success": True,
+            "matched": True,
+            "kind": "tally_xml",
+            "message": _("Tally masters export{0}: {1}.").format(where, ", ".join(counts)),
+            "source": source,
+            "parts": listed,
+            "other_records": tally_xml.capped(Counter(found.other_records)),
+            "warnings": [_(LISTING_UNVERIFIED)],
+            "next": "apply_import_preset with parts",
+        }
 
     def _open_all(self, file_doc, sheet, best, matches, cleaned, arguments) -> Dict[str, Any]:
         values = arguments.get("values") or {}
