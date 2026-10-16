@@ -16,7 +16,7 @@ Only an **Insert New Records** import can be undone. An **Update Existing Record
 
 ## Workflow
 
-1. Call `preview_import_undo(session)` and read `can_undo`. When it is false, `refused` says why (still importing, already being undone or undone, nothing imported, past the time window, an update import, or every record blocked). Tell the user why. When every record is blocked, also show them the `blockers` (what each is blocked by): they may be able to clear a blocker, and then preview again. Otherwise stop.
+1. Call `preview_import_undo(session)` and read `can_undo`. When it is false, `refused` says why (still importing, already being undone or undone, nothing imported, past the time window, an update import, or every record blocked). Tell the user why. When every record is blocked, also show them the `blockers` (what each is blocked by): they may be able to clear a blocker, and then preview again. When the import is **already being undone**, don't stop there: call `undo_import` (with the last preview's figures, or any) to follow the running undo; if its job stopped, that call says so and sets the session back, and the user can preview again. Otherwise stop.
 2. **Show the user the preview** before anything else: how many records and of which DocTypes (`by_doctype`), what is blocked and why (`blockers`), which records are kept (`kept_records`) and how many were already removed by hand (`already_removed`).
 3. **If nothing is blocked**, ask the user to confirm, then call `undo_import` with the preview's `records` and `blocked` and `mode` `all`.
 4. **If something is blocked**, say so and ask which they want: stop, or `unblocked` (remove everything else, keep the blocked records and the records they depend on). Never choose for them. Then call `undo_import` with the preview's `records` and `blocked` and the mode they chose.
@@ -56,19 +56,19 @@ Deleted records **cannot be restored**. Say so before the user approves.
 |---|---|
 | `records` | How many records the undo would look at: everything the session created that still exists. |
 | `by_doctype` | The count per DocType with up to 10 sample names. Long lists end with "(N more)". |
-| `blockers` | Records that can't be removed, grouped by `reason` with a count, the DocTypes and up to 10 sample records. Each sample has `record`, `detail` (a sentence saying why, to tell the user) and `blocked_by` (the document that blocks it). `blocked_by` is set only for `linked` blockers (the linking document) and `later_stock` blockers (the stock transaction that moved the item afterwards); it is null for the other reasons: read `detail`. Reasons: see below. |
+| `blockers` | Records that can't be removed, grouped by `reason` with a count, the DocTypes and up to 10 sample records. Each sample has `record`, `detail` (a sentence saying why, to tell the user) and `blocked_by` (the document that blocks it). `blocked_by` is set only for `linked` blockers (the linking document; for a ledger entry such as a GL or Payment Ledger Entry, the voucher that made it, which is what the user can cancel) and `later_stock` blockers (the stock transaction that moved the item afterwards); it is null for the other reasons: read `detail`. Reasons: see below. |
 | `kept` | How many records are not blocked themselves but stay because a blocked record needs them (a Customer Group of a kept Customer, the parent of a kept tree child). |
 | `kept_records` | Those records, each as `record` and `kept_because` (which blocked record keeps it). Show them to the user: they are not deleted either. |
 | `already_removed` | Records of the import that were deleted by hand since. They are not an error and are not counted in `records`. |
 | `window` | The undo window: an import can be undone for `days` days after its last import step finished, until `ends_on`. |
-| `import_type_note` | Why nothing is deleted, for an update import. |
+| `import_type_note` | Why nothing is deleted, for an update import; or, when the session also ran an update import next to its inserts, that the records the update changed are not restored (only the created ones are removed). Tell the user. |
 
 ### Blocker reasons
 
 | `reason` | Meaning |
 |---|---|
 | `linked` | Another document, not part of the import, uses the record (a Sales Invoice for an opening Customer, a Payment Entry for an opening invoice). |
-| `changed` | The record was edited after the import, by another user or well after it, or it was made again (deleted and created under the same name) after the import. |
+| `changed` | The record was edited after the import, by another user or well after it, or it was made again (deleted and created under the same name) after the import, or it existed before the import (the session names it because an imported record was merged into it). |
 | `closed_books` | The record's posting date is in a closed period (accounts frozen date or a Period Closing Voucher). |
 | `later_stock` | Stock moved on the item after an opening Stock Reconciliation. |
 | `no_permission` | The user may not delete (or cancel) that DocType. |

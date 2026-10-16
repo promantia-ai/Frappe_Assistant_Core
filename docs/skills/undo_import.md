@@ -42,16 +42,20 @@ The approval card shows `records`, `blocked` and `mode`, so the user sees what g
   "status": "Partially Undone",
   "state": "done",
   "deleted": 247,
+  "already_removed": 1,
   "total": 248,
   "kept": 1,
   "blocked": [{"record": "Customer Acme Ltd", "reason": "linked", "detail": "Sales Invoice SINV-0042 links to it."}],
   "blocked_count": 1,
+  "removed": ["Customer Beta Traders", "Customer Gamma Stores", "(245 more)"],
   "reason": null,
-  "message": "Removed 247 records; 1 kept. 1 can't be removed."
+  "message": "Removed 247 records; 1 kept. 1 can't be removed. 1 were already removed by hand."
 }
 ```
 
 The `blocked` list shows the first 50 records and ends with one entry whose `record` is "(N more)" (its `reason` and `detail` are null) when longer; `blocked_count` is the full number.
+
+`removed` names the records the undo removed ("DocType name"), the first 50 and then "(N more)"; `deleted` is the full number. The session keeps the list after the undo, so a later call still says what went. `already_removed` counts records of the import that were deleted by hand before the undo reached them: they are not an error.
 
 ## When it can't start
 
