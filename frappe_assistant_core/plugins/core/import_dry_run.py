@@ -392,6 +392,9 @@ class _Checker:
                 return
         if not problems:
             problems = self._insert_problems(payload)
+        if record and _no_changes(problems):  # Frappe saw no change the plan did: nothing to do
+            self.rows += [{"row": n, "status": "unchanged", "record": record} for n in row_numbers]
+            return
 
         if not problems:
             extra = {"record": record} if record else {}
@@ -679,7 +682,7 @@ def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) 
     session.validation_summary = frappe.as_json(summary)
     session.validated_fingerprint = fingerprint(session, file_doc)
     session.status = "Dry Run Failed" if counts["failed"] else "Ready to Import"
-    if (counts["imported"] or counts["unchanged"]) and not counts["ready"] and not counts["failed"]:
+    if counts["imported"] and not counts["ready"] and not counts["failed"]:
         session.status = "Completed"  # the rest is left out or already so: nothing left to do
     session.progress = frappe.as_json(
         {"step": "Dry Run", "state": "done", "done": total_payloads, "total": total_payloads}
@@ -693,6 +696,11 @@ def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) 
     )
     session.save()
     return summary
+
+
+def _no_changes(problems) -> bool:
+    """Whether ``problems`` is Data Import's refusal of an update that changes nothing."""
+    return len(problems) == 1 and problems[0][1].get("message") == _("No changes to update")
 
 
 def _summary_group(group: Dict[str, Any]) -> Dict[str, Any]:

@@ -208,13 +208,28 @@ class TestMatching(UpdateCase):
 
         out, column_map = import_update.with_ids(doc, rows, {2: matches[2][0]})
 
-        self.assertEqual(out[0][-1], "ID")
+        self.assertEqual(out[0][-1], import_update.ID_HEADER)
         self.assertEqual(out[1][-1], self.customers["a"])
         self.assertEqual(column_map[str(len(rows[0]))], "name")
         self.assertEqual(column_map["0"], "Don't Import")  # Tax ID: only used to find the record
         self.assertEqual(column_map["2"], "website")
 
-    def test_matching_on_the_id_adds_no_column(self):
+    def test_an_unmapped_column_is_never_guessed_in_an_update(self):
+        # Data Import maps an unmapped column by its header: a child table column would replace
+        # the table's rows, an "ID" column would pick the record
+        header = "Tax ID,Website,credit_limits.credit_limit,ID"
+        doc, rows, matches = self._matches(
+            [f"TAX-A-{self.tag},https://new.example,5000,x"],
+            mapping={"Tax ID": "tax_id", "Website": "website"},
+            header=header,
+        )
+
+        out, column_map = import_update.with_ids(doc, rows, {2: matches[2][0]})
+
+        self.assertEqual((column_map["2"], column_map["3"]), ("Don't Import", "Don't Import"))
+        self.assertNotIn(out[0][-1], rows[0])  # the added column's header is the file's own
+
+    def test_matching_on_the_id_still_adds_the_checked_record(self):
         doc, rows, matches = self._matches(
             [f"{self.customers['a']},https://new.example"],
             mapping={"ID": "name", "Website": "website"},
@@ -224,8 +239,9 @@ class TestMatching(UpdateCase):
 
         out, column_map = import_update.with_ids(doc, rows, {2: matches[2][0]})
 
-        self.assertEqual(out, rows)
-        self.assertEqual(column_map["0"], "name")
+        # the file's spelling of the key is never written, even when the key is the ID
+        self.assertEqual(column_map["0"], "Don't Import")
+        self.assertEqual((out[1][-1], column_map[str(len(rows[0]))]), (self.customers["a"], "name"))
 
 
 class TestUpdateCheck(UpdateCase):
@@ -253,7 +269,7 @@ class TestUpdateCheck(UpdateCase):
         self.assertEqual(sorted(causes["More than one match"]["records"]), sorted(self.customers.values()))
         self.assertEqual((result["ready"], result["failed"]), (0, 3))
 
-    def test_two_rows_for_the_same_record_are_both_refused(self):
+    def test_a_second_row_for_the_same_record_is_refused(self):
         _session, result = self._check(
             [
                 f"TAX-A-{self.tag},{self.group},https://one.example",
@@ -268,6 +284,19 @@ class TestUpdateCheck(UpdateCase):
         _session, result = self._check([f"TAX-A-{self.tag},{self.group},https://a.example"])
 
         self.assertEqual((result["ready"], result["failed"], result["unchanged"]), (0, 0, 1))
+
+    def test_a_number_equal_at_the_fields_precision_is_unchanged(self):
+        # Frappe compares numbers as they are shown: 5.5000001 saves as no change ("No changes
+        # to update"), so it mustn't be a change in the plan, nor a failure
+        frappe.db.set_value("Customer", self.customers["a"], "default_commission_rate", 5.5)
+
+        _session, result = self._check(
+            [f"TAX-A-{self.tag},5.5000001"],
+            mapping={"Tax ID": "tax_id", "Commission": "default_commission_rate"},
+            header="Tax ID,Commission",
+        )
+
+        self.assertEqual((result["ready"], result["failed"], result["unchanged"]), (0, 0, 1), result)
 
     def test_the_check_writes_nothing(self):
         self._check([f"TAX-A-{self.tag},{self.group},https://new.example"])
@@ -426,6 +455,32 @@ class TestUpdateRun(UpdateCase):
         self.assertIn("Updated 1 Customer records", response["result"]["message"])
         self.assertEqual(self._doc(session).status, "Completed")
 
+    def test_a_file_with_its_own_id_column_updates_the_matched_record(self):
+        # a file from another ERPNext site: its ID column names a different record here
+        file_doc = self._csv(
+            [f"{self.customers['b']},TAX-A-{self.tag},https://new-a.example"], "ID,Tax ID,Website"
+        )
+        session = self._run("start_import_session", {"file_id": file_doc.name, "import_type": UPDATE})
+        session = session["result"]["session_id"]
+        self._run(
+            "set_column_mapping",
+            {
+                "session": session,
+                "mapping": {"Tax ID": "tax_id", "Website": "website"},
+                "doctype": "Customer",
+                "match_on": ["tax_id"],
+            },
+        )
+        checked = self._run("dry_run_import", {"session": session})["result"]
+
+        with self._each_row_commits():
+            self._update(session, checked)
+
+        self.assertEqual(
+            frappe.db.get_value("Customer", self.customers["a"], "website"), "https://new-a.example"
+        )
+        self.assertEqual(frappe.db.get_value("Customer", self.customers["b"], "website"), "https://b.example")
+
     def test_the_update_changes_the_records_the_check_matched(self):
         session, checked = self._ready([f"TAX-A-{self.tag},{self.group},https://new-a.example"])
         # after the check, another customer takes the same tax ID: the approved record is still the one
@@ -463,6 +518,7 @@ class TestUpdateRun(UpdateCase):
         response = self._update(session, checked)
 
         self.assertFalse(response["success"], response)
+        self.assertIn("Nothing to update", response["result"]["error"])
         self.assertFalse(self._doc(session).data_imports)
 
 
@@ -521,3 +577,31 @@ class TestPrices(UpdateCase):
             as_list=True,
         )
         self.assertEqual(dict(rates), {lists[0]: 100, lists[1]: 125})
+
+    def test_an_item_code_in_other_case_finds_the_item_and_stays_as_it_is(self):
+        group = frappe.get_all("Item Group", filters={"is_group": 0}, pluck="name", limit=1)[0]
+        item = frappe.get_doc(
+            {"doctype": "Item", "item_code": f"ITEM-{self.tag}", "item_group": group, "stock_uom": "Nos"}
+        ).insert()
+        file_doc = self._csv([f"item-{self.tag},Renamed {self.tag}"], "Item Code,Item Name")
+        session = self._run("start_import_session", {"file_id": file_doc.name, "import_type": UPDATE})
+        session = session["result"]["session_id"]
+        self._run(
+            "set_column_mapping",
+            {
+                "session": session,
+                "mapping": {"Item Code": "item_code", "Item Name": "item_name"},
+                "doctype": "Item",
+            },
+        )
+        checked = self._run("dry_run_import", {"session": session})["result"]
+
+        self._run(
+            "start_import",
+            {"session": session, "doctype": "Item", "rows": checked["ready"], "import_type": UPDATE},
+        )
+
+        self.assertEqual(
+            frappe.db.get_value("Item", item.name, ["item_code", "item_name"]),
+            (f"ITEM-{self.tag}", f"Renamed {self.tag}"),
+        )

@@ -22,10 +22,11 @@ from typing import Dict, List, Tuple
 import frappe
 from frappe import _
 from frappe.core.doctype.data_import.importer import get_id_field
-from frappe.utils import cstr, flt, get_datetime, getdate
+from frappe.model.meta import get_field_precision
+from frappe.utils import cint, cstr, flt, get_datetime, getdate
 
 UPDATE = "Update Existing Records"
-ID_HEADER = "ID"
+ID_HEADER = "FACO Record ID"  # not a header Data Import maps on its own, and not the file's
 DONT_IMPORT = "Don't Import"
 MATCH_CHUNK = 500
 NUMBER_TYPES = ("Currency", "Float", "Percent", "Int", "Check")
@@ -108,10 +109,6 @@ def _positions(session) -> Dict[str, int]:
     return {field: int(pos) for pos, field in mapped.items() if field != DONT_IMPORT}
 
 
-def _id_match(session) -> bool:
-    return match_fields(session) in (["name"], [id_fieldname(session.target_doctype)])
-
-
 def match_records(session, rows: List[list]) -> Dict[int, List[str]]:
     """Each row's matching records, by row number (the header is row 1): one name when the
     match is clean; none, or several, when it isn't. Only records the user may read match."""
@@ -136,19 +133,24 @@ def match_records(session, rows: List[list]) -> Dict[int, List[str]]:
 
 def with_ids(session, rows: List[list], records: Dict[int, str]) -> Tuple[List[list], Dict[str, str]]:
     """The rows with an ID column holding each row's record, and the column map that imports
-    them: the ID column to the record's ID, the key columns not imported (they only find the
-    record). Matching on the ID itself needs no column: the rows come back as they are."""
+    them: the ID column to the record's ID; the key columns not imported, even when the key is
+    the ID (they only find the record, so the file's spelling is never written); and no column
+    the user didn't map, which Data Import would otherwise map by its header (a child table's
+    column would replace the table's rows, an "ID" column would pick the record)."""
     options = frappe.parse_json(session.template_options or "{}") or {}
     column_map = dict(options.get("column_to_field_map") or {})
-    if _id_match(session) or not rows:
+    if not rows:
         return rows, column_map
     width = len(rows[0])
     keys = match_fields(session)
-    for field, position in _positions(session).items():
-        if field in keys:
+    for position in range(width):
+        if column_map.get(str(position)) in (None, "", *keys):
             column_map[str(position)] = DONT_IMPORT
     column_map[str(width)] = "name"
-    out = [list(rows[0]) + [ID_HEADER]]
+    header = ID_HEADER
+    while header in rows[0]:
+        header += " "
+    out = [list(rows[0]) + [header]]
     for number, row in enumerate(rows[1:], start=2):
         out.append((list(row) + [""] * width)[:width] + [records.get(number, "")])
     return out, column_map
@@ -168,8 +170,12 @@ def key_label(session) -> str:
 
 
 def _same(df, old, new) -> bool:
+    # as Frappe's get_diff compares: numbers as shown, at the field's precision
+    if df.fieldtype in ("Int", "Check"):
+        return cint(old) == cint(new)
     if df.fieldtype in NUMBER_TYPES:
-        return flt(old, 9) == flt(new, 9)
+        precision = get_field_precision(df)
+        return flt(old, precision) == flt(new, precision)
     if df.fieldtype == "Date" and old and new:
         return getdate(old) == getdate(new)
     if df.fieldtype == "Datetime" and old and new:
