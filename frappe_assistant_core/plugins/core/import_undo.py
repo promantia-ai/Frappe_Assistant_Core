@@ -70,19 +70,24 @@ class UndoProblem(Exception):
     """Something the user is told about, as it is worded."""
 
 
+IMPORTED = ("Success", "Warning")  # Import step outcomes that imported records (Warning: some refused)
+NOT_IMPORTING = ("Undo", "Dry Run")  # steps that never create a record
+
+
 def finished_at(session) -> datetime:
-    """When the session's last import step finished: its last successful Import step. A session
-    with no Import step (created masters only) uses its latest step of any kind, and one with
-    no steps its creation time. Step timestamps are written once, so this does not move when
-    the session is saved."""
+    """When the session's last import step finished: its last Import step that imported
+    (Success, or Warning when some rows were refused). A session with no such step (created
+    masters only) uses its latest step of another kind than Undo and Dry Run, and one with no
+    steps its creation time. Step timestamps are written once, so this does not move when the
+    session is saved."""
     imports = [
         get_datetime(s.timestamp)
         for s in session.steps
-        if s.step == "Import" and s.outcome == "Success" and s.timestamp
+        if s.step == "Import" and s.outcome in IMPORTED and s.timestamp
     ]
     if imports:
         return max(imports)
-    stamps = [get_datetime(s.timestamp) for s in session.steps if s.timestamp]
+    stamps = [get_datetime(s.timestamp) for s in session.steps if s.timestamp and s.step not in NOT_IMPORTING]
     return max(stamps) if stamps else get_datetime(session.creation)
 
 

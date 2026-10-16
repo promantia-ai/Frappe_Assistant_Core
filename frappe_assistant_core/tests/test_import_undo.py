@@ -210,6 +210,27 @@ class TestRefusal(UndoCase):
 
         self.assertEqual(import_undo.finished_at(self._doc(session)), expected)
 
+    def test_an_import_step_that_ended_with_a_warning_is_the_finish(self):
+        session = self._session_with_customers()
+        doc = self._doc(session)
+        imports = [s for s in doc.steps if s.step == "Import"]
+        for step in imports:
+            step.outcome = "Warning"  # a partial Data Import, or opening rows refused
+        finish = max(s.timestamp for s in imports)
+        doc.append("steps", {"step": "Map Columns", "outcome": "Success", "timestamp": add_to_date(finish, hours=1)})
+
+        self.assertEqual(import_undo.finished_at(doc), finish)
+
+    def test_a_later_undo_or_dry_run_step_does_not_move_the_finish(self):
+        session, _names = self._session_with_groups()
+        doc = self._doc(session)
+        made = [s.timestamp for s in doc.steps if s.step == "Create Masters"][-1]
+        later = add_to_date(made, hours=2)
+        doc.append("steps", {"step": "Undo", "outcome": "Failed", "timestamp": later})
+        doc.append("steps", {"step": "Dry Run", "outcome": "Success", "timestamp": later})
+
+        self.assertEqual(import_undo.finished_at(doc), made)
+
     def test_a_session_with_no_steps_is_measured_from_its_creation(self):
         session = self._blank_session()
         doc = self._doc(session)
