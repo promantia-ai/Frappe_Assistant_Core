@@ -13,6 +13,7 @@ create_document with import_session, Customers through a Data Import.
 """
 
 import unittest
+from contextlib import contextmanager
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -243,6 +244,95 @@ class BlockerCase(UndoCase):
         self._add(session, "Journal Entry", entry.name)
         return entry.name
 
+    @contextmanager
+    def _books_open(self):
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ):
+            yield
+
+    def _reconciliation(self, session, docstatus=1):
+        """A Stock Reconciliation three days ago, of one item in one warehouse, on the session."""
+        self.stock_item, self.stock_warehouse = f"UNDO-IT-{self.tag}", f"UNDO-WH-{self.tag}"
+        recon = self._insert_raw(
+            {
+                "doctype": "Stock Reconciliation",
+                "name": f"UNDO-SR-{self.tag}",
+                "company": self.company,
+                "purpose": "Opening Stock",
+                "posting_date": add_days(nowdate(), -3),
+                "posting_time": "10:00:00",
+                "docstatus": docstatus,
+            }
+        ).name
+        self._insert_raw(
+            {
+                "doctype": "Stock Reconciliation Item",
+                "name": f"UNDO-SRI-{self.tag}",
+                "parent": recon,
+                "parenttype": "Stock Reconciliation",
+                "parentfield": "items",
+                "idx": 1,
+                "item_code": self.stock_item,
+                "warehouse": self.stock_warehouse,
+                "docstatus": docstatus,
+            }
+        )
+        self._add(session, "Stock Reconciliation", recon)
+        return recon
+
+    def _ledger(self, suffix, voucher_type, voucher_no, days_ago):
+        posting = add_days(nowdate(), -days_ago)
+        self._insert_raw(
+            {
+                "doctype": "Stock Ledger Entry",
+                "name": f"UNDO-SLE-{suffix}-{self.tag}",
+                "item_code": self.stock_item,
+                "warehouse": self.stock_warehouse,
+                "company": self.company,
+                "posting_date": posting,
+                "posting_time": "12:00:00",
+                "posting_datetime": f"{posting} 12:00:00",
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "actual_qty": 1,
+                "is_cancelled": 0,
+                "docstatus": 1,
+            }
+        )
+
+    def _gl_entry(self, suffix, party, voucher_type, voucher_no):
+        self._insert_raw(
+            {
+                "doctype": "GL Entry",
+                "name": f"UNDO-GLE-{suffix}-{self.tag}",
+                "company": self.company,
+                "posting_date": nowdate(),
+                "party_type": "Customer",
+                "party": party,
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "is_cancelled": 0,
+                "docstatus": 1,
+            }
+        )
+        # raw rows don't refresh Frappe's cached list of doctypes a Dynamic Link points to
+        frappe.cache.delete_value("dynamic_link_map::GL Entry::party_type")
+        return f"UNDO-GLE-{suffix}-{self.tag}"
+
+    def _contact(self, *parties):
+        return (
+            frappe.get_doc(
+                {
+                    "doctype": "Contact",
+                    "first_name": f"Undo {self.tag} {len(parties)}",
+                    "links": [{"link_doctype": "Customer", "link_name": p} for p in parties],
+                }
+            )
+            .insert()
+            .name
+        )
+
 
 class TestBlockers(BlockerCase):
     def test_a_document_linking_to_a_record_blocks_it_as_linked(self):
@@ -386,63 +476,15 @@ class TestBlockers(BlockerCase):
 
     def test_stock_movement_after_the_reconciliation_is_later_stock(self):
         session, _names = self._session_with_groups()
-        item, warehouse = f"UNDO-IT-{self.tag}", f"UNDO-WH-{self.tag}"
-        recon = self._insert_raw(
-            {
-                "doctype": "Stock Reconciliation",
-                "name": f"UNDO-SR-{self.tag}",
-                "company": self.company,
-                "purpose": "Opening Stock",
-                "posting_date": add_days(nowdate(), -3),
-                "posting_time": "10:00:00",
-                "docstatus": 1,
-            }
-        ).name
-        self._insert_raw(
-            {
-                "doctype": "Stock Reconciliation Item",
-                "name": f"UNDO-SRI-{self.tag}",
-                "parent": recon,
-                "parenttype": "Stock Reconciliation",
-                "parentfield": "items",
-                "idx": 1,
-                "item_code": item,
-                "warehouse": warehouse,
-                "docstatus": 1,
-            }
-        )
-        self._add(session, "Stock Reconciliation", recon)
-
-        def ledger(suffix, voucher_type, voucher_no, days_ago):
-            posting = add_days(nowdate(), -days_ago)
-            self._insert_raw(
-                {
-                    "doctype": "Stock Ledger Entry",
-                    "name": f"UNDO-SLE-{suffix}-{self.tag}",
-                    "item_code": item,
-                    "warehouse": warehouse,
-                    "company": self.company,
-                    "posting_date": posting,
-                    "posting_time": "12:00:00",
-                    "posting_datetime": f"{posting} 12:00:00",
-                    "voucher_type": voucher_type,
-                    "voucher_no": voucher_no,
-                    "actual_qty": 1,
-                    "is_cancelled": 0,
-                    "docstatus": 1,
-                }
-            )
-
-        ledger("own", "Stock Reconciliation", recon, 2)  # made by the undo set: does not count
-        ledger("cancelled", "Stock Entry", f"UNDO-SE0-{self.tag}", 1)
+        recon = self._reconciliation(session)
+        self._ledger("own", "Stock Reconciliation", recon, 2)  # made by the undo set: does not count
+        self._ledger("cancelled", "Stock Entry", f"UNDO-SE0-{self.tag}", 1)
         frappe.db.set_value(
             "Stock Ledger Entry", f"UNDO-SLE-cancelled-{self.tag}", "is_cancelled", 1, update_modified=False
         )
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
-            import_undo, "_closed_till", return_value={}
-        ):
+        with self._books_open():
             before = self._blocked(self._plan(session))
-            ledger("later", "Stock Entry", f"UNDO-SE-{self.tag}", 1)
+            self._ledger("later", "Stock Entry", f"UNDO-SE-{self.tag}", 1)
             after = self._blocked(self._plan(session))
 
         self.assertNotIn(("Stock Reconciliation", recon), before)
@@ -450,7 +492,19 @@ class TestBlockers(BlockerCase):
         self.assertEqual(
             (blocker.reason, blocker.blocked_by), ("later_stock", f"Stock Entry UNDO-SE-{self.tag}")
         )
-        self.assertIn(item, blocker.detail)
+        self.assertIn(self.stock_item, blocker.detail)
+
+    def test_a_draft_reconciliation_is_neither_closed_books_nor_later_stock(self):
+        session, _names = self._session_with_groups()
+        recon = self._reconciliation(session, docstatus=0)
+        self._ledger("later", "Stock Entry", f"UNDO-SE-{self.tag}", 1)
+
+        with patch.object(import_undo, "_frozen_till", return_value=getdate(nowdate())), patch.object(
+            import_undo, "_closed_till", return_value={self.company: getdate(nowdate())}
+        ):
+            blocked = self._blocked(self._plan(session))
+
+        self.assertNotIn(("Stock Reconciliation", recon), blocked)
 
     def test_a_doctype_without_delete_permission_is_no_permission(self):
         session, names = self._session_with_groups()
@@ -487,6 +541,90 @@ class TestBlockers(BlockerCase):
         blocker = blocked[("Journal Entry", entry)]
         self.assertEqual(blocker.reason, "no_permission")
         self.assertIn("cancel", blocker.detail)
+
+    def test_ledger_rows_of_a_voucher_in_the_set_do_not_block_its_customer(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        invoice = self._insert_raw(
+            {
+                "doctype": "Sales Invoice",
+                "name": f"UNDO-SI-{self.tag}",
+                "customer": alpha,
+                "company": self.company,
+                "posting_date": nowdate(),
+                "docstatus": 1,
+            }
+        ).name
+        self._add(session, "Sales Invoice", invoice)
+        self._gl_entry("own", alpha, "Sales Invoice", invoice)
+
+        with self._books_open():
+            blocked = self._blocked(self._plan(session))
+
+        self.assertNotIn(("Customer", alpha), blocked)
+        self.assertNotIn(("Sales Invoice", invoice), blocked)
+
+    def test_ledger_rows_of_a_voucher_outside_the_set_block_its_customer(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        entry = self._gl_entry("outside", alpha, "Journal Entry", f"UNDO-JE-OUT-{self.tag}")
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"GL Entry {entry}"))
+
+    def test_a_contact_of_records_in_the_set_only_does_not_block(self):
+        session = self._session_with_customers()
+        n = self._names()
+        self._contact(n["alpha"], n["gamma"])
+
+        self.assertEqual(self._plan(session).blocked, [])
+
+    def test_a_contact_also_linked_outside_the_set_blocks(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        contact = self._contact(alpha, self._outside_customer(self.group))
+
+        blocked = self._blocked(self._plan(session))
+
+        self.assertEqual(set(blocked), {("Customer", alpha)})
+        self.assertEqual(
+            (blocked[("Customer", alpha)].reason, blocked[("Customer", alpha)].blocked_by),
+            ("linked", f"Contact {contact}"),
+        )
+
+    def test_many_linking_documents_stay_one_query_and_one_row_per_field(self):
+        session, names = self._session_with_groups(2)
+        records = [import_undo.Record("Customer Group", name) for name in names]
+        ignore = {("FAC Import Session", session)}
+        real_sql = frappe.db.sql
+
+        def measure():
+            sizes = []
+
+            def counting(*args, **kwargs):
+                result = real_sql(*args, **kwargs)
+                sizes.append(len(result) if isinstance(result, (list, tuple)) else 0)
+                return result
+
+            with patch.object(frappe.db, "sql", side_effect=counting):
+                found = import_undo.link_blockers(records, ignore)
+            return found, sizes
+
+        frappe.get_doc(
+            {"doctype": "Customer", "customer_name": f"Many {self.tag} 0", "customer_group": names[0]}
+        ).insert()
+        import_undo.link_blockers(records, ignore)  # warm Frappe's caches
+        _found, one_linker = measure()
+        for i in range(1, 30):
+            frappe.get_doc(
+                {"doctype": "Customer", "customer_name": f"Many {self.tag} {i}", "customer_group": names[0]}
+            ).insert()
+        found, many_linkers = measure()
+
+        self.assertEqual(many_linkers, one_linker)  # the same queries, returning the same rows
+        self.assertEqual([b.record.name for b in found], [names[0]])
+        self.assertIn("(29 more)", found[0].detail)
 
 
 class TestCascade(BlockerCase):

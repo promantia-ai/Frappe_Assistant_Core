@@ -24,15 +24,17 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 import frappe
 from frappe import _
 from frappe.utils import cint, get_datetime, get_time, getdate
+from pypika import functions as fn
+from pypika.terms import Tuple as Row
 
 INSERT = "Insert New Records"
 UPDATE = "Update Existing Records"
 UNDO_DAYS = 30  # default of the site config key fac_import_undo_days
 UNDO_GRACE_MINUTES = 10  # ERPNext may submit large opening documents in the background, later
 CHUNK = 1000  # names per IN (...) of one query
-# A submitted document's own ledger and repost entries: ERPNext's on_cancel lists them in
-# ignore_linked_doctypes, so they never block the cancel. A later document that uses the record
-# (a Payment Entry against an invoice) still blocks through its own fields.
+# Ledger and repost entries (ERPNext's ignore_linked_doctypes on cancel): made by a voucher and
+# removed with it. A row whose voucher_type/voucher_no is in the undo set never blocks, whatever
+# it links to (the voucher, its Customer, its Account); a row made by a voucher outside does.
 OWN_ENTRIES = {
     "GL Entry",
     "Stock Ledger Entry",
@@ -47,6 +49,8 @@ OWN_ENTRIES = {
     "Unreconcile Payment Entries",
     "Serial and Batch Bundle",
 }
+# ERPNext deletes a party's Contacts and Addresses with it (delete_contact_and_address)
+CONTACT_DOCTYPES = ["Contact", "Address"]
 
 Key = Tuple[str, str]
 
@@ -200,28 +204,88 @@ def _label(doctype: str, name: str) -> str:
 # -- linked --------------------------------------------------------------------------------
 
 
+def _groups(keys: Iterable[Key]) -> Dict[str, List[str]]:
+    grouped: Dict[str, List[str]] = defaultdict(list)
+    for doctype, name in sorted(set(keys)):
+        grouped[doctype].append(name)
+    return grouped
+
+
+def _not_among(doctype_col, name_col, groups: Dict[str, List[str]]) -> list:
+    """SQL conditions: a row's (doctype, name) is none of ``groups``; IN lists at most CHUNK
+    long. A NULL doctype or name is no document, so the row stays."""
+    conditions = []
+    for doctype, names in groups.items():
+        for chunk in _chunks(names):
+            conditions.append(
+                ~((fn.Coalesce(doctype_col, "") == doctype) & fn.Coalesce(name_col, "").isin(chunk))
+            )
+    return conditions
+
+
+def _contacts_inside(in_set: Set[Key]) -> Set[Key]:
+    """Contacts and Addresses whose every Dynamic Link row points to a record in the set:
+    ERPNext deletes them with the party, so they never block. Batched: one query per set
+    doctype for the candidates, one per Contact/Address doctype for all their rows."""
+    if not frappe.db.exists("DocType", "Dynamic Link"):
+        return set()
+    link = frappe.qb.DocType("Dynamic Link")
+    candidates: Set[Key] = set()
+    for doctype, names in _groups(in_set).items():
+        for chunk in _chunks(names):
+            rows = (
+                frappe.qb.from_(link)
+                .select(link.parenttype, link.parent)
+                .distinct()
+                .where(link.parenttype.isin(CONTACT_DOCTYPES))
+                .where(link.link_doctype == doctype)
+                .where(link.link_name.isin(chunk))
+                .run(as_dict=True)
+            )
+            candidates.update((r.parenttype, r.parent) for r in rows)
+    outside: Set[Key] = set()
+    for parenttype, parents in _groups(candidates).items():
+        for chunk in _chunks(parents):
+            rows = (
+                frappe.qb.from_(link)
+                .select(link.parent, link.link_doctype, link.link_name)
+                .where(link.parenttype == parenttype)
+                .where(link.parent.isin(chunk))
+                .run(as_dict=True)
+            )
+            outside.update(
+                (parenttype, r.parent) for r in rows if (r.link_doctype, r.link_name) not in in_set
+            )
+    return candidates - outside
+
+
 def link_blockers(records: List[Record], ignore: Set[Key]) -> List[Blocker]:
     """Documents outside ``records`` that link to them, by the rules of Frappe's own delete
     check (frappe.model.delete_doc.get_linked_docs and get_dynamic_linked_docs): Link fields,
     Dynamic Link fields and child-table rows (counted as their parent document); cancelled
-    documents, the doctypes in the ``ignore_links_on_delete`` hook and a submitted record's own
-    ledger entries (OWN_ENTRIES, which ERPNext ignores when cancelling) never block. One query per
-    linking field (and per CHUNK names), never one per record. ``ignore`` holds documents whose
-    links never block (the session itself). One blocker per record, naming the first linker."""
+    documents and the doctypes in the ``ignore_links_on_delete`` hook never block. Neither do
+    ledger entries (OWN_ENTRIES) made by a voucher in the set, Contacts and Addresses linked only
+    to records in the set, nor the documents in ``ignore`` (the session itself).
+
+    One aggregated query per linking field (and per CHUNK names): it returns at most a row per
+    target (and linking parent doctype) with the first linker and a count, however many
+    documents link to it. One blocker per record, naming the first linker. The count is summed
+    over the linking fields, so a document linking through two fields counts twice."""
     from frappe.model.dynamic_links import get_dynamic_link_map
     from frappe.model.rename_doc import get_link_fields
 
     in_set = {_key(r) for r in records}
-    on_delete = set(frappe.get_hooks("ignore_links_on_delete") or [])
-    found: Dict[Key, List[Key]] = defaultdict(list)
+    skip = set(frappe.get_hooks("ignore_links_on_delete") or [])
+    never = _groups(in_set | set(ignore) | _contacts_inside(in_set))
+    vouchers = _groups(in_set)
+    first: Dict[Key, Key] = {}
+    count: Dict[Key, int] = defaultdict(int)
 
-    def note(target: Key, linker: Key, skip: Set[str]) -> None:
-        if target not in in_set or linker in in_set or linker in ignore or linker[0] in skip:
-            return
-        if linker not in found[target]:
-            found[target].append(linker)
+    def note(target: Key, linker: Key, n: int) -> None:
+        first.setdefault(target, linker)
+        count[target] += n
 
-    def scan(link_dt, fieldname, doctype, names, skip, doctype_field=None) -> None:
+    def scan(link_dt, fieldname, doctype, names, doctype_field=None) -> None:
         try:
             meta = frappe.get_meta(link_dt)
         except frappe.DoesNotExistError:
@@ -233,51 +297,63 @@ def link_blockers(records: List[Record], ignore: Set[Key]) -> List[Blocker]:
                 values.get(fieldname) in names
                 and cint(values.get("docstatus")) != 2
                 and (not doctype_field or values.get(doctype_field) == doctype)
+                and (link_dt, link_dt) not in ignore
             ):
-                note((doctype, values.get(fieldname)), (link_dt, link_dt), skip)
+                note((doctype, values.get(fieldname)), (link_dt, link_dt), 1)
             return
         table = frappe.qb.DocType(link_dt)
-        columns = [table.name, table.docstatus, table[fieldname].as_("target")]
+        target = table[fieldname]
         if meta.istable:
-            columns += [table.parent, table.parenttype]
+            linker_dt, linker = table.parenttype, table.parent
+            conditions = _not_among(linker_dt, linker, never) + [linker.isnotnull()]
+            if skip:
+                conditions.append(fn.Coalesce(linker_dt, "").notin(sorted(skip)))
+        else:
+            linker_dt, linker = None, table.name
+            conditions = [linker.notin(chunk) for chunk in _chunks(never.get(link_dt, []))]
+        conditions.append(fn.Coalesce(table.docstatus, 0) != 2)
+        if doctype_field:
+            conditions.append(table[doctype_field] == doctype)
+        if link_dt == "Submission Queue":
+            conditions.append(table.status == "Queued")
+        if link_dt in OWN_ENTRIES and meta.has_field("voucher_type") and meta.has_field("voucher_no"):
+            conditions += _not_among(table.voucher_type, table.voucher_no, vouchers)
+        columns = [target.as_("target"), fn.Count(linker).distinct().as_("n"), fn.Min(linker).as_("first")]
+        group = [target]
+        if linker_dt is not None:
+            columns.append(linker_dt.as_("linker_doctype"))
+            group.append(linker_dt)
         for chunk in _chunks(names):
-            query = frappe.qb.from_(table).select(*columns).where(table[fieldname].isin(chunk))
-            if doctype_field:
-                query = query.where(table[doctype_field] == doctype)
-            if link_dt == "Submission Queue":
-                query = query.where(table.status == "Queued")
-            for row in query.run(as_dict=True):
-                if cint(row.docstatus) == 2:
-                    continue
-                if not meta.istable:
-                    note((doctype, row.target), (link_dt, row.name), skip)
-                elif row.parent and row.parenttype:
-                    note((doctype, row.target), (row.parenttype, row.parent), skip)
+            query = frappe.qb.from_(table).select(*columns).where(target.isin(chunk))
+            for condition in conditions:
+                query = query.where(condition)
+            for row in query.groupby(*group).run(as_dict=True):
+                note((doctype, row.target), (row.get("linker_doctype") or link_dt, row.first), cint(row.n))
 
     dynamic_map = get_dynamic_link_map()
     for doctype, names in _by_doctype(records).items():
-        skip = on_delete | (OWN_ENTRIES if frappe.get_meta(doctype).is_submittable else set())
         seen: Set[Tuple[str, str]] = set()
         for lf in get_link_fields(doctype):
             if lf["parent"] not in skip and (lf["parent"], lf["fieldname"]) not in seen:
                 seen.add((lf["parent"], lf["fieldname"]))
-                scan(lf["parent"], lf["fieldname"], doctype, names, skip)
+                scan(lf["parent"], lf["fieldname"], doctype, names)
         for df in dynamic_map.get(doctype, []):
             if df.parent not in skip and (df.parent, df.fieldname) not in seen:
                 seen.add((df.parent, df.fieldname))
-                scan(df.parent, df.fieldname, doctype, names, skip, doctype_field=df.options)
+                scan(df.parent, df.fieldname, doctype, names, doctype_field=df.options)
 
     blockers = []
     for record in records:
-        linkers = found.get(_key(record))
-        if not linkers:
+        linker = first.get(_key(record))
+        if not linker:
             continue
-        first = _label(*linkers[0])
-        if len(linkers) > 1:
-            detail = _("{0} links to it ({1} more).").format(first, len(linkers) - 1)
+        by = _label(*linker)
+        more = count[_key(record)] - 1
+        if more > 0:
+            detail = _("{0} links to it ({1} more).").format(by, more)
         else:
-            detail = _("{0} links to it.").format(first)
-        blockers.append(Blocker(record, "linked", detail, first))
+            detail = _("{0} links to it.").format(by)
+        blockers.append(Blocker(record, "linked", detail, by))
     return blockers
 
 
@@ -392,8 +468,10 @@ def _closed_books_blockers(records: List[Record]) -> List[Blocker]:
 
 
 def _later_stock_blockers(records: List[Record], in_set: Set[Key]) -> List[Blocker]:
-    """A Stock Reconciliation whose items and warehouses have stock movements after it that the
-    undo set did not make: removing it would change the valuation of those movements."""
+    """A submitted Stock Reconciliation whose items and warehouses have stock movements after it
+    that the undo set did not make: removing it would change the valuation of those movements.
+    A draft posted nothing. Per reconciliation, one query per CHUNK item/warehouse pairs, the
+    set's own vouchers left out in SQL, the earliest movement only."""
     names = [r.name for r in records if r.doctype == "Stock Reconciliation"]
     if not names:
         return []
@@ -402,7 +480,7 @@ def _later_stock_blockers(records: List[Record], in_set: Set[Key]) -> List[Block
     for chunk in _chunks(names):
         for row in frappe.get_all(
             "Stock Reconciliation",
-            filters={"name": ["in", chunk], "docstatus": ["<", 2]},
+            filters={"name": ["in", chunk], "docstatus": 1},
             fields=["name", "posting_date", "posting_time"],
             limit_page_length=0,
         ):
@@ -414,34 +492,34 @@ def _later_stock_blockers(records: List[Record], in_set: Set[Key]) -> List[Block
             limit_page_length=0,
         ):
             pairs[row.parent].add((row.item_code, row.warehouse))
+    sle = frappe.qb.DocType("Stock Ledger Entry")
+    own = _not_among(sle.voucher_type, sle.voucher_no, _groups(in_set))
     blockers = []
     for record in records:
         head, wanted = heads.get(record.name), pairs.get(record.name)
         if record.doctype != "Stock Reconciliation" or not head or not wanted:
             continue
         after = datetime.combine(getdate(head.posting_date), get_time(head.posting_time or "00:00:00"))
-        for entry in frappe.get_all(
-            "Stock Ledger Entry",
-            filters={
-                "item_code": ["in", sorted({p[0] for p in wanted})],
-                "warehouse": ["in", sorted({p[1] for p in wanted})],
-                "is_cancelled": 0,
-                "posting_datetime": [">", after],
-            },
-            fields=["item_code", "warehouse", "voucher_type", "voucher_no", "posting_datetime"],
-            order_by="posting_datetime asc, creation asc",
-            limit_page_length=0,
-        ):
-            if (entry.item_code, entry.warehouse) not in wanted:
-                continue
-            if (entry.voucher_type, entry.voucher_no) in in_set:
-                continue
-            by = _label(entry.voucher_type, entry.voucher_no)
+        earliest = None
+        for chunk in _chunks(sorted(wanted)):
+            query = (
+                frappe.qb.from_(sle)
+                .select(sle.item_code, sle.warehouse, sle.voucher_type, sle.voucher_no, sle.posting_datetime)
+                .where(Row(sle.item_code, sle.warehouse).isin([Row(*pair) for pair in chunk]))
+                .where(sle.is_cancelled == 0)
+                .where(sle.posting_datetime > after)
+            )
+            for condition in own:
+                query = query.where(condition)
+            rows = query.orderby(sle.posting_datetime).orderby(sle.creation).limit(1).run(as_dict=True)
+            if rows and (earliest is None or rows[0].posting_datetime < earliest.posting_datetime):
+                earliest = rows[0]
+        if earliest:
+            by = _label(earliest.voucher_type, earliest.voucher_no)
             detail = _("{0} moved {1} in {2} on {3}, after this reconciliation.").format(
-                by, entry.item_code, entry.warehouse, entry.posting_datetime
+                by, earliest.item_code, earliest.warehouse, earliest.posting_datetime
             )
             blockers.append(Blocker(record, "later_stock", detail, by))
-            break
     return blockers
 
 
