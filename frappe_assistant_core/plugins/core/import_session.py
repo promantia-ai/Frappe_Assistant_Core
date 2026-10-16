@@ -286,9 +286,15 @@ DEFAULT_MAX_IMPORT_ROWS = 50000
 
 def holding_session(file_name: str) -> Optional[str]:
     """The import session that holds File ``file_name``, or None (#34003). The import tools read
-    that file, showing the model its headers, samples and summaries only, never all its rows."""
+    that file, showing the model its headers, samples and summaries only, never all its rows.
+    Frappe keeps identical bytes once, so a copy uploaded again (a new File with the same
+    file_url) is held too."""
+    file_url = frappe.db.get_value("File", file_name, "file_url")
+    copies = frappe.get_all("File", filters={"file_url": file_url}, pluck="name") if file_url else []
     return frappe.db.get_value(
-        "FAC Import Session", {"source_file": file_name, "status": ["!=", "Cancelled"]}, "name"
+        "FAC Import Session",
+        {"source_file": ["in", list({file_name, *copies})], "status": ["!=", "Cancelled"]},
+        "name",
     )
 
 

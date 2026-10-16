@@ -255,6 +255,21 @@ class TestTheModelSeesASummary(GuardrailCase):
         self.assertFalse(reply["success"], reply)
         self.assertIn(session, reply["error"])
 
+    def test_a_copy_of_a_file_being_imported_is_refused_too(self):
+        # Frappe keeps identical bytes once: the same file uploaded again (to a chat, say) is a
+        # new File with the first one's file_url.
+        content = f"{','.join(run_tests.MAPPING)}\nAcme {self.tag},{self.group},Company\n".encode()
+        first = self._file("guard.csv", content)
+        session = self._run("start_import_session", {"file_id": first.name})["result"]["session_id"]
+        copy = self._file("again.csv", content)
+        self.assertEqual((copy.file_url == first.file_url, copy.name == first.name), (True, False))
+        from frappe_assistant_core.plugins.data_science.tools.extract_file_content import ExtractFileContent
+
+        reply = ExtractFileContent().execute({"file_id": copy.name})
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn(session, reply["error"])
+
 
 class TestTheRowLimit(GuardrailCase):
     def _limit(self, value):

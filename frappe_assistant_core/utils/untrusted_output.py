@@ -31,7 +31,6 @@ DOCUMENT_FIELDS = {
         "file_name",
         "sheet",
         "sheets",
-        "template_options",
         "transformation_rules",
         "excluded_rows",
         "validation_summary",

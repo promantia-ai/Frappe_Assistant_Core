@@ -406,8 +406,11 @@ class TestImportSession(BaseAssistantTest):
         self.assertEqual(
             frappe.parse_json(data["template_options"]), {"column_to_field_map": {"0": "customer_name"}}
         )
-        self.assertEqual(frappe.parse_json(data["transformation_rules"]), [{"type": "trim", "column": "*"}])
-        self.assertEqual(frappe.parse_json(data["validation_summary"]), {"ok": 20, "failed": 5})
+        # fields that can quote the file arrive inside the untrusted-content fence (#34003)
+        self.assertEqual(
+            frappe.parse_json(_unfenced(data["transformation_rules"])), [{"type": "trim", "column": "*"}]
+        )
+        self.assertEqual(frappe.parse_json(_unfenced(data["validation_summary"])), {"ok": 20, "failed": 5})
 
     # -- criterion 3 and privacy: who sees a session --------------------------------------
 
@@ -439,3 +442,12 @@ class TestImportSession(BaseAssistantTest):
         steps = frappe.get_doc("FAC Import Session", session_id).steps
         self.assertEqual([(s.step, s.outcome, s.user) for s in steps], [("Read File", "Success", self.user)])
         self.assertIn("25 rows", steps[0].message)
+
+
+def _unfenced(value):
+    """What fence_fields wrapped: the lines between the fence's notice and its closing tag."""
+    from frappe_assistant_core.utils.untrusted_output import FENCE
+
+    lines = value.strip().splitlines()
+    assert lines[0] == f"<{FENCE}>" and lines[-1] == f"</{FENCE}>", value
+    return "\n".join(lines[2:-1])
