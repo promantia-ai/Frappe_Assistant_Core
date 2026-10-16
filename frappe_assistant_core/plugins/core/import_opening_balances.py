@@ -1001,20 +1001,24 @@ COVERED_SOURCE = "opening invoices / opening stock"
 
 
 def _erpnext_sums(company: str, cut_off: str, accounts: List[str]) -> Dict[str, Dict[str, float]]:
-    """Debit and credit of each account's GL Entries up to the cut-off: one query, read only."""
+    """Debit and credit of each account's GL Entries up to the cut-off: one query, read only.
+    Summed with frappe.qb: Frappe v16 refuses SQL functions in get_all's fields."""
+    from frappe.query_builder.functions import Sum
+
     if not accounts:
         return {}
-    rows = frappe.get_all(
-        "GL Entry",
-        filters={
-            "company": company,
-            "is_cancelled": 0,
-            "posting_date": ["<=", cut_off],
-            "account": ["in", accounts],
-        },
-        fields=["account", "sum(debit) as debit", "sum(credit) as credit"],
-        group_by="account",
-    )
+    gle = frappe.qb.DocType("GL Entry")
+    rows = (
+        frappe.qb.from_(gle)
+        .select(gle.account, Sum(gle.debit).as_("debit"), Sum(gle.credit).as_("credit"))
+        .where(
+            (gle.company == company)
+            & (gle.is_cancelled == 0)
+            & (gle.posting_date <= cut_off)
+            & gle.account.isin(accounts)
+        )
+        .groupby(gle.account)
+    ).run(as_dict=True)
     return {row.account: {"debit": flt(row.debit), "credit": flt(row.credit)} for row in rows}
 
 
@@ -1193,6 +1197,116 @@ def report(session) -> Dict[str, Any]:
             "not_brought_in": not_brought_in,
             "totals": {key: flt(value, precision) for key, value in totals.items()},
             "message": " ".join(parts),
+        }
+    )
+    return out
+
+
+# -- every row, for the sign-off report (reads only) -------------------------------------------
+
+COVERED_REASON = "Brought in by the opening invoices and opening stock imports"
+
+
+def _entry_status(balances: Dict[str, Any]) -> Tuple[Optional[str], bool]:
+    """The session's opening entry, and whether it is still submitted."""
+    name = next(iter(balances.get("created") or {}), None)
+    return name, bool(name) and frappe.db.get_value(TARGET, name, "docstatus") == 1
+
+
+def outcomes(session) -> List[Dict[str, Any]]:
+    """Every row of the file and where it stands now: imported (its account is in the submitted
+    opening entry), left out (by the user, or a Receivable, Payable or Stock account the other
+    opening imports bring in), failed (with why) or not imported yet, with its debit and credit
+    as the file writes them. Writes nothing."""
+    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.plugins.core.import_signoff import NOT_IMPORTED
+
+    balances = settings(session)
+    lines = read_lines(session)
+    checker = _AccountChecker()
+    ready = {row.row: row for row in _check_lines(session, checker, lines)}
+    messages = {g["id"]: g.get("message") or _(g["cause"]) for g in checker.groups.values()}
+    marked = {entry["row"]: entry for entry in checker.rows}
+    left = {entry["row"]: entry["reason"] for entry in import_fixes.left_out(session)}
+    name, submitted = _entry_status(balances)
+    stopped = opening_stock._last_import_failure(session) if not submitted else None
+    unbalanced = not name and not is_balanced(session, lines)
+    out = []
+    for line in lines:
+        entry = marked.get(line.row) or {"status": "ready"}
+        status, reason = entry["status"], ""
+        if status == "failed":
+            reason = "; ".join(messages.get(g, "") for g in entry.get("groups") or [])
+        elif status == "excluded":
+            reason = left.get(line.row) or _("Left out by the user")
+        elif line.row in ready and ready[line.row].covered:
+            status, reason = "excluded", _(COVERED_REASON)
+        elif submitted:
+            status = "imported"
+        elif stopped:
+            status, reason = "failed", stopped
+        elif unbalanced:
+            status, reason = "failed", _(CAUSE_NOT_BALANCED)
+        else:
+            status, reason = "not_imported", _(NOT_IMPORTED)
+        try:
+            (debit, credit), unreadable = balance_of(line.cells), False
+        except ValueError:
+            debit = credit = None
+            unreadable = True
+        totals_row = is_totals_row(line.cells)
+        out.append(
+            {
+                "row": line.row,
+                "status": status,
+                "reason": reason,
+                "debit": None if totals_row else debit,
+                "credit": None if totals_row else credit,
+                "unreadable": unreadable,
+                "totals_row": totals_row,
+                "file_says": debit if totals_row else None,
+            }
+        )
+    return out
+
+
+def summary(session) -> Dict[str, Any]:
+    """The sign-off report's view of this session: its rows, debits and credits per status, and
+    ERPNext's ledger at the cut-off against the file, account by account. Writes nothing."""
+    from frappe_assistant_core.plugins.core.import_signoff import tally
+
+    balances = settings(session)
+    precision = _precision()
+    out = tally(outcomes(session), ("debit", "credit"), precision)
+    name, submitted = _entry_status(balances)
+    erpnext: Dict[str, Any] = {
+        "journal_entry": name,
+        "no_longer_submitted": int(bool(name) and not submitted),
+    }
+    if name:
+        held = report(session)
+        erpnext.update(
+            {
+                "debit": held["totals"]["erpnext_debit"],
+                "credit": held["totals"]["erpnext_credit"],
+                "accounts_differing": held["differences_count"],
+                "differing": held["accounts"],
+                # the Receivable, Payable and Stock accounts the other imports bring in
+                "covered_differing": [
+                    row for row in held["covered"] if row["erpnext_net"] != row["file_net"]
+                ],
+                "temporary_opening": (held.get("temporary_opening") or {}).get("balance"),
+            }
+        )
+    out.update(
+        {
+            "kind": "opening_balances",
+            "doctype": TARGET,
+            "label": _("Opening Balances"),
+            "company": balances["company"],
+            "cut_off": balances["cut_off"],
+            "balance": "trial_balance",
+            "erpnext": erpnext,
         }
     )
     return out

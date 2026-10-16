@@ -18,12 +18,19 @@ Pass exactly what the last check reported, so the approval card shows it: `sessi
 - `warehouses`: per warehouse, the file's quantity and value next to ERPNext's (from the stock ledger) and the
   difference. `differences` lists the warehouses that don't match. Show this table.
 - `pending`: documents ERPNext is still submitting in the background (more than 100 rows). Call again later
-  with the same values: nothing is created twice.
+  with the same values: nothing is created twice. A document is `pending` while its submit waits in the
+  queue or runs; it fails only when ERPNext says the submit failed, or after two hours out of the queue.
 - `failed_documents`: drafts ERPNext never submitted (its background submit failed, and it left them as
   drafts). The session is then Failed or Partially Completed. Check the sheet again with `dry_run_import` and
   call this again: it deletes those drafts first, so the same stock can't be brought in twice. Tell the user.
 - `reposting`: ERPNext is still recalculating stock values; say values can still change.
 - `accounting`: which account was posted, or that perpetual inventory is off.
+
+## Large sheets
+
+A sheet of more than 1,000 rows (more than one document) is made by a background job, and the call
+returns `Importing` at once: call again with the same values to follow it. If the job stops, the documents
+it made stay in; check the sheet again with `dry_run_import` to import the rest.
 
 ## When it stops
 

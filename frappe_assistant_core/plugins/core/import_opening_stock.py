@@ -16,6 +16,7 @@ are the import's own; this module adds the setup, the row checks, the creation a
 An opening-stock session keeps its settings in ``template_options.opening_stock``.
 """
 
+import math
 import re
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -188,13 +189,60 @@ class Line:
     cells: Dict[str, str] = dataclass_field(default_factory=dict)
 
 
+def decimal_comma() -> bool:
+    """Whether the site writes decimals after a comma (System Settings' number format, as
+    "#.###,##"). A format with one separator only groups: its decimals take the other one."""
+    separators = [c for c in cstr(frappe.db.get_default("number_format") or "#,###.##") if c != "#"]
+    if len(set(separators)) > 1:
+        return separators[-1] == ","
+    return bool(separators) and separators[0] == "."
+
+
+def _grouped(text: str, group: str) -> bool:
+    """Whether ``text`` is digits grouped by threes with ``group`` ('1,234,567'), or the Indian
+    way: the last three, then twos ('12,34,567')."""
+    g = re.escape(group)
+    return bool(
+        re.fullmatch(r"-?\d{1,3}(" + g + r"\d{3})+", text)
+        or re.fullmatch(r"-?\d{1,2}(" + g + r"\d{2})*" + g + r"\d{3}", text)
+    )
+
+
 def number(text) -> Optional[float]:
-    """A number as accountants write it: '1,250.50', '(12)' for -12. None when blank."""
-    text = cstr(text).strip().replace(",", "").replace(" ", "")
+    """A number as accountants write it: '1,250.50', '1.250,50', '(12)' for -12. None when blank.
+
+    With both separators, the last one holds the decimals. With commas only, one comma is the
+    decimal point where the site writes decimals after a comma or the thousands are grouped by
+    spaces, and commas grouping by threes are thousands. Anything else raises ValueError rather
+    than being read as another number: '12,5' on a site that writes 12.5 isn't taken for 125."""
+    text = cstr(text).strip()
+    spaced = bool(re.search(r"\d[ \u00a0']\d{3}", text))  # thousands grouped by spaces: '1 234,5'
+    text = text.replace(" ", "").replace("\u00a0", "").replace("'", "")
     if not text:
         return None
     negative = text.startswith("(") and text.endswith(")")
-    value = float(text.strip("()"))
+    text = text.strip("()")
+    if "," in text and "." in text:
+        point = "," if text.rindex(",") > text.rindex(".") else "."
+        group = "." if point == "," else ","
+        whole, _sep, decimals = text.rpartition(point)
+        if not decimals.isdigit() or not (whole.lstrip("-").isdigit() or _grouped(whole, group)):
+            raise ValueError(text)
+        text = f"{whole.replace(group, '')}.{decimals}"
+    elif "," in text:
+        if text.count(",") == 1 and (decimal_comma() or spaced):
+            text = text.replace(",", ".")
+        elif _grouped(text, ","):
+            text = text.replace(",", "")
+        else:
+            raise ValueError(text)
+    elif text.count(".") > 1:
+        if not _grouped(text, "."):
+            raise ValueError(text)
+        text = text.replace(".", "")
+    value = float(text)
+    if not math.isfinite(value):  # float() reads 'nan' and 'inf'
+        raise ValueError(text)
     return -value if negative else value
 
 
@@ -508,13 +556,13 @@ def _allowed_zero(session) -> set:
     return set(rules.get("zero_rate_items") or [])
 
 
-def _check_lines(session, checker: _StockChecker) -> List[Ready]:
+def _check_lines(session, checker: _StockChecker, lines: Optional[List[Line]] = None) -> List[Ready]:
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
     stock, excluded, allowed = settings(session), dry_run._excluded_rows(session), _allowed_zero(session)
     imported = imported_keys(session)
     ready, seen = [], {}
-    for line in read_lines(session):
+    for line in read_lines(session) if lines is None else lines:
         if line.row in excluded:
             checker.mark(line.row, "excluded")
             continue
@@ -724,7 +772,11 @@ def documents(session) -> List[str]:
     return [r.record_name for r in session.created_records if r.record_doctype == TARGET]
 
 
-STALL_SECONDS = 600  # a draft ERPNext hasn't submitted after this long is taken to have failed
+# ERPNext submits a Stock Reconciliation of more than 100 rows in a background job that may run
+# 4600 seconds. A draft neither waiting in the queue nor failed is taken to have stopped (its
+# worker was killed, say) only after longer than that.
+STALL_SECONDS = 2 * 60 * 60
+ACTION_FAILED = "Action Failed"  # the comment Frappe adds when a queued submit fails
 
 
 def submitted_documents(session) -> List[str]:
@@ -742,12 +794,42 @@ def _drafts(session) -> List[Any]:
     )
 
 
+def _queued(name: str) -> bool:
+    """Whether ERPNext's submit of ``name`` is still waiting in the queue: Frappe locks a
+    document when it queues an action on it, and the job unlocks it when it starts."""
+    return frappe.get_doc(TARGET, name).is_locked
+
+
+def _submit_failed(name: str, since) -> bool:
+    """Whether a queued submit of ``name`` failed: Frappe then adds an "Action Failed" comment."""
+    return bool(
+        frappe.get_all(
+            "Comment",
+            filters={
+                "reference_doctype": TARGET,
+                "reference_name": name,
+                "comment_type": "Comment",
+                "creation": [">=", since],
+            },
+            # in the language of whoever ran the job
+            or_filters=[["content", "like", f"{text}%"] for text in {ACTION_FAILED, _(ACTION_FAILED)}],
+            limit=1,
+        )
+    )
+
+
 def stalled(session) -> List[str]:
-    """Drafts of this session that ERPNext's background submit never finished."""
-    now = frappe.utils.now_datetime()
-    return [
-        d.name for d in _drafts(session) if frappe.utils.time_diff_in_seconds(now, d.modified) > STALL_SECONDS
-    ]
+    """Drafts of this session that ERPNext's background submit never finished: it said it
+    failed, or the draft is out of the queue and has stayed a draft longer than the job may run."""
+    now, out = frappe.utils.now_datetime(), []
+    for draft in _drafts(session):
+        if _submit_failed(draft.name, draft.modified):
+            out.append(draft.name)
+        elif (
+            not _queued(draft.name) and frappe.utils.time_diff_in_seconds(now, draft.modified) > STALL_SECONDS
+        ):
+            out.append(draft.name)
+    return out
 
 
 def pending(session) -> List[str]:
@@ -837,13 +919,18 @@ def _delete_stalled(session) -> None:
         ) from e
 
 
+JOB = "fac_opening_stock::{0}"
+
+
 def create(session) -> List[str]:
-    """Create and submit the opening stock, a chunk at a time, each all or nothing. Chunks made
-    by an earlier call are skipped, so calling again never duplicates. Returns the new names."""
+    """Create and submit the opening stock, a chunk at a time, each all or nothing: one chunk in
+    this request, more in a background job, so a large sheet never runs into the request's time
+    limit. Chunks made by an earlier call are skipped, so calling again never duplicates. Returns
+    the names made in this request."""
     from frappe_assistant_core.plugins.core import import_fixes
 
-    if session.status == "Completed" or (documents(session) and session.status == "Importing"):
-        return []
+    if session.status in ("Completed", "Importing"):
+        return []  # done, or still being made: the caller reports
     if session.status != "Ready to Import" or not import_fixes.checked_as_is(session):
         raise OpeningStockProblem(
             _(
@@ -868,9 +955,66 @@ def create(session) -> List[str]:
                 "again with dry_run_import."
             ).format(len(lines), expected)
         )
-    stock, made = settings(session), []
     session.status = "Importing"
+    session.progress = _progress("queued")
     session.save()
+    if len(chunks(lines)) > 1:
+        frappe.enqueue(
+            f"{__name__}.create_job",
+            queue="long",
+            timeout=4 * 60 * 60,
+            job_id=JOB.format(session.name),
+            deduplicate=True,
+            enqueue_after_commit=True,
+            now=bool(frappe.flags.in_test),
+            session_name=session.name,
+            user=frappe.session.user,
+        )
+        return []
+    return _create_chunks(session, lines, commit=False)  # the request commits when it returns
+
+
+def _commits() -> bool:
+    """Whether the job commits each document (not under tests, which roll back at the end)."""
+    return not frappe.flags.in_test
+
+
+def create_job(session_name: str, user: str) -> None:
+    """Background job: the opening stock, as the user who approved it."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the import
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    lines = ready_lines(session)
+    approved = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
+    if len(lines) != approved:
+        session.status = "Partially Completed" if submitted_documents(session) else "Failed"
+        session.log_step(
+            "Import",
+            "Failed",
+            _("The import stopped: the sheet changed after it was approved; check it again."),
+        )
+        session.save()
+    else:
+        try:
+            _create_chunks(session, lines, commit=True)
+        except OpeningStockProblem:
+            if not _commits():
+                raise
+            # the document that failed is rolled back; the ones before it, and the session's
+            # record of them and of the failure, are kept
+        except Exception:
+            if not _commits():
+                raise
+            frappe.db.rollback()
+            _stopped(session_name, _("the background job stopped."))
+            frappe.log_error(title=_("FAC opening stock import failed"), message=frappe.get_traceback())
+    if _commits():
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
+
+
+def _create_chunks(session, lines: List[Ready], commit: bool) -> List[str]:
+    stock, made = settings(session), []
     for chunk in chunks(lines):
         frappe.db.savepoint(CREATE_SAVEPOINT)
         try:
@@ -897,18 +1041,98 @@ def create(session) -> List[str]:
             session.log_step("Import", "Failed", _message_of_create(e), rows_failed=len(chunk))
             session.save()
             raise OpeningStockProblem(_message_of_create(e)) from e
+        if commit and _commits():
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
     # Over 100 rows, ERPNext submits in the background: the session stays Importing until
     # report() finds every document submitted.
     session.status = "Importing" if pending(session) else "Completed"
+    session.progress = _progress("done")
     session.save()
     return made
+
+
+def _progress(state: str) -> str:
+    return frappe.as_json({"step": "Import", "state": state, "updated_on": str(frappe.utils.now_datetime())})
+
+
+def _building(session) -> bool:
+    """Whether the background job is still making this session's documents. A job that is no
+    longer queued or running and never finished has stopped: the session says so."""
+    progress = frappe.parse_json(session.progress or "{}") or {}
+    if session.status != "Importing" or progress.get("step") != "Import" or progress.get("state") == "done":
+        return False
+    if _job_running(session):
+        return True
+    _stopped(session.name, _("the background job stopped."))
+    session.reload()
+    return False
+
+
+def _stopped(session_name: str, reason: str) -> None:
+    """A background import that stopped before its end: what it committed is in."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    if session.status != "Importing":
+        return
+    session.status = "Partially Completed" if documents(session) else "Failed"
+    session.log_step(
+        "Import",
+        "Failed",
+        _("The import stopped: {0} Check the file again to import the rest.").format(reason),
+    )
+    session.save()
+
+
+def _job_running(session) -> bool:
+    from frappe.utils.background_jobs import is_job_enqueued
+
+    try:
+        return bool(is_job_enqueued(JOB.format(session.name)))
+    except Exception:
+        return True  # the queue can't be asked (Redis down, say): don't call the job stopped
+
+
+def ledger_by_warehouse(submitted: List[str]) -> Dict[str, Any]:
+    """Quantity and value per warehouse that the Stock Reconciliations ``submitted`` posted.
+
+    A Stock Reconciliation's ledger entry keeps its balance in qty_after_transaction (its
+    actual_qty is 0 in v15), and a batch adds onto its item's running balance: so each item and
+    warehouse counts its final balance once. Items that already had stock are refused by the
+    check, so that balance is what the file brought in. Summed with frappe.qb: Frappe v16 refuses
+    SQL functions in get_all's fields."""
+    from frappe.query_builder.functions import Max, Sum
+
+    ledger: Dict[str, Any] = {}
+    if not submitted:
+        return ledger
+    sle = frappe.qb.DocType("Stock Ledger Entry")
+    rows = (
+        frappe.qb.from_(sle)
+        .select(
+            sle.warehouse,
+            sle.item_code,
+            Max(sle.qty_after_transaction).as_("qty"),
+            Sum(sle.stock_value_difference).as_("value"),
+        )
+        .where((sle.voucher_type == TARGET) & sle.voucher_no.isin(submitted) & (sle.is_cancelled == 0))
+        .groupby(sle.warehouse, sle.item_code)
+    ).run(as_dict=True)
+    for row in rows:
+        entry = ledger.setdefault(row.warehouse, frappe._dict(qty=0, value=0))
+        entry.qty += flt(row.qty)
+        entry.value += flt(row.value)
+    return ledger
 
 
 def report(session) -> Dict[str, Any]:
     """Quantity and value per warehouse from the Stock Ledger, next to the file's totals."""
     names, stock = documents(session), settings(session)
+    building = _building(session)
     submitted, waiting, late = submitted_documents(session), pending(session), stalled(session)
-    if late and session.status == "Importing":
+    if building:
+        pass  # the background job is still making documents
+    elif late and session.status == "Importing":
         # ERPNext reverts a background submit that fails to a draft, and tells nobody here.
         session.status = "Partially Completed" if submitted else "Failed"
         session.log_step("Import", "Failed", _("ERPNext didn't submit {0}.").format(", ".join(late)))
@@ -927,26 +1151,7 @@ def report(session) -> Dict[str, Any]:
             entry["value"] += held["value"]
             entry["rows"] += held["rows"]
 
-    # A Stock Reconciliation's ledger entry keeps its balance in qty_after_transaction (its
-    # actual_qty is 0 in v15), and a batch adds onto its item's running balance: so each item and
-    # warehouse counts its final balance once. Items that already had stock are refused by the
-    # check, so that balance is what the file brought in.
-    ledger = {}
-    if submitted:
-        for row in frappe.get_all(
-            "Stock Ledger Entry",
-            filters={"voucher_type": TARGET, "voucher_no": ["in", submitted], "is_cancelled": 0},
-            fields=[
-                "warehouse",
-                "item_code",
-                "max(qty_after_transaction) as qty",
-                "sum(stock_value_difference) as value",
-            ],
-            group_by="warehouse, item_code",
-        ):
-            entry = ledger.setdefault(row.warehouse, frappe._dict(qty=0, value=0))
-            entry.qty += row.qty
-            entry.value += row.value
+    ledger = ledger_by_warehouse(submitted)
     precision = frappe.get_precision(ITEM_TABLE, "valuation_rate") or 2
     warehouses, differences = {}, []
     for warehouse, expected in file_side.items():
@@ -981,7 +1186,11 @@ def report(session) -> Dict[str, Any]:
         if stock.get("perpetual")
         else _("Perpetual inventory is off for this company, so no accounting entries were made.")
     )
-    if late:
+    if building:
+        message = _("Creating the opening stock in the background: {0} documents made so far.").format(
+            len(names)
+        )
+    elif late:
         why = []
         for name in late:
             comment = frappe.get_all(
@@ -1019,3 +1228,105 @@ def report(session) -> Dict[str, Any]:
         "accounting": accounting,
         "message": message,
     }
+
+
+# -- every row, for the sign-off report (reads only) -------------------------------------------
+
+
+def _row_value(cells: Dict[str, str]):
+    """The row's quantity and value as the file writes them (the value is its amount, else
+    quantity times rate), and whether a number in it can't be read."""
+    try:
+        qty, rate, amount = (number(cells.get(name)) for name in ("qty", "valuation_rate", "amount"))
+    except ValueError:
+        return None, None, True
+    if amount is None and qty is not None and rate is not None:
+        amount = qty * rate
+    return qty, amount, False
+
+
+def _last_import_failure(session) -> Optional[str]:
+    if session.status not in ("Partially Completed", "Failed"):
+        return None
+    steps = [step for step in session.steps if step.step == "Import"]
+    return steps[-1].message if steps and steps[-1].outcome == "Failed" else None
+
+
+def outcomes(session) -> List[Dict[str, Any]]:
+    """Every row of the file and where it stands now: imported (in a submitted document of the
+    session), left out, failed (the check or ERPNext refused it, with why) or not imported yet,
+    with its quantity and value as the file writes them. Writes nothing."""
+    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.plugins.core.import_signoff import NOT_IMPORTED
+
+    lines = read_lines(session)
+    checker = _StockChecker()
+    _check_lines(session, checker, lines)
+    messages = {g["id"]: g.get("message") or _(g["cause"]) for g in checker.groups.values()}
+    marked = {entry["row"]: entry for entry in checker.rows}
+    left = {entry["row"]: entry["reason"] for entry in import_fixes.left_out(session)}
+    stopped = _last_import_failure(session)
+    out = []
+    for line in lines:
+        entry = marked.get(line.row) or {"status": "ready"}
+        status, reason = entry["status"], ""
+        if status == "failed":
+            reason = "; ".join(messages.get(g, "") for g in entry.get("groups") or [])
+        elif status == "excluded":
+            reason = left.get(line.row) or _("Left out by the user")
+        elif status == "ready" and stopped:
+            status, reason = "failed", stopped
+        elif status == "ready":
+            status, reason = "not_imported", _(NOT_IMPORTED)
+        qty, value, unreadable = _row_value(line.cells)
+        totals_row = is_totals_row(line.cells)
+        out.append(
+            {
+                "row": line.row,
+                "status": status,
+                "reason": reason,
+                "value": None if totals_row else value,
+                "qty": None if totals_row else qty,
+                "unreadable": unreadable,
+                "totals_row": totals_row,
+                "file_says": value if totals_row else None,
+            }
+        )
+    return out
+
+
+def summary(session) -> Dict[str, Any]:
+    """The sign-off report's view of this session: its rows, quantities and values per status, and
+    the Stock Ledger's value against the file's for the rows imported. Writes nothing."""
+    from frappe_assistant_core.plugins.core.import_signoff import tally
+
+    stock = settings(session)
+    precision = frappe.get_precision(ITEM_TABLE, "amount") or 2
+    out = tally(outcomes(session), ("value", "qty"), precision)
+    names, submitted = documents(session), submitted_documents(session)
+    drafts = {d.name for d in _drafts(session)}
+    ledger = ledger_by_warehouse(submitted)
+    total = flt(sum(entry.value for entry in ledger.values()), precision)
+    difference = flt(total - out["value"]["imported"], precision)
+    # Each ledger entry rounds its own value: within half a cent a row, that is rounding.
+    rounding = abs(difference) <= 0.5 * 10 ** (-precision) * max(out["rows"]["imported"], 1)
+    out.update(
+        {
+            "kind": "opening_stock",
+            "doctype": TARGET,
+            "label": _("Opening Stock"),
+            "company": stock["company"],
+            "cut_off": stock["posting_date"],
+            "balance": "stock",
+            "erpnext": {
+                "documents": len(submitted),
+                "pending": len([n for n in names if n in drafts]),
+                "total": total,
+                "qty": flt(sum(entry.qty for entry in ledger.values()), 6),
+                "difference": 0.0 if rounding else difference,
+                "rounding": difference if rounding else 0.0,
+                "no_longer_submitted": len([n for n in names if n not in submitted and n not in drafts]),
+            },
+        }
+    )
+    return out

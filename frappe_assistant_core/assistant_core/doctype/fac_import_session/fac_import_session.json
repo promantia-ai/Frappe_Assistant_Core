@@ -291,7 +291,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-07 23:00:00.000000",
+ "modified": "2026-10-15 14:02:21.600523",
  "modified_by": "Administrator",
  "module": "Assistant Core",
  "name": "FAC Import Session",
@@ -313,6 +313,7 @@
   {
    "create": 1,
    "read": 1,
+   "report": 1,
    "role": "Desk User",
    "write": 1
   }

@@ -150,17 +150,14 @@ def runs(session) -> List[Dict[str, Any]]:
             purposes[link.data_import] = link.purpose
     if not names:
         return []
-    counts = frappe.get_all(
-        "Data Import Log",
-        filters={"data_import": ["in", names]},
-        fields=["data_import", "success", "count(*) as count"],
-        group_by="data_import, success",
-    )
     out = {
         name: {"data_import": name, "purpose": purposes[name], "created": 0, "failed": 0} for name in names
     }
-    for row in counts:
-        out[row.data_import]["created" if row.success else "failed"] += row.count
+    # Counted here, not with "count(*)" in the query: Frappe v16 refuses SQL functions in fields.
+    for row in frappe.get_all(
+        "Data Import Log", filters={"data_import": ["in", names]}, fields=["data_import", "success"]
+    ):
+        out[row.data_import]["created" if row.success else "failed"] += 1
     return [out[name] for name in names]
 
 
@@ -236,6 +233,16 @@ def _reasons(session) -> Dict[int, str]:
     """Each row still not imported, failed or left out, with why: from the last Data Import
     once the import ended, from the last check before (or after a check of what is left)."""
     reasons: Dict[int, str] = {}
+    engine = dry_run.special_engine(session)
+    if engine:
+        # Opening stock and opening invoices keep no Data Import Logs: they say themselves
+        # where each row of the file stands.
+        for outcome in engine.outcomes(session):
+            if outcome["status"] == "excluded":
+                reasons[outcome["row"]] = _("Left out: {0}").format(outcome["reason"])
+            elif outcome["status"] == "failed":
+                reasons[outcome["row"]] = outcome["reason"]
+        return reasons
     if session.status in AFTER_IMPORT:
         names = imports_of_this_file(session)
         if names:

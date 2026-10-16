@@ -301,6 +301,8 @@ CAUSE_NO_FISCAL_YEAR = "Date in no fiscal year"
 CAUSE_DUE_BEFORE = "Due before the invoice date"
 CAUSE_NUMBER_TWICE = "Invoice number twice"
 CAUSE_NUMBER_USED = "Invoice number already used"
+CAUSE_AFTER_CUTOFF = "Dated after the cut-off"
+CAUSE_ALREADY_OPENED = "Opening invoice already in ERPNext"
 NEW_CAUSES = (
     CAUSE_PARTY_DISABLED,
     CAUSE_FOREIGN_CURRENCY,
@@ -309,6 +311,8 @@ NEW_CAUSES = (
     CAUSE_DUE_BEFORE,
     CAUSE_NUMBER_TWICE,
     CAUSE_NUMBER_USED,
+    CAUSE_AFTER_CUTOFF,
+    CAUSE_ALREADY_OPENED,
 )
 # One group per cause, so "12 rows are dated in no fiscal year" is one decision. A disabled party is
 # one group per party, because the fix (a party to map to) depends on which party it is.
@@ -457,6 +461,18 @@ def _line_problem(line: opening_stock.Line, invoices: Dict[str, Any], post_at_cu
         )
 
     file_date = dates["posting_date"] or invoices["cut_off"]
+    if file_date > invoices["cut_off"]:
+        # What was owed at the cut-off can't be dated after it: an invoice after the cut-off is
+        # new business, entered in ERPNext itself, and posting it here would count it twice.
+        return _problem(
+            invoices,
+            CAUSE_AFTER_CUTOFF,
+            "posting_date",
+            cells.get("posting_date", ""),
+            _("The invoice is dated after the cut-off ({0}), so it wasn't owed at the cut-off.").format(
+                invoices["cut_off"]
+            ),
+        )
     posting, due, original = file_date, dates["due_date"] or file_date, ""
     if not has_year(posting):
         if not post_at_cutoff:
@@ -501,12 +517,44 @@ def _number_used(invoices: Dict[str, Any], line: Ready) -> bool:
     )
 
 
+def _already_opened(invoices: Dict[str, Any], own: set):
+    """How many submitted opening invoices ERPNext already has for a party, date and amount,
+    leaving out ``own`` (this session's): an invoice without a number is known only by those, so
+    the same file brought in by another session would otherwise post it twice."""
+    known: Dict[tuple, int] = {}
+    precision = _precision(invoices)
+
+    def count(line: Ready) -> int:
+        key = (line.party, line.posting_date, flt(line.amount, precision))
+        if key not in known:
+            known[key] = sum(
+                1
+                for invoice in frappe.get_all(
+                    invoices["doctype"],
+                    filters={
+                        "company": invoices["company"],
+                        PARTY_FIELDS[invoices["party_type"]]: line.party,
+                        "posting_date": line.posting_date,
+                        "is_opening": "Yes",
+                        "docstatus": 1,
+                    },
+                    fields=["name", "grand_total"],
+                )
+                if invoice.name not in own and flt(invoice.grand_total, precision) == key[2]
+            )
+        return known[key]
+
+    return count
+
+
 def _post_at_cutoff(session) -> bool:
     rules = frappe.parse_json(session.transformation_rules or "{}") or {}
     return bool(rules.get("post_at_cutoff"))
 
 
-def _check_lines(session, checker: _InvoiceChecker) -> List[Ready]:
+def _check_lines(
+    session, checker: _InvoiceChecker, lines: Optional[List[opening_stock.Line]] = None
+) -> List[Ready]:
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
     invoices, excluded = settings(session), dry_run._excluded_rows(session)
@@ -515,8 +563,9 @@ def _check_lines(session, checker: _InvoiceChecker) -> List[Ready]:
         _fiscal_years(invoices["company"]),
         imported_keys(session),
     )
-    ready, first_of, counts = [], {}, {}
-    for line in read_lines(session):
+    opened = _already_opened(invoices, set(invoices.get("created") or {}))
+    ready, first_of, counts, seen = [], {}, {}, {}
+    for line in read_lines(session) if lines is None else lines:
         base = invoice_key(invoices, line.cells)
         numbered = bool(line.cells.get("invoice_number"))
         counts[base] = counts.get(base, 0) + 1
@@ -545,6 +594,21 @@ def _check_lines(session, checker: _InvoiceChecker) -> List[Ready]:
                 ),
             )
             continue
+        if not numbered:
+            same = (outcome.party, outcome.posting_date, outcome.amount)
+            seen[same] = seen.get(same, 0) + 1
+            if seen[same] <= opened(outcome):
+                checker.fail(
+                    line.row,
+                    *_problem(
+                        invoices,
+                        CAUSE_ALREADY_OPENED,
+                        "outstanding_amount",
+                        line.cells.get("outstanding_amount", ""),
+                        _("ERPNext already has an opening invoice for this party, date and amount."),
+                    ),
+                )
+                continue
         if numbered and _number_used(invoices, outcome):
             checker.fail(
                 line.row,
@@ -687,7 +751,7 @@ def _erpnext_check(
                 dry_run._progress("running", done, total),
                 update_modified=False,
             )
-            frappe.db.commit()  # each row is already rolled back, so this keeps only the progress
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — each row is already rolled back, so this keeps only the progress
     return passed
 
 
@@ -860,7 +924,7 @@ def create_job(session_name: str, user: str) -> None:
     """Background job: the invoices, as the user who approved them."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
-    frappe.set_user(user)
+    frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the import
     try:
         session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
         lines = ready_lines(session)
@@ -870,7 +934,7 @@ def create_job(session_name: str, user: str) -> None:
         if len(lines) != approved:
             _stopped(session_name, _("the sheet changed after it was approved; check it again."))
             if _commits():
-                frappe.db.commit()
+                frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
             return
         _import(session_name, lines, commit=True)
     except Exception as e:
@@ -878,7 +942,7 @@ def create_job(session_name: str, user: str) -> None:
             raise
         frappe.db.rollback()  # back to the last batch committed, with its record on the session
         _stopped(session_name, _message_of_create(e))
-        frappe.db.commit()
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
         frappe.log_error(title=_("FAC opening invoices import failed"), message=frappe.get_traceback())
 
 
@@ -943,10 +1007,10 @@ def _import(session_name: str, lines: List[Ready], commit: bool) -> None:
         if done % COMMIT_EVERY == 0 or done == total:
             _keep(session_name, created, failed, done, total)
             if commit and _commits():
-                frappe.db.commit()
+                frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
     _finish(session_name, total, failed)
     if commit and _commits():
-        frappe.db.commit()
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
 
 
 def _finish(session_name: str, total: int, failed: Dict[str, Any]) -> None:
@@ -1032,9 +1096,23 @@ def _failed_groups(failed: Dict[str, Any], precision: int) -> List[Dict[str, Any
     ]
 
 
+def _file_amounts(session, precision: int) -> Optional[Dict[str, float]]:
+    """The file's total over every invoice row, and over the rows imported, read from the file
+    now; None when it can't be read."""
+    from frappe_assistant_core.plugins.core.import_session import FileProblem
+    from frappe_assistant_core.plugins.core.import_signoff import tally
+
+    try:
+        return tally(outcomes(session), ("amount",), precision)["amount"]
+    except FileProblem:
+        return None
+
+
 def report(session) -> Dict[str, Any]:
-    """The total outstanding of the invoices made, per party type, against the file's amounts for
-    the same rows, and each row whose invoice differs; the rows refused and left out."""
+    """The total of the invoices made, per party type, against the file's amounts for the rows
+    imported and for the whole file, and each invoice that differs from its row; the rows refused
+    and left out. An invoice's total is its grand total: a payment after go-live lowers what is
+    outstanding, not what was brought in."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
     from frappe_assistant_core.plugins.core.import_fixes import left_out_report
 
@@ -1042,17 +1120,16 @@ def report(session) -> Dict[str, Any]:
     invoices = settings(session)
     doctype, party_type, precision = invoices["doctype"], invoices["party_type"], _precision(invoices)
     created = invoices.get("created") or {}
-    found = {
-        r.name: r
-        for r in frappe.get_all(
-            doctype,
-            filters={"name": ["in", list(created) or [""]]},
-            fields=["name", "docstatus", "outstanding_amount"],
-        )
-    }
-    submitted = [n for n in created if n in found and found[n].docstatus == 1]
-    file_total = flt(sum(flt(created[n]["amount"]) for n in submitted), precision)
-    erpnext_total = flt(sum(flt(found[n].outstanding_amount) for n in submitted), precision)
+    erpnext = erpnext_side(session)
+    totals_of = erpnext["by_name"]
+    submitted = [n for n in created if n in totals_of]
+    erpnext_total = erpnext["total"]
+    amounts = _file_amounts(session, precision)
+    # The file can't be read (deleted, say): the amounts the rows had when they were imported.
+    imported_total = (
+        amounts["imported"] if amounts else flt(sum(flt(created[n]["amount"]) for n in submitted), precision)
+    )
+    file_total = amounts["source"] if amounts else None
     differences = sorted(
         (
             {
@@ -1060,10 +1137,10 @@ def report(session) -> Dict[str, Any]:
                 "invoice": n,
                 "party": created[n].get("party"),
                 "file_amount": flt(created[n]["amount"], precision),
-                "erpnext_amount": flt(found[n].outstanding_amount, precision),
+                "erpnext_amount": totals_of[n],
             }
             for n in submitted
-            if flt(found[n].outstanding_amount, precision) != flt(created[n]["amount"], precision)
+            if totals_of[n] != flt(created[n]["amount"], precision)
         ),
         key=lambda d: d["row"],
     )
@@ -1097,8 +1174,12 @@ def report(session) -> Dict[str, Any]:
             message = ""
         if submitted:
             message += " " + _(
-                "{0} opening {1} invoices in ERPNext, outstanding {2} against {3} in the file."
-            ).format(len(submitted), _(invoices["invoice_type"]), erpnext_total, file_total)
+                "{0} opening {1} invoices in ERPNext, {2} against {3} in the file's rows."
+            ).format(len(submitted), _(invoices["invoice_type"]), erpnext_total, imported_total)
+            if file_total is not None and file_total != imported_total:
+                message += " " + _("The whole file holds {0}: {1} isn't in.").format(
+                    file_total, flt(file_total - imported_total, precision)
+                )
             if len(differences) > DIFFERENCES_SHOWN:
                 message += " " + _("{0} differ from the file; the first {1} of {0} are listed.").format(
                     len(differences), DIFFERENCES_SHOWN
@@ -1124,8 +1205,11 @@ def report(session) -> Dict[str, Any]:
         "totals": {
             party_type: {
                 "file": file_total,
+                "imported": imported_total,
                 "erpnext": erpnext_total,
-                "difference": flt(erpnext_total - file_total, precision),
+                "difference": flt(erpnext_total - imported_total, precision),
+                "not_imported": None if file_total is None else flt(file_total - imported_total, precision),
+                "outstanding_now": erpnext["outstanding_now"],
             }
         },
         "differences": differences[:DIFFERENCES_SHOWN],
@@ -1141,4 +1225,99 @@ def report(session) -> Dict[str, Any]:
     }
     if session.status == "Importing":
         out["progress"] = progress
+    return out
+
+
+# -- every row, for the sign-off report (reads only) -------------------------------------------
+
+
+def outcomes(session) -> List[Dict[str, Any]]:
+    """Every row of the file and where it stands now: imported (its invoice is submitted), left
+    out, failed (the check or ERPNext refused it, with why) or not imported yet, with its amount
+    as the file writes it. Writes nothing."""
+    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.plugins.core.import_signoff import NOT_IMPORTED
+
+    invoices = settings(session)
+    lines = read_lines(session)
+    checker = _InvoiceChecker(invoices["doctype"])
+    _check_lines(session, checker, lines)
+    messages = {g["id"]: g.get("message") or _(g["cause"]) for g in checker.groups.values()}
+    marked = {entry["row"]: entry for entry in checker.rows}
+    refused = invoices.get("failed") or {}
+    left = {entry["row"]: entry["reason"] for entry in import_fixes.left_out(session)}
+    out = []
+    for line in lines:
+        entry = marked.get(line.row) or {"status": "ready"}
+        status, reason = entry["status"], ""
+        if status == "failed":
+            reason = "; ".join(messages.get(g, "") for g in entry.get("groups") or [])
+        elif status == "excluded":
+            reason = left.get(line.row) or _("Left out by the user")
+        elif status == "ready" and str(line.row) in refused:
+            status, reason = "failed", refused[str(line.row)]["message"]
+        elif status == "ready":
+            status, reason = "not_imported", _(NOT_IMPORTED)
+        try:
+            amount, unreadable = opening_stock.number(line.cells.get("outstanding_amount")), False
+        except ValueError:
+            amount, unreadable = None, True
+        totals_row = is_totals_row(line.cells)
+        out.append(
+            {
+                "row": line.row,
+                "status": status,
+                "reason": reason,
+                "amount": None if totals_row else amount,
+                "unreadable": unreadable,
+                "totals_row": totals_row,
+                "file_says": amount if totals_row else None,
+            }
+        )
+    return out
+
+
+def erpnext_side(session) -> Dict[str, Any]:
+    """The invoices this session made that are still submitted: how many, their total (their
+    grand total, which a payment after go-live doesn't change), and what is still outstanding."""
+    invoices = settings(session)
+    precision = _precision(invoices)
+    created = invoices.get("created") or {}
+    found = frappe.get_all(
+        invoices["doctype"],
+        filters={"name": ["in", list(created) or [""]]},
+        fields=["name", "docstatus", "grand_total", "outstanding_amount"],
+    )
+    submitted = [r for r in found if r.docstatus == 1]
+    return {
+        "invoices": len(submitted),
+        "total": flt(sum(flt(r.grand_total) for r in submitted), precision),
+        "outstanding_now": flt(sum(flt(r.outstanding_amount) for r in submitted), precision),
+        "no_longer_submitted": len(created) - len(submitted),
+        "by_name": {r.name: flt(r.grand_total, precision) for r in submitted},
+    }
+
+
+def summary(session) -> Dict[str, Any]:
+    """The sign-off report's view of this session: its rows and amounts per status, and ERPNext's
+    total against the file's amount for the rows imported. Writes nothing."""
+    from frappe_assistant_core.plugins.core.import_signoff import tally
+
+    invoices = settings(session)
+    precision = _precision(invoices)
+    out = tally(outcomes(session), ("amount",), precision)
+    erpnext = erpnext_side(session)
+    erpnext.pop("by_name")
+    erpnext["difference"] = flt(erpnext["total"] - out["amount"]["imported"], precision)
+    out.update(
+        {
+            "kind": "opening_invoices",
+            "doctype": invoices["doctype"],
+            "label": _("Opening {0}").format(_(invoices["doctype"])),
+            "company": invoices["company"],
+            "cut_off": invoices["cut_off"],
+            "balance": "receivables" if invoices["invoice_type"] == "Sales" else "payables",
+            "erpnext": erpnext,
+        }
+    )
     return out

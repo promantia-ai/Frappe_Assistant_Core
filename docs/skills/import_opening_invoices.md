@@ -15,10 +15,13 @@ Pass exactly what the last check reported under `opening_invoices`, so the appro
 
 - `status`: Completed, Partially Completed (some rows refused), Failed, or Importing.
 - `invoice_type`, `doctype`, `invoices`: what was made and how many invoices are submitted.
-- `totals`: per party type, the file's amount for the rows imported (`file`), the outstanding of the
-  invoices made (`erpnext`) and the `difference`. Show this.
-- `differences`: each row whose invoice's outstanding differs from the file (row, invoice, party,
-  file and ERPNext amounts). At most 50 are listed; `differences_count` is the full number.
+- `totals`: per party type, `file` (the whole file's total, every invoice row, read from the file
+  now), `imported` (the file's amount for the rows imported), `erpnext` (the total of the invoices
+  made), `difference` (`erpnext` against `imported`), `not_imported` (`file` less `imported`: rows
+  left out, refused or not imported yet) and `outstanding_now` (what is still owed today). Show this.
+  A payment after go-live lowers only `outstanding_now`: it is not a difference.
+- `differences`: each row whose invoice's total differs from the file (row, invoice, party, file and
+  ERPNext amounts). At most 50 are listed; `differences_count` is the full number.
 - `no_longer_submitted` (with `no_longer_submitted_count`): invoices made earlier that have since
   been cancelled or deleted. Tell the user.
 - `failed`: rows ERPNext refused, grouped by its message, with their amount.

@@ -200,6 +200,15 @@
     "content_file": "import_opening_balances.md"
   },
   {
+    "skill_id": "migration-sign-off",
+    "title": "Migration Sign-off",
+    "description": "Use when asked what a data migration brought in, for a migration or sign-off report, whether the business can go live, or for a PDF of it: run the Migration Sign-off report over all of the user's sessions, relay its numbers as they are, and always make its PDF with generate_document.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "migration_sign_off.md"
+  },
+  {
     "skill_id": "run-database-query-usage",
     "title": "How to Use run_database_query",
     "description": "SQL queries with analysis_type, validation, table naming conventions, JOINs, and aggregations",

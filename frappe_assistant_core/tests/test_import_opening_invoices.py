@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import frappe
+from frappe import _
 from frappe.utils import add_days, nowdate
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
@@ -553,15 +554,16 @@ class TestFixes(OpeningInvoicesCase):
                 line(self.customer, self._number(6), self.date, "", "10"),
                 line(self.customer2, self._number(6), self.date, "", "20"),
                 line(self.customer, self._number(7), self.date, "", "10"),
+                line(self.customer, self._number(8), add_days(self.date, 1), "", "10"),
+                line(self.customer2, "", self.date, "", "33"),
             ]
         )
         self.assertTrue(self._setup(session)["success"])
-        used = [
-            ready
-            for ready in opening_invoices.ready_lines(self._doc(session))
-            if ready.invoice_number == self._number(7)
-        ]
-        opening_invoices.make_invoice(opening_invoices.settings(self._doc(session)), used[0])
+        settings = opening_invoices.settings(self._doc(session))
+        for ready in opening_invoices.ready_lines(self._doc(session)):
+            # number 7 is used by an invoice already; the row without one is already brought in
+            if ready.invoice_number == self._number(7) or not ready.invoice_number:
+                opening_invoices.make_invoice(settings, ready)
         result = self._check(session)
         groups = self._groups(result)
         expected = {
@@ -821,7 +823,7 @@ class TestCreating(OpeningInvoicesCase):
 
         def refuse_second(invoices, line):
             if line.invoice_number == self._number(2):
-                frappe.throw("Refused for the test")
+                frappe.throw(_("Refused for the test"))
             return real(invoices, line)
 
         with patch.object(opening_invoices, "make_invoice", side_effect=refuse_second):
@@ -940,13 +942,23 @@ class TestReport(OpeningInvoicesCase):
                 f"{self.customer2},{self._number(2)},{self.date},,20",
             ]
         )
-        self.assertEqual(report["totals"]["Customer"], {"file": 30.5, "erpnext": 30.5, "difference": 0})
+        self.assertEqual(
+            report["totals"]["Customer"],
+            {
+                "file": 30.5,
+                "imported": 30.5,
+                "erpnext": 30.5,
+                "difference": 0,
+                "not_imported": 0,
+                "outstanding_now": 30.5,
+            },
+        )
         self.assertEqual(report["differences"], [])
         self.assertIn("matches", report["message"])
 
     def test_a_row_that_differs_is_listed(self):
         session, _ = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
-        frappe.db.set_value("Sales Invoice", self._number(1), "outstanding_amount", 7)
+        frappe.db.set_value("Sales Invoice", self._number(1), "grand_total", 7)
         report = opening_invoices.report(self._doc(session))
         self.assertEqual(
             report["differences"],
@@ -976,7 +988,7 @@ class TestReport(OpeningInvoicesCase):
         )["result"]
 
         def refuse_all(invoices, line):
-            frappe.throw("Refused for the test")
+            frappe.throw(_("Refused for the test"))
 
         with patch.object(opening_invoices, "make_invoice", side_effect=refuse_all):
             report = self._run("import_opening_invoices", self._card(session, result))["result"]
@@ -1096,7 +1108,10 @@ class TestReportEdges(OpeningInvoicesCase):
         self.assertEqual(
             report["no_longer_submitted"], [{"invoice": self._number(1), "row": 2, "amount": 10}]
         )
-        self.assertEqual(report["totals"]["Customer"]["file"], 20)
+        # The cancelled invoice's row is no longer in: the file holds 30, of which 20 is in.
+        totals = report["totals"]["Customer"]
+        self.assertEqual((totals["file"], totals["imported"], totals["erpnext"]), (30, 20, 20))
+        self.assertEqual((totals["difference"], totals["not_imported"]), (0, 10))
         self.assertIn("1 invoices made earlier were cancelled or deleted since", report["message"])
 
     def test_a_capped_list_of_differences_says_so(self):
@@ -1106,8 +1121,8 @@ class TestReportEdges(OpeningInvoicesCase):
                 f"{self.customer},{self._number(2)},{self.date},,20",
             ]
         )
-        frappe.db.set_value("Sales Invoice", self._number(1), "outstanding_amount", 7)
-        frappe.db.set_value("Sales Invoice", self._number(2), "outstanding_amount", 5)
+        frappe.db.set_value("Sales Invoice", self._number(1), "grand_total", 7)
+        frappe.db.set_value("Sales Invoice", self._number(2), "grand_total", 5)
         with patch.object(opening_invoices, "DIFFERENCES_SHOWN", 1):
             report = opening_invoices.report(self._doc(session))
         self.assertEqual((len(report["differences"]), report["differences_count"]), (1, 2))
@@ -1141,7 +1156,7 @@ class TestFinalFixes(OpeningInvoicesCase):
 
         def refuse_after_the_first(invoices, line):
             if line.invoice_number != self._number(1):
-                frappe.throw("Refused for the test")
+                frappe.throw(_("Refused for the test"))
             return real(invoices, line)
 
         with patch.object(opening_invoices, "make_invoice", side_effect=refuse_after_the_first):
@@ -1166,7 +1181,7 @@ class TestFinalFixes(OpeningInvoicesCase):
 
         def refuse_second(invoices, line):
             if line.invoice_number == self._number(2):
-                frappe.throw("Refused for the test")
+                frappe.throw(_("Refused for the test"))
             return real(invoices, line)
 
         with patch.object(opening_invoices, "make_invoice", side_effect=refuse_second):
@@ -1246,3 +1261,131 @@ class TestSessionIsOneKind(OpeningInvoicesCase):
 
     def _lines_for_setup(self):
         return [f"{self.customer},{self._number(1)},{self.date},,10"]
+
+
+class TestSignoffReviewFixes(OpeningInvoicesCase):
+    """The review's findings on opening invoices (#33999), each pinned by a test that failed first."""
+
+    def _imported(self, lines, **setup):
+        session, result = self._ready(lines, **setup)
+        reply = self._run("import_opening_invoices", self._card(session, result))
+        self.assertTrue(reply["success"], reply)
+        return session, reply["result"]
+
+    # -- an invoice dated after the cut-off wasn't owed at the cut-off -------------------------
+
+    def test_an_invoice_dated_after_the_cut_off_is_refused(self):
+        later = add_days(self.date, 1)
+        session = self._session([f"{self.customer},{self._number(1)},{later},,10"])
+        self.assertTrue(self._setup(session)["success"])
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (0, 1), result)
+        group = self._groups(result)[opening_invoices.CAUSE_AFTER_CUTOFF]
+        self.assertIn(self.date, group["message"])
+        # Posting it at the cut-off would still count new business twice: leave out or fix the file.
+        self.assertEqual([f["action"] for f in group["fixes"]], ["leave_out"])
+
+    def test_an_invoice_dated_on_the_cut_off_is_ready(self):
+        session, result = self._ready([f"{self.customer},{self._number(1)},{self.date},,10"])
+        self.assertEqual(result["ready"], 1, result)
+
+    # -- an invoice without a number, brought in by another session, isn't brought in twice ------
+
+    def test_the_same_file_in_a_new_session_does_not_post_unnumbered_invoices_again(self):
+        lines = [f"{self.customer},,{self.date},,10", f"{self.customer2},,{self.date},,20"]
+        self._imported(lines)
+
+        _again, result = self._ready(lines)
+
+        self.assertEqual((result["ready"], result["failed"]), (0, 2), result)
+        group = self._groups(result)[opening_invoices.CAUSE_ALREADY_OPENED]
+        self.assertEqual(group["count"], 2)
+
+    def test_the_sessions_own_unnumbered_invoices_count_as_imported_not_twice(self):
+        lines = [f"{self.customer},,{self.date},,10"]
+        session, _report = self._imported(lines)
+
+        result = self._check(session)
+
+        self.assertEqual((result["imported"], result["failed"]), (1, 0), result)
+
+    def test_two_identical_unnumbered_rows_with_one_already_in_leave_the_other_ready(self):
+        self._imported([f"{self.customer},,{self.date},,10"])
+
+        _again, result = self._ready(
+            [f"{self.customer},,{self.date},,10", f"{self.customer},,{self.date},,10"]
+        )
+
+        self.assertEqual((result["ready"], result["failed"]), (1, 1), result)
+
+    # -- the report compares what was brought in, not what is still owed --------------------------
+
+    def test_a_payment_after_go_live_is_not_a_difference(self):
+        session, _report = self._imported([f"{self.customer},{self._number(1)},{self.date},,10"])
+        # Production: the customer pays 3 after go-live, which lowers only the outstanding amount.
+        frappe.db.set_value("Sales Invoice", self._number(1), "outstanding_amount", 7)
+
+        report = opening_invoices.report(self._doc(session))
+
+        self.assertEqual(report["differences"], [])
+        totals = report["totals"]["Customer"]
+        self.assertEqual((totals["erpnext"], totals["difference"], totals["outstanding_now"]), (10, 0, 7))
+
+    def test_the_file_total_counts_every_row_not_only_the_ones_imported(self):
+        session, result = self._ready(
+            [
+                f"{self.customer},{self._number(1)},{self.date},,10",
+                f"{self.customer},{self._number(2)},{self.date},,20",
+                f"{self.customer},{self._number(3)},1990-01-15,,40",  # no fiscal year: left out
+            ]
+        )
+        group = self._groups(result)[opening_invoices.CAUSE_NO_FISCAL_YEAR]
+        result = self._run(
+            "dry_run_import", {"session": session, "fixes": [{"group": group["id"], "action": "leave_out"}]}
+        )["result"]
+
+        def refuse_second(invoices, line):
+            if line.invoice_number == self._number(2):
+                frappe.throw(_("Refused for the test"))
+            return real(invoices, line)
+
+        real = opening_invoices.make_invoice
+        with patch.object(opening_invoices, "make_invoice", side_effect=refuse_second):
+            report = self._run("import_opening_invoices", self._card(session, result))["result"]
+
+        totals = report["totals"]["Customer"]
+        self.assertEqual(
+            (totals["file"], totals["imported"], totals["erpnext"], totals["not_imported"]), (70, 10, 10, 60)
+        )
+        self.assertIn("The whole file holds 70.0: 60.0 isn't in", report["message"])
+
+    # -- the rows ERPNext refused at the import come as a file to correct ----------------------
+
+    def test_failed_rows_file_holds_the_rows_erpnext_refused_at_the_import(self):
+        session, result = self._ready(
+            [
+                f"{self.customer},{self._number(1)},{self.date},,10",
+                f"{self.customer},{self._number(2)},{self.date},,20",
+            ]
+        )
+
+        def refuse_second(invoices, line):
+            if line.invoice_number == self._number(2):
+                frappe.throw(_("Refused for the test"))
+            return real(invoices, line)
+
+        real = opening_invoices.make_invoice
+        with patch.object(opening_invoices, "make_invoice", side_effect=refuse_second):
+            self._run("import_opening_invoices", self._card(session, result))
+
+        reply = self._run("dry_run_import", {"session": session, "failed_rows_file": True})
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(reply["result"]["rows"], 1)
+        content = frappe.get_doc("File", {"file_url": reply["result"]["file_url"]}).get_content()
+        text = content.decode() if isinstance(content, bytes) else content
+        self.assertIn(self._number(2), text)
+        self.assertIn("Refused for the test", text)
+        self.assertNotIn(self._number(1), text)
