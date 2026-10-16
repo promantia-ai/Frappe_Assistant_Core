@@ -17,7 +17,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
-from frappe.utils import add_to_date, now_datetime
+from frappe.utils import add_days, add_to_date, getdate, now_datetime, nowdate
 
 from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase
@@ -178,3 +178,413 @@ class TestRefusal(UndoCase):
         doc.steps = []
 
         self.assertEqual(import_undo.finished_at(doc), doc.creation)
+
+
+class BlockerCase(UndoCase):
+    """Sessions with extra records listed on them, and documents outside the set that use them.
+    Rows written straight to the database (a submitted Journal Entry, a Stock Reconciliation and
+    its ledger) stand in for documents too costly to build; they are deleted in tearDown."""
+
+    def setUp(self):
+        super().setUp()
+        self.company = frappe.get_all("Company", pluck="name", order_by="creation", limit=1)[0]
+        self.raw = []
+
+    def tearDown(self):
+        for doctype, name in reversed(self.raw):
+            frappe.db.delete(doctype, {"name": name})
+        super().tearDown()
+
+    def _add(self, session, doctype, name, parent=None):
+        doc = self._doc(session)
+        doc.append(
+            "created_records", {"record_doctype": doctype, "record_name": name, "parent_record": parent}
+        )
+        doc.save()
+
+    def _insert_raw(self, values):
+        doc = frappe.get_doc(values)
+        doc.db_insert()
+        self.raw.append((doc.doctype, doc.name))
+        return doc
+
+    def _plan(self, session):
+        return import_undo.build_plan(self._doc(session))
+
+    def _blocked(self, plan):
+        return {(b.record.doctype, b.record.name): b for b in plan.blocked}
+
+    def _kept(self, plan):
+        return {(r.doctype, r.name): because for r, because in plan.kept}
+
+    def _outside_customer(self, group):
+        return (
+            frappe.get_doc(
+                {"doctype": "Customer", "customer_name": f"Outside {self.tag}", "customer_group": group}
+            )
+            .insert()
+            .name
+        )
+
+    def _edited_by_someone_else(self, doctype, name):
+        frappe.db.set_value(doctype, name, "modified_by", "Guest", update_modified=False)
+
+    def _journal_entry(self, session, posting_date):
+        entry = self._insert_raw(
+            {
+                "doctype": "Journal Entry",
+                "name": f"UNDO-JE-{self.tag}",
+                "company": self.company,
+                "posting_date": posting_date,
+                "voucher_type": "Journal Entry",
+                "docstatus": 1,
+            }
+        )
+        self._add(session, "Journal Entry", entry.name)
+        return entry.name
+
+
+class TestBlockers(BlockerCase):
+    def test_a_document_linking_to_a_record_blocks_it_as_linked(self):
+        session, names = self._session_with_groups()
+        outside = self._outside_customer(names[0])
+
+        blocked = self._blocked(self._plan(session))
+
+        blocker = blocked[("Customer Group", names[0])]
+        self.assertEqual(blocker.reason, "linked")
+        self.assertEqual(blocker.blocked_by, f"Customer {outside}")
+        self.assertIn(outside, blocker.detail)
+        self.assertNotIn(("Customer Group", names[1]), blocked)
+
+    def test_the_sessions_own_rows_do_not_block(self):
+        session, names = self._session_with_groups(1)
+        records = [import_undo.Record("Customer Group", names[0])]
+
+        unignored = import_undo.link_blockers(records, set())
+        ignored = import_undo.link_blockers(records, {("FAC Import Session", session)})
+
+        self.assertEqual([b.blocked_by for b in unignored], [f"FAC Import Session {session}"])
+        self.assertEqual(ignored, [])
+
+    def test_a_link_from_a_child_table_blocks_it(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        item = (
+            frappe.get_doc(
+                {
+                    "doctype": "Item",
+                    "item_code": f"Undo Item {self.tag}",
+                    "item_group": frappe.db.get_value("Item Group", {"is_group": 0}),
+                    "stock_uom": frappe.db.get_value("UOM", {}) or "Nos",
+                    "customer_items": [{"customer_name": alpha, "ref_code": f"R{self.tag}"}],
+                }
+            )
+            .insert()
+            .name
+        )
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Item {item}"))
+
+    def test_a_dynamic_link_blocks_it(self):
+        session = self._session_with_customers()
+        gamma = self._names()["gamma"]
+        bank = frappe.get_doc({"doctype": "Bank", "bank_name": f"Undo Bank {self.tag}"}).insert().name
+        account = (
+            frappe.get_doc(
+                {
+                    "doctype": "Bank Account",
+                    "account_name": f"Undo {self.tag}",
+                    "bank": bank,
+                    "party_type": "Customer",
+                    "party": gamma,
+                }
+            )
+            .insert()
+            .name
+        )
+
+        blocker = self._blocked(self._plan(session))[("Customer", gamma)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Bank Account {account}"))
+
+    def test_a_cancelled_document_does_not_block(self):
+        session, names = self._session_with_groups()
+        outside = self._outside_customer(names[0])
+        frappe.db.set_value("Customer", outside, "docstatus", 2, update_modified=False)
+
+        self.assertEqual(self._plan(session).blocked, [])
+
+    def test_a_document_inside_the_set_does_not_block(self):
+        session = self._session_with_customers()
+        self._add(session, "Customer Group", self.group, "All Customer Groups")
+
+        plan = self._plan(session)
+
+        self.assertEqual(plan.blocked, [])
+        self.assertIn(("Customer Group", self.group), {(r.doctype, r.name) for r in plan.to_delete})
+
+    def test_a_record_edited_by_another_user_is_changed(self):
+        session, names = self._session_with_groups()
+        self._edited_by_someone_else("Customer Group", names[0])
+
+        blocked = self._blocked(self._plan(session))
+
+        blocker = blocked[("Customer Group", names[0])]
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("changed", None))
+        self.assertIn("Guest", blocker.detail)
+        self.assertNotIn(("Customer Group", names[1]), blocked)
+
+    def test_a_record_modified_after_the_grace_is_changed(self):
+        session, names = self._session_with_groups()
+        late = import_undo.finished_at(self._doc(session)) + timedelta(
+            minutes=import_undo.UNDO_GRACE_MINUTES + 1
+        )
+        frappe.db.set_value("Customer Group", names[0], "modified", late, update_modified=False)
+
+        blocker = self._blocked(self._plan(session))[("Customer Group", names[0])]
+
+        self.assertEqual(blocker.reason, "changed")
+
+    def test_a_record_modified_inside_the_grace_by_the_session_user_is_not_changed(self):
+        session, names = self._session_with_groups()
+        soon = import_undo.finished_at(self._doc(session)) + timedelta(
+            minutes=import_undo.UNDO_GRACE_MINUTES - 5
+        )
+        frappe.db.set_value("Customer Group", names[0], "modified", soon, update_modified=False)
+
+        self.assertEqual(self._plan(session).blocked, [])
+
+    def test_a_posting_date_on_or_before_accounts_frozen_till_is_closed_books(self):
+        session, _names = self._session_with_groups()
+        entry = self._journal_entry(session, "2024-03-31")
+
+        with patch.object(import_undo, "_frozen_till", return_value=getdate("2024-03-31")):
+            on_the_day = self._blocked(self._plan(session))
+        with patch.object(import_undo, "_frozen_till", return_value=getdate("2024-03-30")):
+            the_day_before = self._blocked(self._plan(session))
+
+        blocker = on_the_day[("Journal Entry", entry)]
+        self.assertEqual(blocker.reason, "closed_books")
+        self.assertIn("2024-03-31", blocker.detail)
+        self.assertNotIn(("Journal Entry", entry), the_day_before)
+
+    def test_a_posting_date_in_a_period_closing_voucher_is_closed_books(self):
+        session, _names = self._session_with_groups()
+        entry = self._journal_entry(session, "2024-03-31")
+
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={self.company: getdate("2024-12-31")}
+        ):
+            blocked = self._blocked(self._plan(session))
+
+        blocker = blocked[("Journal Entry", entry)]
+        self.assertEqual(blocker.reason, "closed_books")
+        self.assertIn("Period Closing Voucher", blocker.detail)
+
+    def test_stock_movement_after_the_reconciliation_is_later_stock(self):
+        session, _names = self._session_with_groups()
+        item, warehouse = f"UNDO-IT-{self.tag}", f"UNDO-WH-{self.tag}"
+        recon = self._insert_raw(
+            {
+                "doctype": "Stock Reconciliation",
+                "name": f"UNDO-SR-{self.tag}",
+                "company": self.company,
+                "purpose": "Opening Stock",
+                "posting_date": add_days(nowdate(), -3),
+                "posting_time": "10:00:00",
+                "docstatus": 1,
+            }
+        ).name
+        self._insert_raw(
+            {
+                "doctype": "Stock Reconciliation Item",
+                "name": f"UNDO-SRI-{self.tag}",
+                "parent": recon,
+                "parenttype": "Stock Reconciliation",
+                "parentfield": "items",
+                "idx": 1,
+                "item_code": item,
+                "warehouse": warehouse,
+                "docstatus": 1,
+            }
+        )
+        self._add(session, "Stock Reconciliation", recon)
+
+        def ledger(suffix, voucher_type, voucher_no, days_ago):
+            posting = add_days(nowdate(), -days_ago)
+            self._insert_raw(
+                {
+                    "doctype": "Stock Ledger Entry",
+                    "name": f"UNDO-SLE-{suffix}-{self.tag}",
+                    "item_code": item,
+                    "warehouse": warehouse,
+                    "company": self.company,
+                    "posting_date": posting,
+                    "posting_time": "12:00:00",
+                    "posting_datetime": f"{posting} 12:00:00",
+                    "voucher_type": voucher_type,
+                    "voucher_no": voucher_no,
+                    "actual_qty": 1,
+                    "is_cancelled": 0,
+                    "docstatus": 1,
+                }
+            )
+
+        ledger("own", "Stock Reconciliation", recon, 2)  # made by the undo set: does not count
+        ledger("cancelled", "Stock Entry", f"UNDO-SE0-{self.tag}", 1)
+        frappe.db.set_value(
+            "Stock Ledger Entry", f"UNDO-SLE-cancelled-{self.tag}", "is_cancelled", 1, update_modified=False
+        )
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ):
+            before = self._blocked(self._plan(session))
+            ledger("later", "Stock Entry", f"UNDO-SE-{self.tag}", 1)
+            after = self._blocked(self._plan(session))
+
+        self.assertNotIn(("Stock Reconciliation", recon), before)
+        blocker = after[("Stock Reconciliation", recon)]
+        self.assertEqual(
+            (blocker.reason, blocker.blocked_by), ("later_stock", f"Stock Entry UNDO-SE-{self.tag}")
+        )
+        self.assertIn(item, blocker.detail)
+
+    def test_a_doctype_without_delete_permission_is_no_permission(self):
+        session, names = self._session_with_groups()
+        real = frappe.has_permission
+
+        def no_delete(doctype=None, ptype="read", *args, **kwargs):
+            if doctype == "Customer Group" and ptype == "delete":
+                return False
+            return real(doctype, ptype, *args, **kwargs)
+
+        with patch.object(import_undo.frappe, "has_permission", side_effect=no_delete):
+            blocked = self._blocked(self._plan(session))
+
+        self.assertEqual(
+            {key: b.reason for key, b in blocked.items()},
+            {("Customer Group", name): "no_permission" for name in names},
+        )
+
+    def test_a_submitted_record_needs_cancel_permission(self):
+        session, _names = self._session_with_groups()
+        entry = self._journal_entry(session, nowdate())
+        real = frappe.has_permission
+
+        def no_cancel(doctype=None, ptype="read", *args, **kwargs):
+            if doctype == "Journal Entry" and ptype == "cancel":
+                return False
+            return real(doctype, ptype, *args, **kwargs)
+
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ), patch.object(import_undo.frappe, "has_permission", side_effect=no_cancel):
+            blocked = self._blocked(self._plan(session))
+
+        blocker = blocked[("Journal Entry", entry)]
+        self.assertEqual(blocker.reason, "no_permission")
+        self.assertIn("cancel", blocker.detail)
+
+
+class TestCascade(BlockerCase):
+    def _customers_with_their_group(self):
+        session = self._session_with_customers()
+        self._add(session, "Customer Group", self.group, "All Customer Groups")
+        return session
+
+    def test_a_kept_customer_keeps_its_customer_group(self):
+        session = self._customers_with_their_group()
+        alpha = self._names()["alpha"]
+        self._edited_by_someone_else("Customer", alpha)
+
+        plan = self._plan(session)
+
+        self.assertEqual(self._blocked(plan)[("Customer", alpha)].reason, "changed")
+        because = self._kept(plan)[("Customer Group", self.group)]
+        self.assertIn(alpha, because)
+        self.assertNotIn(("Customer Group", self.group), {(r.doctype, r.name) for r in plan.to_delete})
+
+    def test_a_kept_tree_child_keeps_its_parent(self):
+        session, _names = self._session_with_groups(1)
+        top, child = f"Undo Top {self.tag}", f"Undo Child {self.tag}"
+        for name, parent, is_group in ((top, "All Customer Groups", 1), (child, top, 0)):
+            frappe.get_doc(
+                {
+                    "doctype": "Customer Group",
+                    "customer_group_name": name,
+                    "parent_customer_group": parent,
+                    "is_group": is_group,
+                }
+            ).insert()
+            self._add(session, "Customer Group", name, parent)
+        self._edited_by_someone_else("Customer Group", child)
+
+        plan = self._plan(session)
+
+        self.assertEqual(set(self._blocked(plan)), {("Customer Group", child)})
+        self.assertIn(child, self._kept(plan)[("Customer Group", top)])
+
+    def test_kept_records_are_not_counted_as_blocked(self):
+        session = self._customers_with_their_group()
+        n = self._names()
+        self._edited_by_someone_else("Customer", n["alpha"])
+        self._edited_by_someone_else("Customer", n["gamma"])
+
+        plan = self._plan(session)
+
+        self.assertEqual(set(self._blocked(plan)), {("Customer", n["alpha"]), ("Customer", n["gamma"])})
+        self.assertEqual(set(self._kept(plan)), {("Customer Group", self.group)})
+
+    def test_a_record_blocked_itself_stays_blocked_when_another_depends_on_it(self):
+        session = self._customers_with_their_group()
+        self._edited_by_someone_else("Customer", self._names()["alpha"])
+        self._edited_by_someone_else("Customer Group", self.group)
+
+        plan = self._plan(session)
+
+        self.assertIn(("Customer Group", self.group), self._blocked(plan))
+        self.assertEqual(plan.kept, [])
+
+
+class TestPlan(BlockerCase):
+    def test_the_fingerprint_is_stable_and_changes_when_a_record_is_added(self):
+        session, _names = self._session_with_groups()
+        first = self._plan(session).fingerprint
+        reordered = self._doc(session)
+        reordered.created_records.reverse()
+
+        self.assertEqual(self._plan(session).fingerprint, first)
+        self.assertEqual(import_undo.build_plan(reordered).fingerprint, first)
+
+        extra = f"Undo Extra {self.tag}"
+        frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": extra,
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+        self._add(session, "Customer Group", extra, "All Customer Groups")
+        added = self._plan(session).fingerprint
+        self.assertNotEqual(added, first)
+
+        self._edited_by_someone_else("Customer Group", extra)
+        self.assertNotEqual(self._plan(session).fingerprint, added)
+
+    def test_to_delete_excludes_blocked_and_kept(self):
+        session = self._session_with_customers()
+        self._add(session, "Customer Group", self.group, "All Customer Groups")
+        n = self._names()
+        self._edited_by_someone_else("Customer", n["alpha"])
+
+        plan = self._plan(session)
+
+        self.assertEqual(len(plan.records), 4)
+        self.assertEqual(
+            [(r.doctype, r.name) for r in plan.to_delete],
+            [("Customer", n["gamma"]), ("Customer", n["delta"])],
+        )
+        self.assertEqual((plan.already_removed, plan.note), ([], None))
