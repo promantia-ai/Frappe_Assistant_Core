@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import frappe
 from frappe import _
+from frappe.utils import cint
 
 SUPPORTED_EXTENSIONS = ("csv", "xlsx", "xls")
 SAMPLE_SIZE = 10
@@ -147,7 +148,9 @@ def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
     except Exception as e:
         raise FileProblem(_("Could not read the file: {0}").format(_describe_read_error(e)))
     raise FileProblem(
-        _("Sheet '{0}' not found. Sheets in this file: {1}.").format(sheet, ", ".join(map(str, names)))
+        _("Sheet '{0}' not found. Sheets in this file: {1}.").format(
+            sheet, ", ".join(str(name) for name in names)
+        )
     )
 
 
@@ -274,6 +277,29 @@ def _as_text(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
+
+
+# -- how many rows one import may have ----------------------------------------------
+
+DEFAULT_MAX_IMPORT_ROWS = 50000
+
+
+def max_import_rows() -> int:
+    """Assistant Core Settings' Max Rows per Import; 0 or blank is the default, never unlimited."""
+    value = frappe.db.get_single_value("Assistant Core Settings", "max_import_rows")
+    return cint(value) or DEFAULT_MAX_IMPORT_ROWS
+
+
+def row_limit_problem(row_count: int) -> Optional[str]:
+    """Why a file of ``row_count`` rows can't be imported in one go, or None (#34003)."""
+    limit = max_import_rows()
+    if cint(row_count) <= limit:
+        return None
+    return _(
+        "The file has {0} rows, more than the {1} one import may have. Split it into files of at "
+        "most {1} rows and import them one after another. (The limit is Max Rows per Import in "
+        "Assistant Core Settings.)"
+    ).format(row_count, limit)
 
 
 # -- target DocType ----------------------------------------------------------------

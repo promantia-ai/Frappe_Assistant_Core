@@ -20,7 +20,7 @@ import frappe
 
 from frappe_assistant_core.mcp.server import MCPServer
 from frappe_assistant_core.mcp.tool_adapter import build_tool_dict
-from frappe_assistant_core.plugins.core import import_fixes
+from frappe_assistant_core.plugins.core import import_fixes, import_session
 
 # The module, not its class: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_run as run_tests
@@ -146,3 +146,59 @@ class TestTheModelSeesASummary(GuardrailCase):
 
         self.assertFalse(reply["success"], reply)
         self.assertIn(session, reply["error"])
+
+
+class TestTheRowLimit(GuardrailCase):
+    def _limit(self, value):
+        frappe.db.set_single_value("Assistant Core Settings", "max_import_rows", value)
+
+    def _rows(self, count):
+        return [f"Cust {i} {self.tag},{self.group},Company" for i in range(count)]
+
+    def test_a_file_at_the_limit_is_read(self):
+        self._limit(3)
+        reply = self._run("start_import_session", {"file_id": self._csv(self._rows(3)).name})
+        self.assertTrue(reply["success"], reply)
+
+    def test_a_file_over_the_limit_is_refused_and_no_session_is_made(self):
+        self._limit(3)
+        before = frappe.db.count("FAC Import Session")
+
+        reply = self._run("start_import_session", {"file_id": self._csv(self._rows(4)).name})
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Split it", json.dumps(reply))
+        self.assertEqual(frappe.db.count("FAC Import Session"), before)
+
+    def test_a_file_in_the_chat_over_the_limit_is_refused(self):
+        self._limit(3)
+        reply = self._run(
+            "start_import_session",
+            {"file_name": "big.csv", "columns": list(run_tests.MAPPING), "row_count": 4},
+        )
+        self.assertFalse(reply["success"], reply)
+
+    def test_zero_or_blank_means_the_default_never_unlimited(self):
+        for value in (0, None):
+            self._limit(value)
+            self.assertEqual(import_session.max_import_rows(), 50000)
+
+    def test_a_corrected_file_over_the_limit_is_refused_at_the_check(self):
+        self._limit(3)
+        file_doc = self._csv(self._rows(2))
+        session = self._run("start_import_session", {"file_id": file_doc.name})["result"]["session_id"]
+        self._run(
+            "set_column_mapping", {"session": session, "mapping": run_tests.MAPPING, "doctype": "Customer"}
+        )
+
+        reply = self._run("dry_run_import", {"session": session, "file_id": self._csv(self._rows(4)).name})
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Split it", json.dumps(reply))
+
+    def test_the_patch_sets_the_default_on_an_existing_site(self):
+        from frappe_assistant_core.patches.v3_1 import set_max_import_rows
+
+        self._limit(0)  # existing sites read 0: the schema default never applied to them
+        set_max_import_rows.execute()
+        self.assertEqual(frappe.db.get_single_value("Assistant Core Settings", "max_import_rows"), 50000)

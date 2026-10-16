@@ -108,6 +108,11 @@ def special_engine(session):
 
 def check_can_run(session) -> None:
     """Raise DryRunProblem when ``session`` can't be checked yet, saying what to do."""
+    from frappe_assistant_core.plugins.core.import_session import row_limit_problem
+
+    problem = row_limit_problem(row_count(session))  # a corrected file can be larger
+    if problem:
+        raise DryRunProblem(problem)
     engine = special_engine(session)
     if engine:
         return engine.check_can_run(session)
@@ -235,7 +240,7 @@ def run_job(session_name: str, user: str) -> None:
     """Background job: the dry run as the user who asked for it."""
     from frappe_assistant_core.plugins.core.import_fixes import check
 
-    frappe.set_user(user)
+    frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who asked for the check
     try:
         check(session_name, commit_progress=True)  # the run, explained for the model to read later
         frappe.db.commit()
@@ -287,7 +292,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
                 _progress("running", done, total),
                 update_modified=False,
             )
-            frappe.db.commit()
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background check commits its progress
 
     return _store(session_name, file_doc, checker, total)
 

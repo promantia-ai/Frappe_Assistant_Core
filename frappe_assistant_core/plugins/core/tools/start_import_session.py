@@ -27,6 +27,7 @@ from frappe_assistant_core.plugins.core.import_session import (
     find_site_file,
     import_target_problem,
     read_spreadsheet,
+    row_limit_problem,
 )
 
 
@@ -131,6 +132,10 @@ class StartImportSession(BaseTool):
                 sheets = [chosen]
         except FileProblem as e:
             return {"success": False, "error": str(e)}
+
+        problem = row_limit_problem(chosen.row_count)
+        if problem:
+            return {"success": False, "error": problem, "row_count": chosen.row_count}
 
         session = self._create_session(file_doc, file_name, sheets, chosen, target_doctype, import_type)
 
