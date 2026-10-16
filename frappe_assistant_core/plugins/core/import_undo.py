@@ -10,8 +10,8 @@
 Undo an import (#34002): what a session created, whether it can be undone now, and the
 background job that removes it.
 
-The undo set is the session's Created Records plus, for an Insert New Records session, the
-records its Data Imports logged as created. The plan says, for each of them, whether it can be
+The undo set is the session's Created Records plus the records its Insert New Records Data
+Imports logged as created (each Data Import by its own import type). The plan says, for each of them, whether it can be
 removed: what blocks it (spec §4), and what a blocked record keeps with it. start() hands the
 plan's records to a background job, which removes them in delete order (spec §5), one savepoint
 per record, and report() says how far it got.
@@ -134,24 +134,34 @@ def undo_set(session) -> Tuple[List[Record], List[Record], Optional[str]]:
     for row in session.created_records:
         add(row.record_doctype, row.record_name, row.parent_record)
 
+    # Each Data Import by its own import type, not the session's: a session that ran an update
+    # can be reused by an opening import, which sets the session to Insert.
     note = None
-    if session.import_type == INSERT:
-        done: Set[str] = set()
-        for link in session.data_imports:
-            if not link.data_import or link.data_import in done:
-                continue
-            done.add(link.data_import)
-            doctype = frappe.db.get_value("Data Import", link.data_import, "reference_doctype")
-            for docname in frappe.get_all(
-                "Data Import Log",
-                fields=["docname"],
-                filters={"data_import": link.data_import, "success": 1},
-                pluck="docname",
-                order_by="creation asc",
-                limit_page_length=0,
-            ):
-                add(doctype, docname)
-    elif session.import_type == UPDATE and session.data_imports:
+    done: Set[str] = set()
+    updates = inserts = 0
+    for link in session.data_imports:
+        if not link.data_import or link.data_import in done:
+            continue
+        done.add(link.data_import)
+        di = frappe.db.get_value(
+            "Data Import", link.data_import, ["reference_doctype", "import_type"], as_dict=True
+        )
+        if not di:
+            continue
+        if (di.import_type or INSERT) != INSERT:
+            updates += 1  # its records existed before it: never deleted
+            continue
+        inserts += 1
+        for docname in frappe.get_all(
+            "Data Import Log",
+            fields=["docname"],
+            filters={"data_import": link.data_import, "success": 1},
+            pluck="docname",
+            order_by="creation asc",
+            limit_page_length=0,
+        ):
+            add(di.reference_doctype, docname)
+    if updates and not inserts:
         note = _(
             "This session imported with Update Existing Records: those records existed before the "
             "import and are never deleted, so there is nothing to undo for them."

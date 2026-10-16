@@ -114,15 +114,45 @@ class TestUndoSet(UndoCase):
         self.assertEqual([r.name for r in made_removed], [names[0]])
         self.assertEqual([r.name for r in made_present], [names[1]])
 
+    def _as_update(self, session, session_too=True):
+        """The session's Data Import ran with Update Existing Records (and the session, unless
+        ``session_too`` is false: a session reused afterwards by an opening import is Insert)."""
+        doc = self._doc(session)
+        frappe.db.set_value(
+            "Data Import", doc.data_imports[-1].data_import, "import_type", "Update Existing Records"
+        )
+        if session_too:
+            doc.db_set("import_type", "Update Existing Records")
+
     def test_an_update_session_has_no_records_and_a_note(self):
         session = self._session_with_customers()
-        self._doc(session).db_set("import_type", "Update Existing Records")
+        self._as_update(session)
 
         present, removed, note = import_undo.undo_set(self._doc(session))
 
         self.assertEqual((present, removed), ([], []))
         self.assertIn("Update Existing Records", note)
         self.assertIn("never deleted", note)
+
+    def test_an_update_data_import_on_an_insert_session_contributes_no_records(self):
+        session = self._session_with_customers()
+        self._as_update(session, session_too=False)
+        self.assertEqual(self._doc(session).import_type, "Insert New Records")
+
+        present, removed, note = import_undo.undo_set(self._doc(session))
+
+        self.assertEqual((present, removed), ([], []))
+        self.assertIn("Update Existing Records", note)
+
+    def test_the_data_imports_own_type_decides_not_the_sessions(self):
+        session = self._session_with_customers()
+        self._doc(session).db_set("import_type", "Update Existing Records")  # the Data Import inserted
+
+        present, _removed, note = import_undo.undo_set(self._doc(session))
+
+        n = self._names()
+        self.assertEqual({r.name for r in present}, {n["alpha"], n["gamma"], n["delta"]})
+        self.assertIsNone(note)
 
 
 class TestRefusal(UndoCase):

@@ -220,7 +220,11 @@ class TestPreview(UndoToolsCase):
 
     def test_preview_notes_an_update_session(self):
         session = self._session_with_customers()
-        self._doc(session).db_set("import_type", "Update Existing Records")
+        doc = self._doc(session)
+        frappe.db.set_value(
+            "Data Import", doc.data_imports[-1].data_import, "import_type", "Update Existing Records"
+        )
+        doc.db_set("import_type", "Update Existing Records")
 
         preview = self._preview(session)
 
