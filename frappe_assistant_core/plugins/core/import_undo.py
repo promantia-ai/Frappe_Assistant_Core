@@ -400,7 +400,8 @@ def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List
 
 
 def _changed_blockers(records: List[Record], session) -> List[Blocker]:
-    """Edited by another user than the session's, or later than the import plus the grace."""
+    """Edited by another user than the session's, or later than the import plus the grace; or
+    created later than that (deleted by hand and made again under the same name)."""
     user = session.user or session.owner
     finished = finished_at(session)
     latest = finished + timedelta(minutes=UNDO_GRACE_MINUTES)
@@ -410,7 +411,7 @@ def _changed_blockers(records: List[Record], session) -> List[Blocker]:
             for row in frappe.get_all(
                 doctype,
                 filters={"name": ["in", chunk]},
-                fields=["name", "modified", "modified_by"],
+                fields=["name", "creation", "modified", "modified_by"],
                 limit_page_length=0,
             ):
                 rows[(doctype, row.name)] = row
@@ -421,6 +422,10 @@ def _changed_blockers(records: List[Record], session) -> List[Blocker]:
             continue
         if row.modified_by and row.modified_by != user:
             detail = _("{0} changed it on {1}, after the import.").format(row.modified_by, row.modified)
+        elif get_datetime(row.creation) > latest:
+            detail = _("It was created again on {0}, after the import finished ({1}).").format(
+                row.creation, finished
+            )
         elif get_datetime(row.modified) > latest:
             detail = _("It was changed on {0}, after the import finished ({1}).").format(
                 row.modified, finished

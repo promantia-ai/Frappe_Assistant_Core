@@ -68,7 +68,7 @@ Deleted records **cannot be restored**. Say so before the user approves.
 | `reason` | Meaning |
 |---|---|
 | `linked` | Another document, not part of the import, uses the record (a Sales Invoice for an opening Customer, a Payment Entry for an opening invoice). |
-| `changed` | The record was edited after the import, by another user or well after it. |
+| `changed` | The record was edited after the import, by another user or well after it, or it was made again (deleted and created under the same name) after the import. |
 | `closed_books` | The record's posting date is in a closed period (accounts frozen date or a Period Closing Voucher). |
 | `later_stock` | Stock moved on the item after an opening Stock Reconciliation. |
 | `no_permission` | The user may not delete (or cancel) that DocType. |

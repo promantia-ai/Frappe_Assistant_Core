@@ -499,6 +499,22 @@ class TestBlockers(BlockerCase):
 
         self.assertEqual(blocker.reason, "changed")
 
+    def test_a_record_created_after_the_grace_is_changed(self):
+        # Deleted by hand and made again under the same name, by the session's user: not the
+        # record the import made, whatever its modified time says.
+        session, names = self._session_with_groups()
+        late = import_undo.finished_at(self._doc(session)) + timedelta(
+            minutes=import_undo.UNDO_GRACE_MINUTES + 1
+        )
+        frappe.db.set_value("Customer Group", names[0], "creation", late, update_modified=False)
+
+        blocked = self._blocked(self._plan(session))
+
+        blocker = blocked[("Customer Group", names[0])]
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("changed", None))
+        self.assertIn("created", blocker.detail)
+        self.assertNotIn(("Customer Group", names[1]), blocked)
+
     def test_a_record_modified_inside_the_grace_by_the_session_user_is_not_changed(self):
         session, names = self._session_with_groups()
         soon = import_undo.finished_at(self._doc(session)) + timedelta(
