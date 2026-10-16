@@ -220,7 +220,9 @@ class TestRefusal(UndoCase):
         for step in imports:
             step.outcome = "Warning"  # a partial Data Import, or opening rows refused
         finish = max(s.timestamp for s in imports)
-        doc.append("steps", {"step": "Map Columns", "outcome": "Success", "timestamp": add_to_date(finish, hours=1)})
+        doc.append(
+            "steps", {"step": "Map Columns", "outcome": "Success", "timestamp": add_to_date(finish, hours=1)}
+        )
 
         self.assertEqual(import_undo.finished_at(doc), finish)
 

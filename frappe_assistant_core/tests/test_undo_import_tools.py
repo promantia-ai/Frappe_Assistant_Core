@@ -749,7 +749,9 @@ class TestUndoneSession(UndoToolsCase):
         self._doc(session).db_set("status", "Undoing")
         before = self._doc(session).template_options
 
-        reply = self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+        reply = self._run(
+            "set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"}
+        )
 
         self.assertFalse(reply["success"], reply)
         self.assertIn("Undoing", reply["error"])

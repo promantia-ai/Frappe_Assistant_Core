@@ -102,9 +102,9 @@ class SetColumnMapping(BaseTool):
                 being = _("is being undone") if doc.status == "Undoing" else _("was undone")
                 return {
                     "success": False,
-                    "error": _("This import session is {0}: the import {1}. Start a new import session.").format(
-                        doc.status, being
-                    ),
+                    "error": _(
+                        "This import session is {0}: the import {1}. Start a new import session."
+                    ).format(doc.status, being),
                     "session": session_name,
                 }
 
