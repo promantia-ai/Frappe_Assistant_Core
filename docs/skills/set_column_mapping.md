@@ -6,6 +6,8 @@ The `set_column_mapping` tool saves which column of the user's migration file go
 
 The session comes from `start_import_session`. Get the fields from `get_import_schema` first. Saving moves the session to **Mapped** and adds a "Map Columns" row to its step log.
 
+Sessions opened by `apply_import_preset` already have their mapping. Use this tool to change any column the user wants changed.
+
 ## Parameters
 
 | Parameter | Type | Required | Description |
