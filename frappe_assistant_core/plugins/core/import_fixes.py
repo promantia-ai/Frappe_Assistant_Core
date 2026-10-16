@@ -42,7 +42,13 @@ MAP = "map"
 CREATE = "create"
 LEAVE_OUT = "leave_out"
 ALLOW_ZERO_RATE = "allow_zero_rate"  # opening stock: bring an item in at zero value
-ACTIONS = (MAP, LEAVE_OUT, ALLOW_ZERO_RATE)  # applied by dry_run_import; create is done with create_document
+POST_AT_CUTOFF = "post_at_cutoff"  # opening invoices: post invoices dated in no fiscal year at the cut-off
+ACTIONS = (
+    MAP,
+    LEAVE_OUT,
+    ALLOW_ZERO_RATE,
+    POST_AT_CUTOFF,
+)  # applied by dry_run_import; create is done with create_document
 
 CLOSEST_LIMIT = 5
 MIN_SCORE = 0.5
@@ -298,6 +304,28 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
             "fix_in_file": cause != opening_stock.CAUSE_TOTALS_ROW,
         }
 
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    if cause in opening_invoices.NEW_CAUSES:
+        explanation = _("{0}: {1}").format(rows, group.get("message") or _(cause))
+        fixes = [leave_out]
+        if cause == opening_invoices.CAUSE_NO_FISCAL_YEAR:
+            cut_off = opening_invoices.settings(session).get("cut_off")
+            fixes.insert(
+                0,
+                {
+                    "action": POST_AT_CUTOFF,
+                    "note": _(
+                        "Posts them at the cut-off date ({0}), keeping the due date unless it is "
+                        "earlier; the old date goes in the remarks."
+                    ).format(cut_off),
+                },
+            )
+        if cause == opening_invoices.CAUSE_PARTY_DISABLED:
+            party_type = opening_invoices.settings(session).get("party_type")
+            fixes.insert(0, {"action": MAP, "closest": closest_names(party_type, value)})
+        return {"explanation": explanation, "fixes": fixes, "fix_in_file": True}
+
     explanations = {
         dry_run.CAUSE_BAD_DATE: _("{0}: {1} isn't a date ERPNext can read. {2}"),
         dry_run.CAUSE_BAD_VALUE: _("{0}: a value ERPNext can't use. {2}"),
@@ -333,6 +361,7 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
     maps = value_maps(session)
     reasons = {str(entry["row"]): entry["reason"] for entry in left_out(session)}
     zero_rate = list(_rules(session).get("zero_rate_items") or [])
+    post_at_cutoff = bool(_rules(session).get("post_at_cutoff"))
     done, problems = [], []
     for fix in fixes:
         group = groups.get(cstr(fix.get("group")))
@@ -367,6 +396,15 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
                 done.append(
                     _("{0} is brought in at zero value in {1}.").format(group["value"], _rows(group["count"]))
                 )
+            elif action == POST_AT_CUTOFF:
+                from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+                if group["cause"] != opening_invoices.CAUSE_NO_FISCAL_YEAR:
+                    raise FixProblem(
+                        _("Only invoices dated in no fiscal year can be posted at the cut-off date.")
+                    )
+                post_at_cutoff = True
+                done.append(_("{0} are posted at the cut-off date.").format(_rows(group["count"])))
             elif action == CREATE:
                 raise FixProblem(
                     _(
@@ -382,7 +420,12 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
     if problems:
         raise FixProblems(problems)
 
-    rules = {"value_maps": maps, "left_out": reasons, "zero_rate_items": zero_rate}
+    rules = {
+        "value_maps": maps,
+        "left_out": reasons,
+        "zero_rate_items": zero_rate,
+        "post_at_cutoff": post_at_cutoff,
+    }
     rules = {key: value for key, value in rules.items() if value}
     session.transformation_rules = frappe.as_json(rules) if rules else None
     session.excluded_rows = frappe.as_json(sorted(int(row) for row in reasons)) if reasons else None
@@ -409,10 +452,16 @@ def forget_left_out(session) -> str:
 
 
 def _map(session, group, fix, maps):
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
     from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 
-    warehouse_causes = (opening_stock.CAUSE_OTHER_COMPANY, opening_stock.CAUSE_GROUP_WAREHOUSE)
-    if group["cause"] not in (dry_run.CAUSE_MISSING_LINK, dry_run.CAUSE_BAD_OPTION, *warehouse_causes):
+    # Causes besides a missing link whose fix is another record of a DocType: which DocType.
+    other_records = {
+        opening_stock.CAUSE_OTHER_COMPANY: "Warehouse",
+        opening_stock.CAUSE_GROUP_WAREHOUSE: "Warehouse",
+        opening_invoices.CAUSE_PARTY_DISABLED: opening_invoices.settings(session).get("party_type"),
+    }
+    if group["cause"] not in (dry_run.CAUSE_MISSING_LINK, dry_run.CAUSE_BAD_OPTION, *other_records):
         raise FixProblem(
             _(
                 "Only a missing link or a value that isn't an allowed option can be mapped. "
@@ -422,8 +471,8 @@ def _map(session, group, fix, maps):
     to = cstr(fix.get("to")).strip()
     if not to:
         raise FixProblem(_("Say which existing value to use, in 'to'."))
-    if group["cause"] in (dry_run.CAUSE_MISSING_LINK, *warehouse_causes):
-        doctype = group.get("link_doctype") or ("Warehouse" if group["cause"] in warehouse_causes else None)
+    if group["cause"] in (dry_run.CAUSE_MISSING_LINK, *other_records):
+        doctype = group.get("link_doctype") or other_records.get(group["cause"])
         if (
             not doctype
             or not frappe.db.exists(doctype, to)
@@ -465,6 +514,17 @@ def cannot_create(doctype: str, session=None) -> str:
     """
     if session and doctype == session.target_doctype:
         return _("the file imports {0} records itself, so add it to the file").format(_(doctype))
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    if opening_invoices.is_party(session, doctype):
+        if doctype in (frappe.conf.get("fac_import_never_create_doctypes") or []):
+            return _("this site doesn't allow creating it during an import")
+        # A party may be named by a series: the rows find it by its customer or supplier name.
+        if not frappe.has_permission(doctype, "create"):
+            return _("you aren't allowed to create a {0}").format(_(doctype))
+        if not _may_use_create_document():
+            return _("creating records with FACO is turned off for you")
+        return ""
     if doctype in NEVER_CREATE:
         return _(NEVER_CREATE[doctype])
     if doctype in (frappe.conf.get("fac_import_never_create_doctypes") or []):
@@ -548,17 +608,24 @@ def masters_plan(session, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Every missing master the rows need that can be created: what FACO shows the user, as
     one table, before create_document creates them (documents, with import_session). One entry
     per record, with the rows it fixes and its ``data`` as create_document takes it."""
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
     plan: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for group in groups:
         group = _with_target(session, group)
         doctype = group.get("link_doctype")
         if group.get("cause") != dry_run.CAUSE_MISSING_LINK or not doctype or cannot_create(doctype, session):
             continue
-        parent = default_parent(doctype)
-        meta = frappe.get_meta(doctype)
-        data = {_name_field(meta): group["value"]}
-        if parent:
-            data[_parent_field(meta)] = parent
+        choose = {}
+        if opening_invoices.is_party(session, doctype):
+            parent, data = None, opening_invoices.party_data(doctype, group["value"])
+            choose = opening_invoices.party_choices(doctype, data)
+        else:
+            parent = default_parent(doctype)
+            meta = frappe.get_meta(doctype)
+            data = {_name_field(meta): group["value"]}
+            if parent:
+                data[_parent_field(meta)] = parent
         entry = plan.setdefault(
             (doctype, group["value"]),
             {
@@ -570,6 +637,9 @@ def masters_plan(session, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "data": data,  # as create_document takes it in documents
             },
         )
+        if any(choose.values()):
+            # a group or territory the Settings default couldn't give: add one of these to data
+            entry["choose"] = choose
         entry["rows"] += group.get("count") or 0
     return list(plan.values())
 
@@ -618,6 +688,28 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
                 _(doctype), reason
             )
         )
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    if opening_invoices.is_party(session, doctype):
+        data = {k: cstr(v).strip() for k, v in (entry.get("data") or {}).items() if cstr(v).strip()}
+        problem = opening_invoices.party_problem(doctype, data)
+        if problem:
+            raise FixProblem(problem)
+        name = data[opening_invoices.PARTY_NAME_FIELDS[doctype]]
+        if (doctype, name) not in plan:
+            missing = ", ".join(f"{_(d)} '{n}'" for d, n in plan) or _("none")
+            raise FixProblem(
+                _("{0} '{1}' isn't one of the masters the last check found missing ({2}).").format(
+                    _(doctype), name, missing
+                )
+            )
+        if opening_invoices.find_party(doctype, name):
+            raise FixProblem(
+                _("{0} '{1}' already exists. Check the file again with dry_run_import.").format(
+                    _(doctype), name
+                )
+            )
+        return {"doctype": doctype, "data": data}
     meta = frappe.get_meta(doctype)
     name_field, parent_field = _name_field(meta), _parent_field(meta)
     data = entry.get("data") or {}
@@ -649,12 +741,31 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
 
 
 def _planned_name(entry: Dict[str, Any]) -> str:
-    return entry["data"][_name_field(frappe.get_meta(entry["doctype"]))]
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    field = _name_field(frappe.get_meta(entry["doctype"])) or opening_invoices.PARTY_NAME_FIELDS.get(
+        entry["doctype"]
+    )
+    return entry["data"][field]
 
 
 def kept_its_name(entry: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
     """create_document's result for a missing master, refused if ERPNext named the record
     otherwise: the rows link to the name the file uses."""
+    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+
+    doctype = entry["doctype"]
+    if not _name_field(frappe.get_meta(doctype)) and doctype in opening_invoices.PARTY_NAME_FIELDS:
+        # A party is found by its customer or supplier name, whatever name ERPNext gave it.
+        found = opening_invoices.find_party(doctype, _planned_name(entry))
+        if result.get("success") and not (found and found.name == result.get("name")):
+            return {
+                "success": False,
+                "error": _("ERPNext named it '{0}', and the rows wouldn't find it by '{1}'").format(
+                    result.get("name"), _planned_name(entry)
+                ),
+            }
+        return result
     if result.get("name") != _planned_name(entry):
         return {
             "success": False,

@@ -92,6 +92,7 @@ READ_ONLY_TOOLS = {
     "set_column_mapping",
     # Writes only the session's settings and mapping, as set_column_mapping does.
     "set_opening_stock",
+    "set_opening_invoices",
     # Every row it inserts is rolled back; it writes only the session and its result file.
     "dry_run_import",
 }
@@ -102,6 +103,7 @@ WRITE_TOOLS = {
     "create_document",
     "start_import",  # imports the checked file through Data Import
     "import_opening_stock",  # creates and submits Stock Reconciliations
+    "import_opening_invoices",  # creates and submits opening invoices
     "update_document",
     # Document generation (saves a private Frappe File — a create side effect)
     "generate_document",  # Markdown -> PDF saved as a File record; NOT read-only

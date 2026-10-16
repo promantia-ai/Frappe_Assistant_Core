@@ -150,6 +150,11 @@ def setup(
         "columns": extra,
     }
     options = frappe.parse_json(session.template_options or "{}") or {}
+    if (options.get("opening_invoices") or {}).get("created"):
+        raise OpeningStockProblem(
+            _("This session brought in opening invoices. Start a new session for the stock.")
+        )
+    options.pop("opening_invoices", None)  # a session is one kind of special import
     if settings(session).get("created"):  # what the earlier documents held stays on the session
         stock["created"] = settings(session)["created"]
     options["opening_stock"] = stock
