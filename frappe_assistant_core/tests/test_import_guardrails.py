@@ -188,6 +188,13 @@ class TestTheRowLimit(GuardrailCase):
             self._limit(value)
             self.assertEqual(import_session.max_import_rows(), 50000)
 
+    def test_before_the_migrate_adds_the_setting_the_default_applies(self):
+        # Production: the code is pulled and a session started before `bench migrate` adds the
+        # field; Frappe then raises for a field the DocType doesn't have.
+        missing = frappe.ValidationError("Field max_import_rows does not exist on Assistant Core Settings")
+        with patch.object(frappe.db, "get_single_value", side_effect=missing):
+            self.assertEqual(import_session.max_import_rows(), 50000)
+
     def test_a_corrected_file_over_the_limit_is_refused_at_the_check(self):
         self._limit(3)
         file_doc = self._csv(self._rows(2))

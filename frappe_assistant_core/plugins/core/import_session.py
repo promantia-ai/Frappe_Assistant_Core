@@ -286,7 +286,12 @@ DEFAULT_MAX_IMPORT_ROWS = 50000
 
 def max_import_rows() -> int:
     """Assistant Core Settings' Max Rows per Import; 0 or blank is the default, never unlimited."""
-    value = frappe.db.get_single_value("Assistant Core Settings", "max_import_rows")
+    try:
+        value = frappe.db.get_single_value("Assistant Core Settings", "max_import_rows")
+    except frappe.ValidationError:
+        # the code is newer than the site: `bench migrate` hasn't added the field yet
+        frappe.clear_messages()
+        value = None
     return cint(value) or DEFAULT_MAX_IMPORT_ROWS
 
 
