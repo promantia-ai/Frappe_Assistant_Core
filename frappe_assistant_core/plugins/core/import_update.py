@@ -73,10 +73,16 @@ def mapping_problems(
                 "or map a column to the ID ('name')."
             )
         )
+    # Finding records by a field the user can't read would tell them its values.
+    readable = {"name", *frappe.get_meta(doctype).get_permitted_fieldnames()}
     for field in match_on:
         if field not in mapped:
             problems.append(
                 _("match_on '{0}' isn't mapped from any column. Map the key column to it.").format(field)
+            )
+        elif field not in readable:
+            problems.append(
+                _("You can't read {0} on {1}, so records can't be found by it.").format(field, doctype)
             )
     if id_columns and match_on and match_on != [id_columns[0]]:
         problems.append(
@@ -174,10 +180,13 @@ def _same(df, old, new) -> bool:
 def changes(doctype: str, record: str, doc: Dict) -> List[Dict]:
     """What updating ``record`` with the parsed row ``doc`` changes: one {field, label, old, new}
     per field whose value differs. A blank cell is no change: Data Import leaves it as it is.
-    Only fields the user may read count: saving resets the others, and their values stay hidden."""
+    Only fields the user may read and change count: saving resets the others, and the values
+    of those they can't read stay hidden."""
     meta = frappe.get_meta(doctype)
     skip = {*SKIPPED, id_fieldname(doctype)}
-    readable = set(meta.get_permitted_fieldnames())
+    readable = set(meta.get_permitted_fieldnames()) & set(
+        meta.get_permitted_fieldnames(permission_type="write")
+    )
     fields = []
     for field in doc:
         df = meta.get_field(field)

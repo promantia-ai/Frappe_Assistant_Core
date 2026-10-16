@@ -368,6 +368,32 @@ class TestUpdateFieldPermissions(UpdateCase):
         self.assertNotIn("https://a.example", json.dumps(result, default=str))
         self.assertEqual(result["update"]["records_changing"], 0)
 
+    def test_a_field_the_user_cannot_change_is_not_counted(self):
+        from frappe.model.meta import Meta
+
+        session, _mapped = self._session([f"TAX-A-{self.tag},{self.group},https://new-a.example"])
+        everything = frappe.get_meta("Customer").get_permitted_fieldnames()
+
+        def permitted(self, *args, permission_type="read", **kwargs):
+            # Website on a permission level the user reads but can't write: saving resets it
+            return everything if permission_type == "read" else [f for f in everything if f != "website"]
+
+        with unittest.mock.patch.object(Meta, "get_permitted_fieldnames", permitted):
+            result = self._run("dry_run_import", {"session": session})["result"]
+
+        self.assertEqual(result["update"]["records_changing"], 0)
+
+    def test_records_cant_be_found_by_a_field_the_user_cannot_read(self):
+        from frappe.model.meta import Meta
+
+        readable = [f for f in frappe.get_meta("Customer").get_permitted_fieldnames() if f != "tax_id"]
+
+        with unittest.mock.patch.object(Meta, "get_permitted_fieldnames", return_value=readable):
+            _session, mapped = self._session([f"TAX-A-{self.tag},{self.group},x"])
+
+        self.assertFalse(mapped["success"], mapped)
+        self.assertIn("tax_id", str(mapped))
+
 
 class TestUpdateRun(UpdateCase):
     def _ready(self, lines):
