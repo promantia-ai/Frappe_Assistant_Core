@@ -1028,6 +1028,7 @@ def _run(session, mode: str) -> None:
                     held.add(_key(needed))
                     kept.append((needed, because))
         if done % BATCH == 0 and done < total:
+            session.reload()  # without the rows _remove deleted: the save must not write them back
             session.progress = _progress("running", done, total, deleted)
             session.save()
             if _commits():
@@ -1101,19 +1102,23 @@ def _remove_own_ledger_rows(doctype: str, name: str) -> None:
 def _remove(session, record: Record) -> Optional[str]:
     """Remove one record in a savepoint (spec §5 step 3): its Created Records row first (Frappe
     counts that Dynamic Link and would refuse the delete), cancel it when submitted, then
-    delete it. Returns None, or what refused it: then all of it is rolled back."""
+    delete it. Returns None, or what refused it: then all of it is rolled back, the row too.
+
+    The row is deleted on its own, as import_opening_invoices inserts it: saving the session
+    for each record would rewrite its whole Created Records table (and a Version) every time.
+    The session in memory still lists the row, so the caller reloads it before saving."""
     since = len(frappe.local.message_log or [])
     frappe.db.savepoint(RECORD_SAVEPOINT)
     try:
-        session.reload()
-        rows = [
-            row
-            for row in session.created_records
-            if not (row.record_doctype == record.doctype and row.record_name == record.name)
-        ]
-        if len(rows) != len(session.created_records):
-            session.created_records = rows
-            session.save()
+        frappe.db.delete(
+            "FAC Import Session Record",
+            {
+                "parent": session.name,
+                "parenttype": SESSION_DOCTYPE,
+                "record_doctype": record.doctype,
+                "record_name": record.name,
+            },
+        )
         doc = frappe.get_doc(record.doctype, record.name)
         if doc.docstatus == 1:
             _cancel(doc)
@@ -1123,7 +1128,6 @@ def _remove(session, record: Record) -> Optional[str]:
         error = _error_of(e, since)
         frappe.db.rollback(save_point=RECORD_SAVEPOINT)
         frappe.clear_document_cache(record.doctype, record.name)
-        session.reload()
         return error
     return None
 

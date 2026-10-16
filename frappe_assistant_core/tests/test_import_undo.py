@@ -21,6 +21,9 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_days, add_to_date, getdate, now_datetime, nowdate
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import (
+    FACImportSession,
+)
 from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.tests.test_import_opening_balances import OpeningBalancesCase
 from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
@@ -1003,6 +1006,44 @@ class TestRun(BlockerCase):
         self.assertEqual(
             report, {"state": "done", "deleted": 3, "total": 3, "kept": 0, "blocked": [], "reason": None}
         )
+
+    def _versions(self, session):
+        return frappe.db.count("Version", {"ref_doctype": "FAC Import Session", "docname": session})
+
+    def test_the_job_does_not_save_the_session_once_per_record(self):
+        session, names = self._session_with_groups(8)
+        before = self._versions(session)
+        real_save = FACImportSession.save
+
+        def tracked(doc, *args, **kwargs):
+            # Frappe skips Versions under tests (ignore_version = in_test); on a site each save of
+            # the session, which has track_changes, writes one.
+            kwargs.setdefault("ignore_version", False)
+            return real_save(doc, *args, **kwargs)
+
+        with patch.object(FACImportSession, "save", tracked):
+            self._start(session)
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undone")
+        self.assertEqual(doc.created_records, [])
+        self.assertFalse(any(self._exists("Customer Group", name) for name in names))
+        # start, the running progress and the end: not one Version per record removed
+        self.assertLessEqual(self._versions(session) - before, 4)
+
+    def test_rows_removed_before_a_batch_boundary_stay_removed_and_a_failed_ones_comes_back(self):
+        session, names = self._session_with_groups(5)
+
+        with patch.object(import_undo, "BATCH", 2), patch.object(
+            import_undo.frappe, "delete_doc", side_effect=refusing(names[2])
+        ):
+            self._start(session, "unblocked")
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Partially Undone")
+        self.assertEqual([r.record_name for r in doc.created_records], [names[2]])
+        self.assertEqual([n for n in names if self._exists("Customer Group", n)], [names[2]])
+        self.assertEqual(self._undo_options(session)["result"]["deleted"], 4)
 
     def test_a_second_start_while_running_does_not_enqueue_again(self):
         session, names = self._session_with_groups(1)
