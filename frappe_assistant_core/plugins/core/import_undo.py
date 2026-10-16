@@ -807,6 +807,9 @@ BATCH = 25  # records between progress writes (and commits, outside tests)
 STEP = "Undo"
 UNDOING, UNDONE, PARTIALLY_UNDONE = "Undoing", "Undone", "Partially Undone"
 RESTORED_DEFAULT = "Completed"  # when no previous status was kept
+STALL_SECONDS = (
+    600  # a queued job is in the queue only after its commit: silent this long, with no job, it has stopped
+)
 RECORD_SAVEPOINT = "fac_import_undo_record"
 JOB_SAVEPOINT = "fac_import_undo_job"
 
@@ -876,6 +879,19 @@ def _job_running(session) -> bool:
         return True  # the queue can't be asked (Redis down, say): don't call the job stopped
 
 
+def _stalled(session) -> bool:
+    """Whether a session Undoing has no job behind it and has been silent for a while. A job
+    queued moments ago is not in the queue until its commit, so the grace applies from the
+    last progress write (start() writes one)."""
+    if _job_running(session):
+        return False
+    progress = frappe.parse_json(session.progress or "{}") or {}
+    updated = progress.get("updated_on")
+    return not updated or (
+        frappe.utils.time_diff_in_seconds(frappe.utils.now_datetime(), updated) > STALL_SECONDS
+    )
+
+
 def start(session, mode: str) -> str:
     """Hand the undo to a background job, as the current user: "started", or "running" when its
     job is already queued (nothing is queued again). The caller has checked the plan; the job
@@ -883,7 +899,7 @@ def start(session, mode: str) -> str:
     if mode not in MODES:
         raise UndoProblem(_("The mode is all or unblocked, not {0}.").format(mode))
     if session.status == UNDOING:
-        if _job_running(session):
+        if not _stalled(session):
             return "running"
         _stopped(session.name, _("the background job stopped."))
         session.reload()
@@ -1112,17 +1128,20 @@ def _stopped(session_name: str, reason: str) -> None:
 
 def report(session) -> dict:
     """How far the undo got: state running, done or stopped, with the counts. A session Undoing
-    with no job in the queue is stopped, and set back to its status before the undo."""
-    if session.status == UNDOING and not _job_running(session):
+    with no job in the queue and no progress for STALL_SECONDS is stopped, and set back to its
+    status before the undo."""
+    if session.status == UNDOING and _stalled(session):
         _stopped(session.name, _("the background job stopped."))
         session.reload()
+    undo = _undo_options(session)
     if session.status == UNDOING:
         state = "running"
+    elif undo.get("stopped"):
+        state = "stopped"  # also for a session set back to Partially Undone by a run that died
     elif session.status in (UNDONE, PARTIALLY_UNDONE):
         state = "done"
     else:
         state = "stopped"
-    undo = _undo_options(session)
     result = undo.get("result") or {}
     progress = frappe.parse_json(session.progress or "{}") or {}
     if progress.get("step") != STEP:

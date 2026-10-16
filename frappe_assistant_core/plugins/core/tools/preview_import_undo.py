@@ -83,7 +83,20 @@ class PreviewImportUndo(BaseTool):
             }
             reason = import_undo.refusal(session)
             if reason:
-                return {**reply, "can_undo": False, "refused": reason, "next": _("Tell the user why.")}
+                return {
+                    **reply,
+                    "can_undo": False,
+                    "refused": reason,
+                    "records": 0,
+                    "by_doctype": [],
+                    "blocked": 0,
+                    "blockers": [],
+                    "kept": 0,
+                    "kept_records": [],
+                    "already_removed": 0,
+                    "import_type_note": None,
+                    "next": _("Tell the user why."),
+                }
             plan = import_undo.build_plan(session)
             reason = import_undo.plan_refusal(plan)
             if not reason:
@@ -120,7 +133,11 @@ class PreviewImportUndo(BaseTool):
         rest = ranked[import_undo.MAX_LISTED :]
         if rest:
             shown.append(
-                {"doctype": _("({0} more)").format(len(rest)), "count": sum(len(n) for _dt, n in rest)}
+                {
+                    "doctype": _("({0} more)").format(len(rest)),
+                    "count": sum(len(n) for _dt, n in rest),
+                    "sample": [],
+                }
             )
         return shown
 
@@ -141,7 +158,13 @@ class PreviewImportUndo(BaseTool):
                 for b in blockers[: import_undo.MAX_NAMED]
             ]
             if len(blockers) > len(sample):
-                sample.append({"record": _("({0} more)").format(len(blockers) - len(sample))})
+                sample.append(
+                    {
+                        "record": _("({0} more)").format(len(blockers) - len(sample)),
+                        "blocked_by": None,
+                        "detail": None,
+                    }
+                )
             groups.append(
                 {
                     "reason": reason,
@@ -159,7 +182,9 @@ class PreviewImportUndo(BaseTool):
             for record, because in plan.kept[: import_undo.MAX_LISTED]
         ]
         if len(plan.kept) > len(shown):
-            shown.append({"record": _("({0} more)").format(len(plan.kept) - len(shown))})
+            shown.append(
+                {"record": _("({0} more)").format(len(plan.kept) - len(shown)), "kept_because": None}
+            )
         return shown
 
     @staticmethod

@@ -16,7 +16,7 @@ Only an **Insert New Records** import can be undone. An **Update Existing Record
 
 ## Workflow
 
-1. Call `preview_import_undo(session)` and read `can_undo`. When it is false, `refused` says why (still importing, already being undone or undone, nothing imported, past the time window, an update import, or every record blocked). Tell the user and stop.
+1. Call `preview_import_undo(session)` and read `can_undo`. When it is false, `refused` says why (still importing, already being undone or undone, nothing imported, past the time window, an update import, or every record blocked). Tell the user why. When every record is blocked, also show them the `blockers` (what each is blocked by): they may be able to clear a blocker, and then preview again. Otherwise stop.
 2. **Show the user the preview** before anything else: how many records and of which DocTypes (`by_doctype`), what is blocked and why (`blockers`), which records are kept (`kept_records`) and how many were already removed by hand (`already_removed`).
 3. **If nothing is blocked**, ask the user to confirm, then call `undo_import` with the preview's `records` and `blocked` and `mode` `all`.
 4. **If something is blocked**, say so and ask which they want: stop, or `unblocked` (remove everything else, keep the blocked records and the records they depend on). Never choose for them. Then call `undo_import` with the preview's `records` and `blocked` and the mode they chose.
@@ -56,8 +56,9 @@ Deleted records **cannot be restored**. Say so before the user approves.
 |---|---|
 | `records` | How many records the undo would look at: everything the session created that still exists. |
 | `by_doctype` | The count per DocType with up to 10 sample names. Long lists end with "(N more)". |
-| `blockers` | Records that can't be removed, grouped by `reason` with a count, the DocTypes and sample records, each with what it is `blocked_by`. Reasons: see below. |
-| `kept` and `kept_records` | Records that are not blocked themselves but stay because a blocked record needs them (a Customer Group of a kept Customer, the parent of a kept tree child). `kept_because` says which. |
+| `blockers` | Records that can't be removed, grouped by `reason` with a count, the DocTypes and up to 10 sample records. Each sample has `record`, `detail` (a sentence saying why, to tell the user) and `blocked_by` (the document that blocks it). `blocked_by` is set only for `linked` blockers (it is null for the other reasons: read `detail`). Reasons: see below. |
+| `kept` | How many records are not blocked themselves but stay because a blocked record needs them (a Customer Group of a kept Customer, the parent of a kept tree child). |
+| `kept_records` | Those records, each as `record` and `kept_because` (which blocked record keeps it). Show them to the user: they are not deleted either. |
 | `already_removed` | Records of the import that were deleted by hand since. They are not an error and are not counted in `records`. |
 | `window` | The undo window: an import can be undone for `days` days after its last import step finished, until `ends_on`. |
 | `import_type_note` | Why nothing is deleted, for an update import. |
@@ -73,7 +74,9 @@ Deleted records **cannot be restored**. Say so before the user approves.
 | `no_permission` | The user may not delete (or cancel) that DocType. |
 | `delete_failed` | Only in the undo's result: ERPNext refused to cancel or delete the record when the job tried. |
 
-`kept_records` and `blockers` show the first records only; a list that is cut ends with "(N more)".
+Lists show the first entries only, and a list that is cut ends with one entry whose `record` (or `doctype`, or the last sample name) is "(N more)". That entry has the same keys as the others, empty (`blocked_by`, `detail` and `kept_because` are null, a `by_doctype` entry has an empty `sample`; its `count` is the number of records it stands for). Don't present it as a record.
+
+When the preview is refused (`can_undo` false before any record was looked at), the counts are 0 and the lists empty.
 
 ## Notes
 

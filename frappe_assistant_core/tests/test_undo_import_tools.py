@@ -19,11 +19,12 @@ import unittest
 from unittest.mock import patch
 
 import frappe
-from frappe.utils import add_to_date, now_datetime
+from frappe.utils import add_to_date, now_datetime, nowdate
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.plugins.core.plugin import CorePlugin
+from frappe_assistant_core.tests.test_import_run import MAPPING
 from frappe_assistant_core.tests.test_import_undo import BlockerCase
 from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
 
@@ -51,6 +52,10 @@ class UndoToolsCase(BlockerCase):
 
     def _exists(self, doctype, name):
         return bool(frappe.db.exists(doctype, name))
+
+    def _undo_option(self, session):
+        options = frappe.parse_json(self._doc(session).template_options or "{}") or {}
+        return options.get("undo") or {}
 
     def _stored_fingerprint(self, session):
         options = frappe.parse_json(self._doc(session).template_options or "{}") or {}
@@ -164,7 +169,8 @@ class TestPreview(UndoToolsCase):
         self.assertEqual(preview["by_doctype"][-1]["doctype"], "(1 more)")
         self.assertEqual(preview["by_doctype"][-1]["count"], 3)
         self.assertEqual(len(preview["kept_records"]), 2)
-        self.assertEqual(preview["kept_records"][-1], {"record": "(1 more)"})
+        self.assertEqual(preview["kept_records"][-1], {"record": "(1 more)", "kept_because": None})
+        self.assertEqual(preview["by_doctype"][-1]["sample"], [])
 
     def test_preview_refuses_a_session_past_the_window_with_the_reason(self):
         session = self._session_with_customers()
@@ -177,6 +183,20 @@ class TestPreview(UndoToolsCase):
         self.assertIn("0 days", preview["refused"])
         self.assertEqual(preview["window"]["days"], 0)
         self.assertIsNone(self._stored_fingerprint(session))
+        # the refusal has the shape of every preview, with empty values
+        self.assertEqual(
+            {key: preview[key] for key in ("records", "blocked", "kept", "already_removed")},
+            {"records": 0, "blocked": 0, "kept": 0, "already_removed": 0},
+        )
+        self.assertEqual(
+            (
+                preview["by_doctype"],
+                preview["blockers"],
+                preview["kept_records"],
+                preview["import_type_note"],
+            ),
+            ([], [], [], None),
+        )
 
     def test_preview_refuses_without_write_permission_on_the_session(self):
         session, _names = self._session_with_groups(1)
@@ -375,6 +395,8 @@ class TestUndo(UndoToolsCase):
         ):
             self._undo(session, preview["records"], preview["blocked"], "all")
 
+        self._silent_for(session, import_undo.STALL_SECONDS + 60)
+
         with patch.object(import_undo, "_job_running", return_value=False):
             reply = self._undo(session, preview["records"], preview["blocked"], "all")
 
@@ -383,6 +405,91 @@ class TestUndo(UndoToolsCase):
         self.assertTrue(reply["result"]["reason"])
         self.assertNotEqual(self._doc(session).status, "Undoing")
         self.assertTrue(self._undo(session, preview["records"], preview["blocked"], "all")["success"])
+        self.assertFalse(any(self._exists("Customer Group", n) for n in names))
+
+    def _silent_for(self, session, seconds):
+        doc = self._doc(session)
+        progress = frappe.parse_json(doc.progress)
+        progress["updated_on"] = str(add_to_date(now_datetime(), seconds=-seconds))
+        doc.db_set("progress", frappe.as_json(progress), update_modified=False)
+
+    def test_a_queued_job_is_reported_running_though_the_queue_does_not_hold_it_yet(self):
+        # Neither inline nor _job_running patched: the queue really has no job, as in production
+        # between the enqueue and the commit.
+        session, names = self._session_with_groups(2)
+        before = self._doc(session).status
+        preview = self._preview(session)
+
+        with patch.object(import_undo.frappe, "enqueue") as enqueue:
+            reply = self._undo(session, preview["records"], preview["blocked"], "all")
+            followed = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        self.assertEqual(enqueue.call_count, 1)
+        for answer in (reply, followed):
+            self.assertTrue(answer["success"], answer)
+            self.assertEqual((answer["result"]["state"], answer["result"]["status"]), ("running", "Undoing"))
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undoing")
+        self.assertNotEqual(doc.status, before)
+        self.assertNotIn("Undo", [step.step for step in doc.steps])  # no Failed "stopped" step
+        self.assertNotIn("stopped", self._undo_option(session))
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+
+    def test_a_progress_call_long_after_a_job_that_never_ran_reports_stopped_and_restores(self):
+        session, names = self._session_with_groups(2)
+        before = self._doc(session).status
+        preview = self._preview(session)
+        with patch.object(import_undo.frappe, "enqueue"):
+            self._undo(session, preview["records"], preview["blocked"], "all")
+        self._silent_for(session, import_undo.STALL_SECONDS + 60)
+
+        with patch.object(import_undo.frappe, "enqueue") as enqueue:
+            reply = self._undo(session, 0, 0, "unblocked")
+
+        enqueue.assert_not_called()
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual((reply["result"]["state"], reply["result"]["status"]), ("stopped", before))
+        self.assertIn("stopped", reply["result"]["reason"])
+        self.assertNotIn("already undone", reply["result"]["message"])
+        self.assertEqual(self._doc(session).status, before)
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+
+    def test_a_dead_rerun_of_a_partially_undone_session_is_stopped_not_already_undone(self):
+        session, names = self._session_with_groups(2)
+        outside = self._outside_customer(names[0])
+        first = self._approved(session, "unblocked")
+        self.assertEqual(first["result"]["status"], "Partially Undone")
+        frappe.delete_doc("Customer", outside, force=True, ignore_permissions=True)  # the blocker is gone
+        preview = self._preview(session)  # what is left, previewed again
+        self.assertEqual((preview["records"], preview["blocked"]), (1, 0))
+        with patch.object(import_undo.frappe, "enqueue"):
+            rerun = self._undo(session, preview["records"], preview["blocked"], "unblocked")
+        self.assertEqual(rerun["result"]["state"], "running")
+        self._silent_for(session, import_undo.STALL_SECONDS + 60)
+
+        reply = self._undo(session, preview["records"], preview["blocked"], "unblocked")
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(reply["result"]["state"], "stopped")
+        self.assertNotIn("already undone", reply["result"]["message"])
+        self.assertEqual(reply["result"]["status"], "Partially Undone")
+
+    def test_another_tools_rewrite_of_the_options_keeps_the_fingerprint(self):
+        session, names = self._session_with_groups(2)
+        preview = self._preview(session)
+        fingerprint = self._stored_fingerprint(session)
+        # A mapping save rewrites template_options (and moves the status to Mapped).
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        self.assertEqual(self._stored_fingerprint(session), fingerprint)
+        self.assertTrue(fingerprint)
+
+        reply = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(reply["result"]["state"], "done")
         self.assertFalse(any(self._exists("Customer Group", n) for n in names))
 
     def test_undo_refuses_an_undone_session(self):
@@ -449,7 +556,7 @@ class TestUndo(UndoToolsCase):
         self.assertTrue(reply["success"], reply)
         blocked = reply["result"]["blocked"]
         self.assertEqual(len(blocked), 3)  # 2 and "(1 more)"
-        self.assertEqual(blocked[-1], {"record": "(1 more)"})
+        self.assertEqual(blocked[-1], {"record": "(1 more)", "reason": None, "detail": None})
 
 
 class TestRegistration(UndoToolsCase):
@@ -482,16 +589,81 @@ class TestRegistration(UndoToolsCase):
             self.assertIn(word, undo)
 
 
+# What an Undone session is told by each path that imports. The opening engines' sessions and
+# start_import only say the sheet "isn't ready" and point to dry_run_import, which then says the
+# session is Undone: true, but it does not name the status.
+NAMES_THE_STATUS = {
+    "dry_run_import": True,
+    "start_import": False,
+    "set_opening_stock": True,
+    "set_opening_invoices": True,
+    "set_opening_balances": True,
+    "import_opening_stock": False,
+    "import_opening_invoices": False,
+    "import_opening_balances": False,
+}
+
+
 class TestUndoneSession(UndoToolsCase):
+    """Every path that imports refuses an Undone session. None needed a change: each already
+    allows only the statuses it can work from."""
+
+    def _engine(self, session, key, **settings):
+        doc = self._doc(session)
+        options = frappe.parse_json(doc.template_options or "{}") or {}
+        options[key] = {"company": self.company, "columns": {}, **settings}
+        doc.db_set("template_options", frappe.as_json(options), update_modified=False)
+
+    def _calls(self):
+        today = nowdate()
+        company = self.company
+        return {
+            "dry_run_import": (None, {}),
+            "start_import": (None, {"doctype": "Customer", "rows": 3, "import_type": "Insert New Records"}),
+            "set_opening_stock": (
+                None,
+                {"company": company, "posting_date": today, "columns": {"Item": "item_code"}},
+            ),
+            "set_opening_invoices": (
+                None,
+                {
+                    "company": company,
+                    "invoice_type": "Sales",
+                    "cut_off": today,
+                    "columns": {"Invoice": "invoice_no"},
+                },
+            ),
+            "set_opening_balances": (
+                None,
+                {"company": company, "cut_off": today, "columns": {"Account": "account"}},
+            ),
+            "import_opening_stock": (
+                ("opening_stock", {"posting_date": today}),
+                {"company": company, "posting_date": today, "rows": 1, "total_qty": 1, "total_value": 1},
+            ),
+            "import_opening_invoices": (
+                ("opening_invoices", {"invoice_type": "Sales", "cut_off": today}),
+                {"company": company, "invoice_type": "Sales", "rows": 1, "total_amount": 1},
+            ),
+            "import_opening_balances": (
+                ("opening_balances", {"cut_off": today}),
+                {"company": company, "cut_off": today, "rows": 1, "total_debit": 1, "total_credit": 1},
+            ),
+        }
+
     def test_an_undone_session_cannot_be_imported_again(self):
-        session, checked = self._ready_session()
-        self.assertTrue(self._import(session, checked)["success"])
-        self._approved(session, "all")
-        self.assertEqual(self._doc(session).status, "Undone")
+        for tool, (engine, arguments) in self._calls().items():
+            with self.subTest(tool=tool):
+                session = self._session_with_customers()
+                self._approved(session, "all")
+                self.assertEqual(self._doc(session).status, "Undone")
+                if engine:
+                    self._engine(session, engine[0], **engine[1])
 
-        again = self._import(session, checked)
-        rechecked = self._run("dry_run_import", {"session": session})
+                reply = self._run(tool, {"session": session, **arguments})
 
-        self.assertFalse(again["success"])
-        self.assertFalse(rechecked["success"])
-        self.assertEqual(self._imported(), set())
+                self.assertFalse(reply["success"], reply)
+                self.assertTrue(reply["error"])
+                self.assertEqual("Undone" in reply["error"], NAMES_THE_STATUS[tool], reply["error"])
+                self.assertEqual(self._doc(session).status, "Undone")
+                self.assertEqual(self._imported(), set())

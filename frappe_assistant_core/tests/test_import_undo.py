@@ -945,12 +945,38 @@ class TestRun(BlockerCase):
         self.assertEqual(self._doc(session).status, "Undoing")
         self.assertTrue(self._exists("Customer Group", names[0]))
 
+    def _silent_for(self, session, seconds):
+        """The session's last progress write is ``seconds`` old."""
+        doc = self._doc(session)
+        progress = frappe.parse_json(doc.progress)
+        progress["updated_on"] = str(add_to_date(now_datetime(), seconds=-seconds))
+        doc.db_set("progress", frappe.as_json(progress), update_modified=False)
+
+    def test_a_job_queued_moments_ago_is_not_called_stopped_before_it_is_in_the_queue(self):
+        session, names = self._session_with_groups(1)
+        before = self._doc(session).status
+        with patch.object(import_undo.frappe, "enqueue"):  # enqueued after the commit: not queued yet
+            self._start(session)
+        steps = len(self._doc(session).steps)
+
+        with patch.object(import_undo, "_job_running", return_value=False):
+            report = import_undo.report(self._doc(session))
+            again = self._start(session)
+
+        self.assertEqual((report["state"], again), ("running", "running"))
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undoing")
+        self.assertNotEqual(doc.status, before)
+        self.assertEqual(len(doc.steps), steps)
+        self.assertTrue(self._exists("Customer Group", names[0]))
+
     def test_a_dead_job_is_reported_stopped_and_the_status_restored(self):
         session, names = self._session_with_groups(1)
         before = self._doc(session).status
         with patch.object(import_undo.frappe, "enqueue"):
             self._start(session)
         self.assertEqual(self._undo_options(session)["previous_status"], before)
+        self._silent_for(session, import_undo.STALL_SECONDS + 60)
 
         with patch.object(import_undo, "_job_running", return_value=False):
             report = import_undo.report(self._doc(session))
@@ -962,6 +988,24 @@ class TestRun(BlockerCase):
         self.assertEqual((step.step, step.outcome), ("Undo", "Failed"))
         self.assertTrue(self._exists("Customer Group", names[0]))
         self.assertEqual(import_undo.refusal(doc), "")  # it can be undone again
+
+    def test_a_dead_rerun_of_a_partially_undone_session_is_reported_stopped_not_done(self):
+        session, names = self._session_with_groups(2)
+        self._edited_by_someone_else("Customer Group", names[0])
+        self._start(session, "unblocked")
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+        with patch.object(import_undo.frappe, "enqueue"):
+            self._start(session, "unblocked")  # a new run: the result is cleared, the job never runs
+        self.assertEqual(self._doc(session).status, "Undoing")
+        self._silent_for(session, import_undo.STALL_SECONDS + 60)
+
+        with patch.object(import_undo, "_job_running", return_value=False):
+            report = import_undo.report(self._doc(session))
+
+        self.assertEqual(report["state"], "stopped")
+        self.assertIn("stopped", report["reason"])
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+        self.assertEqual(import_undo.report(self._doc(session))["state"], "stopped")  # and stays so
 
     def test_an_unexpected_error_rolls_back_and_restores_the_status(self):
         session, names = self._session_with_groups(2)

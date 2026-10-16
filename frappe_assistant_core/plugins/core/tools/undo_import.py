@@ -72,8 +72,9 @@ class UndoImport(BaseTool):
 
         mode = arguments.get("mode")
         try:
+            earlier = session.status
             if self._only_reports(session, arguments):
-                return self._progress(session)
+                return self._progress(session, already_ended=earlier != import_undo.UNDOING)
             if mode not in import_undo.MODES:
                 raise import_undo.UndoProblem(_("The mode is all or unblocked, not {0}.").format(mode))
             self._check(session, arguments)
@@ -85,7 +86,7 @@ class UndoImport(BaseTool):
             frappe.log_error(title=_("Undo Import Error"), message=frappe.get_traceback())
             return {"success": False, "error": exception_message(e), "session": session_name}
 
-        return self._progress(session, started=state == "started")
+        return self._progress(session, queued=state == "started")
 
     @staticmethod
     def _only_reports(session, arguments: Dict[str, Any]) -> bool:
@@ -147,14 +148,31 @@ class UndoImport(BaseTool):
             )
 
     @staticmethod
-    def _progress(session, started: bool = False) -> Dict[str, Any]:
-        """The undo as it stands: running (follow it), done (the result) or stopped (why)."""
-        report = import_undo.report(session)
+    def _progress(session, queued: bool = False, already_ended: bool = False) -> Dict[str, Any]:
+        """The undo as it stands: running (follow it), done (the result) or stopped (why).
+        ``queued``: the job was queued by this call. The queue holds it only after the commit,
+        so it is reported running without asking the queue (unless it already ran, as in tests).
+        ``already_ended``: the session was Undone or Partially Undone before this call."""
         session.reload()
+        if queued and session.status == import_undo.UNDOING:
+            progress = frappe.parse_json(session.progress or "{}") or {}
+            report = {
+                "state": "running",
+                "deleted": 0,
+                "total": cint(progress.get("total")),
+                "kept": 0,
+                "blocked": [],
+                "reason": None,
+            }
+        else:
+            report = import_undo.report(session)
+            session.reload()
         blocked = list(report["blocked"])
         shown = blocked[: import_undo.MAX_LISTED]
         if len(blocked) > len(shown):
-            shown.append({"record": _("({0} more)").format(len(blocked) - len(shown))})
+            shown.append(
+                {"record": _("({0} more)").format(len(blocked) - len(shown)), "reason": None, "detail": None}
+            )
         state = report["state"]
         if state == "running":
             message = _(
@@ -165,7 +183,7 @@ class UndoImport(BaseTool):
             message = _("Removed {0} records; {1} kept.").format(report["deleted"], report["kept"])
             if blocked:
                 message += " " + _("{0} can't be removed.").format(len(blocked))
-            if not started:
+            if already_ended:
                 message = _("This import was already undone. ") + message
         else:
             message = report["reason"] or _("The undo stopped.")
