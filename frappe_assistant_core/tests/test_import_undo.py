@@ -617,6 +617,50 @@ class TestBlockers(BlockerCase):
 
         self.assertEqual(self._plan(session).blocked, [])
 
+    def _contact_made(self, session, party, owner=None, minutes_after=0):
+        """A Contact of ``party`` alone, made by ``owner`` (the session user when None)
+        ``minutes_after`` the import finished."""
+        contact = self._contact(party)
+        when = import_undo.finished_at(self._doc(session)) + timedelta(minutes=minutes_after)
+        values = {"creation": when, "owner": owner or self._doc(session).user or "Administrator"}
+        frappe.db.set_value("Contact", contact, values, update_modified=False)
+        return contact
+
+    def test_a_contact_added_later_by_another_user_blocks(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        late = import_undo.UNDO_GRACE_MINUTES + 60
+        contact = self._contact_made(session, alpha, owner="Guest", minutes_after=late)
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Contact {contact}"))
+
+    def test_a_contact_by_another_user_blocks_even_inside_the_grace(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        contact = self._contact_made(session, alpha, owner="Guest", minutes_after=1)
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Contact {contact}"))
+
+    def test_a_contact_by_the_session_user_after_the_grace_blocks(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        contact = self._contact_made(session, alpha, minutes_after=import_undo.UNDO_GRACE_MINUTES + 1)
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Contact {contact}"))
+
+    def test_a_contact_by_the_session_user_inside_the_grace_does_not_block(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        self._contact_made(session, alpha, minutes_after=import_undo.UNDO_GRACE_MINUTES - 5)
+
+        self.assertEqual(self._plan(session).blocked, [])
+
     def test_a_contact_also_linked_outside_the_set_blocks(self):
         session = self._session_with_customers()
         alpha = self._names()["alpha"]

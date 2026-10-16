@@ -242,12 +242,17 @@ def _not_among(doctype_col, name_col, groups: Dict[str, List[str]]) -> list:
     return conditions
 
 
-def _contacts_inside(in_set: Set[Key]) -> Set[Key]:
-    """Contacts and Addresses whose every Dynamic Link row points to a record in the set:
-    ERPNext deletes them with the party, so they never block. Batched: one query per set
-    doctype for the candidates, one per Contact/Address doctype for all their rows."""
-    if not frappe.db.exists("DocType", "Dynamic Link"):
+def _contacts_inside(in_set: Set[Key], session) -> Set[Key]:
+    """Contacts and Addresses made with the import, whose every Dynamic Link row points to a
+    record in the set: ERPNext deletes them with the party, so they don't block. Made with the
+    import: by the session's user, at most UNDO_GRACE_MINUTES after it finished. One added by
+    someone else, or later, is not the import's and blocks as linked, or the undo would delete
+    it silently. Batched: one query per set doctype for the candidates, one per Contact/Address
+    doctype for all their rows and one for their owners."""
+    if session is None or not frappe.db.exists("DocType", "Dynamic Link"):
         return set()
+    user = session.user or session.owner
+    latest = finished_at(session) + timedelta(minutes=UNDO_GRACE_MINUTES)
     link = frappe.qb.DocType("Dynamic Link")
     candidates: Set[Key] = set()
     for doctype, names in _groups(in_set).items():
@@ -275,16 +280,26 @@ def _contacts_inside(in_set: Set[Key]) -> Set[Key]:
             outside.update(
                 (parenttype, r.parent) for r in rows if (r.link_doctype, r.link_name) not in in_set
             )
+            for row in frappe.get_all(
+                parenttype,
+                filters={"name": ["in", chunk]},
+                fields=["name", "owner", "creation"],
+                limit_page_length=0,
+            ):
+                if row.owner != user or get_datetime(row.creation) > latest:
+                    outside.add((parenttype, row.name))
     return candidates - outside
 
 
-def link_blockers(records: List[Record], ignore: Set[Key]) -> List[Blocker]:
+def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List[Blocker]:
     """Documents outside ``records`` that link to them, by the rules of Frappe's own delete
     check (frappe.model.delete_doc.get_linked_docs and get_dynamic_linked_docs): Link fields,
     Dynamic Link fields and child-table rows (counted as their parent document); cancelled
     documents and the doctypes in the ``ignore_links_on_delete`` hook never block. Neither do
-    ledger entries (OWN_ENTRIES) made by a voucher in the set, Contacts and Addresses linked only
-    to records in the set, nor the documents in ``ignore`` (the session itself).
+    ledger entries (OWN_ENTRIES) made by a voucher in the set, Contacts and Addresses that
+    ``session`` made with the import and linked only to records in the set (_contacts_inside;
+    without a session, every Contact and Address counts), nor the documents in ``ignore`` (the
+    session itself).
 
     One aggregated query per linking field (and per CHUNK names): it returns at most a row per
     target (and linking parent doctype) with the first linker and a count, however many
@@ -295,7 +310,7 @@ def link_blockers(records: List[Record], ignore: Set[Key]) -> List[Blocker]:
 
     in_set = {_key(r) for r in records}
     skip = set(frappe.get_hooks("ignore_links_on_delete") or [])
-    never = _groups(in_set | set(ignore) | _contacts_inside(in_set))
+    never = _groups(in_set | set(ignore) | _contacts_inside(in_set, session))
     vouchers = _groups(in_set)
     first: Dict[Key, Key] = {}
     count: Dict[Key, int] = defaultdict(int)
@@ -701,7 +716,7 @@ def build_plan(session) -> Plan:
         return [r for r in present if _key(r) not in held]
 
     if present:
-        add(link_blockers(present, ignore))
+        add(link_blockers(present, ignore, session))
         add(_changed_blockers(still_open(), session))
         add(_closed_books_blockers(still_open()))
         add(_later_stock_blockers(still_open(), in_set))
