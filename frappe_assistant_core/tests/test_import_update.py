@@ -137,3 +137,92 @@ class TestUpdatePermission(UpdateCase):
 
         with unittest.mock.patch.object(frappe, "has_permission", side_effect=has_permission):
             self.assertIn("update", import_target_problem("Customer", UPDATE))
+
+
+class TestMatching(UpdateCase):
+    def _matches(self, lines, match_on=("tax_id",), mapping=None, header=None):
+        session, mapped = self._session(lines, mapping=mapping, match_on=match_on, header=header)
+        self.assertTrue(mapped["success"], mapped)
+        doc = self._doc(session)
+        from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+
+        rows = read_sheet_rows(readable_session_file(doc), doc.sheet or None)
+        return doc, rows, import_update.match_records(doc, rows)
+
+    def test_each_row_finds_its_record_by_another_column(self):
+        _doc, _rows, matches = self._matches(
+            [f"TAX-A-{self.tag},{self.group},x", f"TAX-B-{self.tag},{self.group},y"]
+        )
+
+        self.assertEqual(matches, {2: [self.customers["a"]], 3: [self.customers["b"]]})
+
+    def test_case_and_spaces_dont_stop_a_match(self):
+        _doc, _rows, matches = self._matches([f"  tax-a-{self.tag} ,{self.group},x"])
+
+        self.assertEqual(matches[2], [self.customers["a"]])
+
+    def test_no_match_and_more_than_one_match(self):
+        frappe.db.set_value("Customer", self.customers["b"], "tax_id", f"TAX-A-{self.tag}")
+
+        _doc, _rows, matches = self._matches(
+            [f"TAX-A-{self.tag},{self.group},x", f"TAX-Z-{self.tag},{self.group},y"]
+        )
+
+        self.assertEqual(sorted(matches[2]), sorted(self.customers.values()))
+        self.assertEqual(matches[3], [])
+
+    def test_a_key_of_two_columns(self):
+        frappe.db.set_value("Customer", self.customers["b"], "tax_id", f"TAX-A-{self.tag}")
+        other = f"Other {self.tag}"
+        frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": other,
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+        frappe.db.set_value("Customer", self.customers["b"], "customer_group", other)
+
+        _doc, _rows, matches = self._matches(
+            [f"TAX-A-{self.tag},{other},x"], match_on=("tax_id", "customer_group")
+        )
+
+        self.assertEqual(matches[2], [self.customers["b"]])
+
+    def test_a_record_the_user_cannot_read_is_not_matched(self):
+        def get_list(doctype, *args, **kwargs):
+            return []  # what get_list returns to a user with no access to these records
+
+        session, mapped = self._session([f"TAX-A-{self.tag},{self.group},x"])
+        doc = self._doc(session)
+        from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+
+        rows = read_sheet_rows(readable_session_file(doc), doc.sheet or None)
+        with unittest.mock.patch.object(frappe, "get_list", side_effect=get_list):
+            matches = import_update.match_records(doc, rows)
+
+        self.assertEqual(matches[2], [])
+
+    def test_the_id_column_is_added_and_the_key_is_never_written(self):
+        doc, rows, matches = self._matches([f"tax-a-{self.tag},{self.group},https://new.example"])
+
+        out, column_map = import_update.with_ids(doc, rows, {2: matches[2][0]})
+
+        self.assertEqual(out[0][-1], "ID")
+        self.assertEqual(out[1][-1], self.customers["a"])
+        self.assertEqual(column_map[str(len(rows[0]))], "name")
+        self.assertEqual(column_map["0"], "Don't Import")  # Tax ID: only used to find the record
+        self.assertEqual(column_map["2"], "website")
+
+    def test_matching_on_the_id_adds_no_column(self):
+        doc, rows, matches = self._matches(
+            [f"{self.customers['a']},https://new.example"],
+            mapping={"ID": "name", "Website": "website"},
+            match_on=(),
+            header="ID,Website",
+        )
+
+        out, column_map = import_update.with_ids(doc, rows, {2: matches[2][0]})
+
+        self.assertEqual(out, rows)
+        self.assertEqual(column_map["0"], "name")

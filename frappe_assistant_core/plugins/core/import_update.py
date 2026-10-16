@@ -16,14 +16,18 @@ so a record's key is never rewritten with the file's spelling. The dry run repor
 match or more than one, skips rows that change nothing, and shows old and new values.
 """
 
+from collections import defaultdict
 from typing import Dict, List, Tuple
 
+import frappe
 from frappe import _
 from frappe.core.doctype.data_import.importer import get_id_field
+from frappe.utils import cstr
 
 UPDATE = "Update Existing Records"
 ID_HEADER = "ID"
 DONT_IMPORT = "Don't Import"
+MATCH_CHUNK = 500
 
 
 def is_update(session) -> bool:
@@ -78,3 +82,74 @@ def mapping_problems(
             ).format(id_columns[0])
         )
     return match_on, problems
+
+
+# -- matching rows to records ---------------------------------------------------------------
+
+
+def _norm(value) -> str:
+    # MariaDB compares text case- and trailing-space-insensitively: match the way it does.
+    return cstr(value).strip().casefold()
+
+
+def _positions(session) -> Dict[str, int]:
+    """Field → the column it's mapped from."""
+    options = frappe.parse_json(session.template_options or "{}") or {}
+    mapped = options.get("column_to_field_map") or {}
+    return {field: int(pos) for pos, field in mapped.items() if field != DONT_IMPORT}
+
+
+def _id_match(session) -> bool:
+    return match_fields(session) in (["name"], [id_fieldname(session.target_doctype)])
+
+
+def match_records(session, rows: List[list]) -> Dict[int, List[str]]:
+    """Each row's matching records, by row number (the header is row 1): one name when the
+    match is clean; none, or several, when it isn't. Only records the user may read match."""
+    fields = match_fields(session)
+    positions = _positions(session)
+    keys: Dict[int, tuple] = {}
+    for number, row in enumerate(rows[1:], start=2):
+        keys[number] = tuple(_norm(row[positions[f]] if positions[f] < len(row) else "") for f in fields)
+    found = defaultdict(list)
+    firsts = sorted({key[0] for key in keys.values() if all(key)})
+    for start in range(0, len(firsts), MATCH_CHUNK):
+        chunk = firsts[start : start + MATCH_CHUNK]
+        for record in frappe.get_list(
+            session.target_doctype,
+            filters=[[fields[0], "in", chunk]],
+            fields=list(dict.fromkeys(["name", *fields])),
+            limit_page_length=0,
+        ):
+            found[tuple(_norm(record.get(f)) for f in fields)].append(record.name)
+    return {number: (list(found.get(key, [])) if all(key) else []) for number, key in keys.items()}
+
+
+def with_ids(session, rows: List[list], records: Dict[int, str]) -> Tuple[List[list], Dict[str, str]]:
+    """The rows with an ID column holding each row's record, and the column map that imports
+    them: the ID column to the record's ID, the key columns not imported (they only find the
+    record). Matching on the ID itself needs no column: the rows come back as they are."""
+    options = frappe.parse_json(session.template_options or "{}") or {}
+    column_map = dict(options.get("column_to_field_map") or {})
+    if _id_match(session) or not rows:
+        return rows, column_map
+    width = len(rows[0])
+    keys = match_fields(session)
+    for field, position in _positions(session).items():
+        if field in keys:
+            column_map[str(position)] = DONT_IMPORT
+    column_map[str(width)] = "name"
+    out = [list(rows[0]) + [ID_HEADER]]
+    for number, row in enumerate(rows[1:], start=2):
+        out.append((list(row) + [""] * width)[:width] + [records.get(number, "")])
+    return out, column_map
+
+
+def key_label(session) -> str:
+    """The match fields' labels, for messages: 'Tax ID', or 'Item Code + Price List'."""
+    meta = frappe.get_meta(session.target_doctype)
+    labels = []
+    for field in match_fields(session):
+        df = meta.get_field(field)
+        labels.append(_("ID") if field == "name" else _(df.label if df else field))
+    return " + ".join(labels)
