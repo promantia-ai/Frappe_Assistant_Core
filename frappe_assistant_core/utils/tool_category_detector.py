@@ -98,6 +98,8 @@ READ_ONLY_TOOLS = {
     "set_opening_balances",
     # Every row it inserts is rolled back; it writes only the session and its result file.
     "dry_run_import",
+    # Deletes nothing: lists what an undo would remove; it writes only its figures on the session.
+    "preview_import_undo",
 }
 
 # Tools that are always categorized as write (hardcoded list)
@@ -108,6 +110,7 @@ WRITE_TOOLS = {
     "import_opening_stock",  # creates and submits Stock Reconciliations
     "import_opening_invoices",  # creates and submits opening invoices
     "import_opening_balances",  # creates and submits the opening Journal Entry
+    "undo_import",  # cancels and deletes the records an import created
     "update_document",
     # Document generation (saves a private Frappe File — a create side effect)
     "generate_document",  # Markdown -> PDF saved as a File record; NOT read-only

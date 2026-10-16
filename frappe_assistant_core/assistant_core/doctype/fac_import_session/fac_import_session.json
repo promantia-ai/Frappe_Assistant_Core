@@ -102,7 +102,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "File Read\nMapped\nDry Run Failed\nReady to Import\nImporting\nCompleted\nPartially Completed\nFailed\nCancelled",
+   "options": "File Read\nMapped\nDry Run Failed\nReady to Import\nImporting\nCompleted\nPartially Completed\nFailed\nCancelled\nUndoing\nUndone\nPartially Undone",
    "read_only": 1
   },
   {

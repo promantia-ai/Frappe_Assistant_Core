@@ -97,6 +97,17 @@ class SetColumnMapping(BaseTool):
             except frappe.PermissionError as e:
                 return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
+            # Mapping would set the session back to Mapped: never for an import being undone or undone.
+            if doc.status in ("Undoing", "Undone"):
+                being = _("is being undone") if doc.status == "Undoing" else _("was undone")
+                return {
+                    "success": False,
+                    "error": _(
+                        "This import session is {0}: the import {1}. Start a new import session."
+                    ).format(doc.status, being),
+                    "session": session_name,
+                }
+
             current_target = doc.target_doctype or None
             target = arguments.get("doctype") or current_target
             if not target:
