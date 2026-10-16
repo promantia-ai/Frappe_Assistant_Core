@@ -14,11 +14,13 @@ step records its file, and users without permission are refused before any work.
 
 import json
 import unittest
+from unittest.mock import patch
 
 import frappe
 
 from frappe_assistant_core.mcp.server import MCPServer
 from frappe_assistant_core.mcp.tool_adapter import build_tool_dict
+from frappe_assistant_core.plugins.core import import_fixes
 
 # The module, not its class: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_run as run_tests
@@ -98,3 +100,49 @@ class TestFileContentIsFenced(GuardrailCase):
         self.assertIn(f"<{FENCE}>", json.dumps(payload.get("problems") or payload.get("error")))
         outside = {k: v for k, v in payload.items() if k not in ("problems", "columns", "error")}
         self.assertNotIn(INJECTION, json.dumps(outside))
+
+
+class TestTheModelSeesASummary(GuardrailCase):
+    def _session_with_missing_groups(self, count):
+        rows = [f"Cust {i} {self.tag},Missing Group {i} {self.tag},Company" for i in range(count)]
+        session = self._run("start_import_session", {"file_id": self._csv(rows).name})["result"]["session_id"]
+        self._run(
+            "set_column_mapping", {"session": session, "mapping": run_tests.MAPPING, "doctype": "Customer"}
+        )
+        return session
+
+    def test_the_dry_run_lists_at_most_the_shown_groups_and_says_how_many_more(self):
+        session = self._session_with_missing_groups(5)
+
+        with patch.object(import_fixes, "GROUPS_SHOWN", 3), patch.object(import_fixes, "MASTERS_SHOWN", 2):
+            result = self._run("dry_run_import", {"session": session})["result"]
+
+        self.assertEqual(
+            (len(result["groups"]), result["groups_total"], result["groups_not_shown"]), (3, 5, 2)
+        )
+        self.assertEqual((len(result["masters_plan"]), result["masters_plan_total"]), (2, 5))
+        self.assertIn("2 more", result["message"])
+
+    def test_a_group_not_shown_can_still_be_fixed(self):
+        session = self._session_with_missing_groups(5)
+        with patch.object(import_fixes, "GROUPS_SHOWN", 3):
+            self._run("dry_run_import", {"session": session})
+        hidden = list(import_fixes.last_groups(self._doc(session)).values())[-1]
+
+        fixed = self._run(
+            "dry_run_import", {"session": session, "fixes": [{"group": hidden["id"], "action": "leave_out"}]}
+        )
+
+        self.assertTrue(fixed["success"], fixed)
+        self.assertEqual(fixed["result"]["excluded"], 1)
+
+    def test_extract_file_content_refuses_a_file_an_import_session_holds(self):
+        file_doc = self._csv([f"Acme {self.tag},{self.group},Company"])
+        session = self._run("start_import_session", {"file_id": file_doc.name})["result"]["session_id"]
+        # the data_science plugin may be off on a test site: call the tool itself
+        from frappe_assistant_core.plugins.data_science.tools.extract_file_content import ExtractFileContent
+
+        reply = ExtractFileContent().execute({"file_id": file_doc.name})
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn(session, reply["error"])
