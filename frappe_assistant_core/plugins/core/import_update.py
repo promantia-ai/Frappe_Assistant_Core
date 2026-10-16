@@ -30,6 +30,7 @@ DONT_IMPORT = "Don't Import"
 MATCH_CHUNK = 500
 NUMBER_TYPES = ("Currency", "Float", "Percent", "Int", "Check")
 SKIPPED = ("name", "doctype")
+HIDDEN = "*****"  # a password's value is never shown
 
 
 def is_update(session) -> bool:
@@ -172,20 +173,29 @@ def _same(df, old, new) -> bool:
 
 def changes(doctype: str, record: str, doc: Dict) -> List[Dict]:
     """What updating ``record`` with the parsed row ``doc`` changes: one {field, label, old, new}
-    per field whose value differs. A blank cell is no change: Data Import leaves it as it is."""
+    per field whose value differs. A blank cell is no change: Data Import leaves it as it is.
+    Only fields the user may read count: saving resets the others, and their values stay hidden."""
     meta = frappe.get_meta(doctype)
     skip = {*SKIPPED, id_fieldname(doctype)}
+    readable = set(meta.get_permitted_fieldnames())
     fields = []
     for field in doc:
         df = meta.get_field(field)
-        if field not in skip and df and not df.is_virtual and df.fieldtype not in frappe.model.table_fields:
+        if (
+            field not in skip
+            and field in readable
+            and df
+            and not df.is_virtual
+            and df.fieldtype not in frappe.model.table_fields
+        ):
             fields.append(field)
     current = frappe.db.get_value(doctype, record, fields, as_dict=True) if fields else {}
     out = []
     for field in fields:
         df = meta.get_field(field)
         if not _same(df, current.get(field), doc[field]):
-            out.append({"field": field, "label": _(df.label), "old": current.get(field), "new": doc[field]})
+            old, new = (HIDDEN, HIDDEN) if df.fieldtype == "Password" else (current.get(field), doc[field])
+            out.append({"field": field, "label": _(df.label), "old": old, "new": new})
     return out
 
 

@@ -350,3 +350,20 @@ class TestUpdatePlan(UpdateCase):
         payload = json.loads(response["content"][0]["text"])
 
         self.assertIn("<import_file_content>", payload["update"])
+
+
+class TestUpdateFieldPermissions(UpdateCase):
+    def test_a_field_the_user_cannot_read_is_neither_shown_nor_counted(self):
+        import json
+
+        from frappe.model.meta import Meta
+
+        session, _mapped = self._session([f"TAX-A-{self.tag},{self.group},https://new-a.example"])
+        # a user whose role reads Customer but not the permission level Website is on
+        readable = [f for f in frappe.get_meta("Customer").get_permitted_fieldnames() if f != "website"]
+
+        with unittest.mock.patch.object(Meta, "get_permitted_fieldnames", return_value=readable):
+            result = self._run("dry_run_import", {"session": session})["result"]
+
+        self.assertNotIn("https://a.example", json.dumps(result, default=str))
+        self.assertEqual(result["update"]["records_changing"], 0)
