@@ -19,7 +19,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
-from frappe.utils import add_days, add_to_date, getdate, now_datetime, nowdate
+from frappe.utils import add_days, add_to_date, get_datetime, getdate, now_datetime, nowdate
 
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import (
     FACImportSession,
@@ -260,11 +260,15 @@ class BlockerCase(UndoCase):
         super().tearDown()
 
     def _add(self, session, doctype, name, parent=None):
+        """List ``name`` on the session as a record it made. A record made before the session (the
+        test's Customer Group, say) is dated from the session's start, as one the import made."""
         doc = self._doc(session)
         doc.append(
             "created_records", {"record_doctype": doctype, "record_name": name, "parent_record": parent}
         )
         doc.save()
+        if get_datetime(frappe.db.get_value(doctype, name, "creation")) < get_datetime(doc.creation):
+            frappe.db.set_value(doctype, name, "creation", doc.creation, update_modified=False)
 
     def _insert_raw(self, values):
         doc = frappe.get_doc(values)
@@ -517,6 +521,37 @@ class TestBlockers(BlockerCase):
         self.assertIn("created", blocker.detail)
         self.assertNotIn(("Customer Group", names[1]), blocked)
 
+    def test_a_record_merged_into_an_older_one_leaves_the_older_one_changed_and_kept(self):
+        # Frappe's merge rewrites the session's Created Records row (a Dynamic Link) to name the
+        # record it merged into, which existed before the import.
+        older = (
+            frappe.get_doc(
+                {
+                    "doctype": "Customer Group",
+                    "customer_group_name": f"Older {self.tag}",
+                    "parent_customer_group": "All Customer Groups",
+                }
+            )
+            .insert()
+            .name
+        )
+        session, names = self._session_with_groups(2)
+        frappe.rename_doc("Customer Group", names[0], older, merge=True)
+        self.assertIn(older, [r.record_name for r in self._doc(session).created_records])
+
+        blocked = self._blocked(self._plan(session))
+
+        blocker = blocked[("Customer Group", older)]
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("changed", None))
+        self.assertIn("existed before this import", blocker.detail)
+        self.assertNotIn(("Customer Group", names[1]), blocked)
+
+        import_undo.start(self._doc(session), "unblocked")
+
+        self.assertTrue(frappe.db.exists("Customer Group", older))
+        self.assertFalse(frappe.db.exists("Customer Group", names[1]))
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+
     def test_a_record_modified_inside_the_grace_by_the_session_user_is_not_changed(self):
         session, names = self._session_with_groups()
         soon = import_undo.finished_at(self._doc(session)) + timedelta(
@@ -646,11 +681,15 @@ class TestBlockers(BlockerCase):
     def test_ledger_rows_of_a_voucher_outside_the_set_block_its_customer(self):
         session = self._session_with_customers()
         alpha = self._names()["alpha"]
-        entry = self._gl_entry("outside", alpha, "Journal Entry", f"UNDO-JE-OUT-{self.tag}")
+        self._gl_entry("outside", alpha, "Journal Entry", f"UNDO-JE-OUT-{self.tag}")
 
         blocker = self._blocked(self._plan(session))[("Customer", alpha)]
 
-        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"GL Entry {entry}"))
+        # the voucher behind the ledger row, which the user can cancel; not the row itself
+        self.assertEqual(
+            (blocker.reason, blocker.blocked_by), ("linked", f"Journal Entry UNDO-JE-OUT-{self.tag}")
+        )
+        self.assertIn(f"Journal Entry UNDO-JE-OUT-{self.tag}", blocker.detail)
 
     def test_a_contact_of_records_in_the_set_only_does_not_block(self):
         session = self._session_with_customers()
@@ -702,6 +741,29 @@ class TestBlockers(BlockerCase):
         self._contact_made(session, alpha, minutes_after=import_undo.UNDO_GRACE_MINUTES - 5)
 
         self.assertEqual(self._plan(session).blocked, [])
+
+    def test_a_contact_edited_by_another_user_blocks(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        contact = self._contact_made(session, alpha, minutes_after=1)
+        frappe.db.set_value("Contact", contact, "modified_by", "Guest", update_modified=False)
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Contact {contact}"))
+
+    def test_a_contact_changed_after_the_grace_blocks(self):
+        session = self._session_with_customers()
+        alpha = self._names()["alpha"]
+        contact = self._contact_made(session, alpha, minutes_after=1)
+        late = import_undo.finished_at(self._doc(session)) + timedelta(
+            minutes=import_undo.UNDO_GRACE_MINUTES + 1
+        )
+        frappe.db.set_value("Contact", contact, "modified", late, update_modified=False)
+
+        blocker = self._blocked(self._plan(session))[("Customer", alpha)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Contact {contact}"))
 
     def test_a_contact_also_linked_outside_the_set_blocks(self):
         session = self._session_with_customers()
@@ -835,6 +897,29 @@ class TestPlan(BlockerCase):
         self._edited_by_someone_else("Customer Group", extra)
         self.assertNotEqual(self._plan(session).fingerprint, added)
 
+    def test_a_session_with_an_insert_and_an_update_import_says_the_update_is_not_restored(self):
+        session = self._session_with_customers()
+        update = self._insert_raw(
+            {
+                "doctype": "Data Import",
+                "name": f"UNDO-DI-{self.tag}",
+                "reference_doctype": "Customer",
+                "import_type": "Update Existing Records",
+                "status": "Success",
+            }
+        ).name
+        doc = self._doc(session)
+        doc.append("data_imports", {"data_import": update, "purpose": "Continue", "status": "Success"})
+        doc.save()
+
+        plan = self._plan(session)
+
+        n = self._names()
+        self.assertEqual({r.name for r in plan.records}, {n["alpha"], n["gamma"], n["delta"]})
+        self.assertIn("Update Existing Records", plan.note)
+        self.assertIn("not restored", plan.note)
+        self.assertEqual(import_undo.plan_refusal(plan), "")
+
     def test_to_delete_excludes_blocked_and_kept(self):
         session = self._session_with_customers()
         self._add(session, "Customer Group", self.group, "All Customer Groups")
@@ -918,7 +1003,13 @@ class TestRun(BlockerCase):
         self.assertEqual(doc.created_records, [])
         step = self._last_step(session)
         self.assertEqual((step.step, step.outcome), ("Undo", "Success"))
-        self.assertEqual(self._undo_options(session)["result"], {"deleted": 2, "kept": 0, "blocked": []})
+        result = self._undo_options(session)["result"]
+        self.assertEqual(
+            {k: result[k] for k in ("deleted", "already_removed", "kept", "blocked")},
+            {"deleted": 2, "already_removed": 0, "kept": 0, "blocked": []},
+        )
+        # what was removed is still on the session, though its Created Records rows are gone
+        self.assertEqual(sorted(result["removed"]), sorted(f"Customer Group {n}" for n in names))
 
     def test_the_created_records_row_goes_before_the_delete(self):
         session, names = self._session_with_groups(1)
@@ -967,6 +1058,40 @@ class TestRun(BlockerCase):
         self.assertIn("Alpha is refused", blocked[f"Customer {n['alpha']}"]["detail"])
         self.assertEqual(self._last_step(session).outcome, "Warning")
 
+    def test_a_record_deleted_by_hand_before_the_job_reaches_it_is_already_removed(self):
+        session, names = self._session_with_groups(2)
+        real = import_undo.delete_order
+
+        def then_deleted_by_hand(records):
+            order = real(records)
+            frappe.db.delete("Customer Group", {"name": names[0]})  # after the plan, before its turn
+            return order
+
+        with patch.object(import_undo, "delete_order", side_effect=then_deleted_by_hand):
+            self._start(session)
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undone", doc.steps[-1].message)
+        self.assertEqual(doc.created_records, [])
+        result = self._undo_options(session)["result"]
+        self.assertEqual(
+            (result["deleted"], result["already_removed"], result["kept"], result["blocked"]), (1, 1, 0, [])
+        )
+        self.assertEqual(result["removed"], [f"Customer Group {names[1]}"])
+        self.assertFalse(self._exists("Customer Group", names[1]))
+
+    def test_a_record_deleted_by_hand_before_the_undo_is_already_removed(self):
+        session, names = self._session_with_groups(2)
+        frappe.db.delete("Customer Group", {"name": names[0]})
+
+        self._start(session)
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undone", doc.steps[-1].message)
+        self.assertEqual(doc.created_records, [])
+        result = self._undo_options(session)["result"]
+        self.assertEqual((result["deleted"], result["already_removed"], result["blocked"]), (1, 1, []))
+
     def test_unblocked_mode_keeps_blocked_records_and_removes_the_rest(self):
         session, names = self._session_with_groups(2)
         outside = self._outside_customer(names[0])
@@ -999,7 +1124,7 @@ class TestRun(BlockerCase):
         self.assertEqual(import_undo.report(self._doc(session))["state"], "stopped")
 
     def test_progress_is_written_and_the_result_is_kept(self):
-        session, _names = self._session_with_groups(3)
+        session, names = self._session_with_groups(3)
         written = []
         real = import_undo._progress
 
@@ -1019,10 +1144,24 @@ class TestRun(BlockerCase):
         self.assertEqual(
             (progress["step"], progress["state"], progress["done"], progress["total"]), ("Undo", "done", 3, 3)
         )
-        self.assertEqual(self._undo_options(session)["result"], {"deleted": 3, "kept": 0, "blocked": []})
+        result = self._undo_options(session)["result"]
+        removed = [f"Customer Group {n}" for n in reversed(names)]  # in delete order
+        self.assertEqual(
+            result, {"deleted": 3, "already_removed": 0, "kept": 0, "blocked": [], "removed": removed}
+        )
         report = import_undo.report(self._doc(session))
         self.assertEqual(
-            report, {"state": "done", "deleted": 3, "total": 3, "kept": 0, "blocked": [], "reason": None}
+            report,
+            {
+                "state": "done",
+                "deleted": 3,
+                "already_removed": 0,
+                "total": 3,
+                "kept": 0,
+                "blocked": [],
+                "removed": removed,
+                "reason": None,
+            },
         )
 
     def _versions(self, session):
@@ -1432,6 +1571,31 @@ class TestRunSubmittedInvoice(OpeningInvoicesCase):
         self.assertIn(refused, [r.record_name for r in doc.created_records])
         self.assertEqual(doc.status, "Partially Undone")
 
+    def test_a_payment_against_an_opening_invoice_blocks_it_and_names_the_payment(self):
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+        session, result = self._ready([f"{self.customer},OI-{self.tag}-1,{self.date},,10"])
+        self.assertTrue(self._run("import_opening_invoices", self._card(session, result))["success"])
+        doc = self._doc(session)
+        invoice = next(r.record_name for r in doc.created_records if r.record_doctype == "Sales Invoice")
+        doc.append("created_records", {"record_doctype": "Customer", "record_name": self.customer})
+        doc.save()
+        payment = get_payment_entry("Sales Invoice", invoice)
+        payment.reference_no, payment.reference_date = f"UNDO-{self.tag}", self.date
+        payment.insert()
+        payment.submit()
+
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ):
+            plan = import_undo.build_plan(self._doc(session))
+
+        blocked = {(b.record.doctype, b.record.name): b for b in plan.blocked}
+        blocker = blocked[("Sales Invoice", invoice)]
+        # the Payment Entry the user can cancel, not one of its ledger rows
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Payment Entry {payment.name}"))
+        self.assertNotIn(("Customer", self.customer), {(r.doctype, r.name) for r in plan.to_delete})
+
 
 class TestRunSubmittedStock(OpeningStockCase):
     """An opening Stock Reconciliation made by import_opening_stock: cancelled, then deleted."""
@@ -1456,3 +1620,86 @@ class TestRunSubmittedStock(OpeningStockCase):
                 frappe.db.count(ledger, {"voucher_type": "Stock Reconciliation", "voucher_no": recon}), 0
             )
         self.assertEqual(self._qty(self.item, self.stores), 0)
+
+    def _batched(self):
+        """An opening Stock Reconciliation of a batch item, whose batch the import made."""
+        old = frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields")
+        frappe.db.set_single_value("Stock Settings", "use_serial_batch_fields", 1)
+        self.addCleanup(frappe.db.set_single_value, "Stock Settings", "use_serial_batch_fields", old)
+        item = self._item(f"OS-UB-{self.tag}", has_batch_no=1, create_new_batch=0)
+        batch = f"UB-{self.tag}"
+        session = self._session([f"{item},{self.stores},3,2,{batch}"], header="Item,Warehouse,Qty,Rate,Batch")
+        columns = {
+            "Item": "item_code",
+            "Warehouse": "warehouse",
+            "Qty": "qty",
+            "Rate": "valuation_rate",
+            "Batch": "batch_no",
+        }
+        self._setup(session, columns=columns)
+        result = self._run("dry_run_import", {"session": session})["result"]
+        reply = self._run("import_opening_stock", self._card(session, result))
+        self.assertTrue(reply["success"], reply)
+        recon = reply["result"]["documents"][0]
+        made = {(r.record_doctype, r.record_name) for r in self._doc(session).created_records}
+        self.assertEqual(made, {("Stock Reconciliation", recon), ("Batch", batch)})
+        self.assertTrue(self._bundles(recon))
+        return session, recon, batch, item
+
+    def _bundles(self, recon):
+        """The reconciliation's Serial and Batch Bundles: {name: (docstatus, is_cancelled, entries)}."""
+        bundles = frappe.get_all(
+            "Serial and Batch Bundle",
+            filters={"voucher_type": "Stock Reconciliation", "voucher_no": recon},
+            fields=["name", "docstatus", "is_cancelled"],
+        )
+        return {
+            b.name: (
+                b.docstatus,
+                b.is_cancelled,
+                frappe.db.count("Serial and Batch Entry", {"parent": b.name}),
+            )
+            for b in bundles
+        }
+
+    def test_a_batched_opening_stock_is_undone_with_its_bundles_and_batch(self):
+        session, recon, batch, item = self._batched()
+        bundles = list(self._bundles(recon))
+
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ):
+            self.assertEqual(import_undo.build_plan(self._doc(session)).blocked, [])
+            import_undo.start(self._doc(session), "all")
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undone", doc.steps[-1].message)
+        self.assertFalse(frappe.db.exists("Stock Reconciliation", recon))
+        self.assertEqual(self._bundles(recon), {})
+        self.assertEqual(frappe.db.count("Serial and Batch Entry", {"parent": ["in", bundles]}), 0)
+        self.assertFalse(frappe.db.exists("Batch", batch))
+        self.assertEqual(self._qty(item, self.stores), 0)
+
+    def test_a_failed_delete_restores_the_batched_reconciliation_its_bundles_and_batch(self):
+        from frappe_assistant_core.tests.test_import_undo import refusing
+
+        session, recon, batch, item = self._batched()
+        before = self._bundles(recon)
+
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ), patch.object(import_undo.frappe, "delete_doc", side_effect=refusing(recon)):
+            import_undo.start(self._doc(session), "all")
+
+        self.assertEqual(frappe.db.get_value("Stock Reconciliation", recon, "docstatus"), 1)
+        self.assertEqual(self._bundles(recon), before)
+        self.assertTrue(frappe.db.exists("Batch", batch))
+        self.assertEqual(self._qty(item, self.stores), 3)
+        doc = self._doc(session)
+        result = (frappe.parse_json(doc.template_options) or {})["undo"]["result"]
+        self.assertEqual(
+            [(b["record"], b["reason"]) for b in result["blocked"]],
+            [(f"Stock Reconciliation {recon}", "delete_failed")],
+        )
+        self.assertEqual(result["kept"], 1)  # the batch, which the reconciliation needs
+        self.assertEqual(doc.status, "Partially Undone")

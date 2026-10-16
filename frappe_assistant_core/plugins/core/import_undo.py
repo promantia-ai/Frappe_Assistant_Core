@@ -52,6 +52,8 @@ OWN_ENTRIES = {
     "Unreconcile Payment Entries",
     "Serial and Batch Bundle",
 }
+# Between voucher_type and voucher_no when a query joins them: a DocType name has no "|"
+VOUCHER_SEPARATOR = "|"
 # ERPNext deletes a party's Contacts and Addresses with it (delete_contact_and_address)
 CONTACT_DOCTYPES = ["Contact", "Address"]
 
@@ -170,6 +172,11 @@ def undo_set(session) -> Tuple[List[Record], List[Record], Optional[str]]:
             "This session imported with Update Existing Records: those records existed before the "
             "import and are never deleted, so there is nothing to undo for them."
         )
+    elif updates:
+        note = _(
+            "This session also imported with Update Existing Records: the records that import changed "
+            "existed before it and are not restored. Only the records the session created are removed."
+        )
 
     present: List[Record] = []
     removed: List[Record] = []
@@ -249,10 +256,11 @@ def _not_among(doctype_col, name_col, groups: Dict[str, List[str]]) -> list:
 def _contacts_inside(in_set: Set[Key], session) -> Set[Key]:
     """Contacts and Addresses made with the import, whose every Dynamic Link row points to a
     record in the set: ERPNext deletes them with the party, so they don't block. Made with the
-    import: by the session's user, at most UNDO_GRACE_MINUTES after it finished. One added by
-    someone else, or later, is not the import's and blocks as linked, or the undo would delete
-    it silently. Batched: one query per set doctype for the candidates, one per Contact/Address
-    doctype for all their rows and one for their owners."""
+    import: by the session's user, at most UNDO_GRACE_MINUTES after it finished, and not edited
+    since by another user or after that. One added or edited by someone else, or later, is not
+    the import's as it stands and blocks as linked, or the undo would delete it silently.
+    Batched: one query per set doctype for the candidates, one per Contact/Address doctype for
+    all their rows and one for their owners and edits."""
     if session is None or not frappe.db.exists("DocType", "Dynamic Link"):
         return set()
     user = session.user or session.owner
@@ -287,12 +295,44 @@ def _contacts_inside(in_set: Set[Key], session) -> Set[Key]:
             for row in frappe.get_all(
                 parenttype,
                 filters={"name": ["in", chunk]},
-                fields=["name", "owner", "creation"],
+                fields=["name", "owner", "creation", "modified", "modified_by"],
                 limit_page_length=0,
             ):
-                if row.owner != user or get_datetime(row.creation) > latest:
+                if (
+                    row.owner != user
+                    or (row.modified_by and row.modified_by != user)
+                    or get_datetime(row.creation) > latest
+                    or get_datetime(row.modified) > latest
+                ):
                     outside.add((parenttype, row.name))
     return candidates - outside
+
+
+BUNDLE = "Serial and Batch Bundle"
+BUNDLE_ENTRY = "Serial and Batch Entry"
+
+
+def _own_bundles(in_set: Set[Key]) -> Set[Key]:
+    """The Serial and Batch Bundles made by a voucher in the set (voucher_type, voucher_no): its
+    own entries, removed with it (_remove_own_bundles), so neither they nor their Serial and
+    Batch Entry rows (a Batch's) block. One query per submittable set doctype and CHUNK names."""
+    if not frappe.db.exists("DocType", BUNDLE):
+        return set()
+    bundle = frappe.qb.DocType(BUNDLE)
+    own: Set[Key] = set()
+    for doctype, names in _groups(in_set).items():
+        if not frappe.get_meta(doctype).is_submittable:
+            continue
+        for chunk in _chunks(names):
+            rows = (
+                frappe.qb.from_(bundle)
+                .select(bundle.name)
+                .where(bundle.voucher_type == doctype)
+                .where(bundle.voucher_no.isin(chunk))
+                .run(pluck=True)
+            )
+            own.update((BUNDLE, name) for name in rows)
+    return own
 
 
 def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List[Blocker]:
@@ -300,21 +340,24 @@ def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List
     check (frappe.model.delete_doc.get_linked_docs and get_dynamic_linked_docs): Link fields,
     Dynamic Link fields and child-table rows (counted as their parent document); cancelled
     documents and the doctypes in the ``ignore_links_on_delete`` hook never block. Neither do
-    ledger entries (OWN_ENTRIES) made by a voucher in the set, Contacts and Addresses that
+    ledger entries (OWN_ENTRIES) made by a voucher in the set, nor its Serial and Batch Bundles
+    and their entries (_own_bundles), Contacts and Addresses that
     ``session`` made with the import and linked only to records in the set (_contacts_inside;
     without a session, every Contact and Address counts), nor the documents in ``ignore`` (the
     session itself).
 
     One aggregated query per linking field (and per CHUNK names): it returns at most a row per
     target (and linking parent doctype) with the first linker and a count, however many
-    documents link to it. One blocker per record, naming the first linker. The count is summed
-    over the linking fields, so a document linking through two fields counts twice."""
+    documents link to it. One blocker per record, naming the first linker; a ledger entry
+    (OWN_ENTRIES with a voucher) is named, and counted, by its voucher, the document the user can
+    cancel. The count is summed over the linking fields, so a document linking through two
+    fields counts twice."""
     from frappe.model.dynamic_links import get_dynamic_link_map
     from frappe.model.rename_doc import get_link_fields
 
     in_set = {_key(r) for r in records}
     skip = set(frappe.get_hooks("ignore_links_on_delete") or [])
-    never = _groups(in_set | set(ignore) | _contacts_inside(in_set, session))
+    never = _groups(in_set | set(ignore) | _contacts_inside(in_set, session) | _own_bundles(in_set))
     vouchers = _groups(in_set)
     first: Dict[Key, Key] = {}
     count: Dict[Key, int] = defaultdict(int)
@@ -354,9 +397,25 @@ def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List
             conditions.append(table[doctype_field] == doctype)
         if link_dt == "Submission Queue":
             conditions.append(table.status == "Queued")
+        by_voucher = False
         if link_dt in OWN_ENTRIES and meta.has_field("voucher_type") and meta.has_field("voucher_no"):
             conditions += _not_among(table.voucher_type, table.voucher_no, vouchers)
-        columns = [target.as_("target"), fn.Count(linker).distinct().as_("n"), fn.Min(linker).as_("first")]
+            # A ledger row is named by its voucher, which the user can cancel, and counted by it
+            by_voucher = linker_dt is None
+        if by_voucher:
+            voucher = fn.Concat(table.voucher_type, VOUCHER_SEPARATOR, table.voucher_no)
+            columns = [
+                target.as_("target"),
+                fn.Count(voucher).distinct().as_("n"),
+                fn.Min(voucher).as_("voucher"),
+                fn.Min(linker).as_("first"),
+            ]
+        else:
+            columns = [
+                target.as_("target"),
+                fn.Count(linker).distinct().as_("n"),
+                fn.Min(linker).as_("first"),
+            ]
         group = [target]
         if linker_dt is not None:
             columns.append(linker_dt.as_("linker_doctype"))
@@ -366,7 +425,11 @@ def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List
             for condition in conditions:
                 query = query.where(condition)
             for row in query.groupby(*group).run(as_dict=True):
-                note((doctype, row.target), (row.get("linker_doctype") or link_dt, row.first), cint(row.n))
+                if row.get("voucher"):
+                    by = tuple(row.voucher.split(VOUCHER_SEPARATOR, 1))
+                else:
+                    by = (row.get("linker_doctype") or link_dt, row.first)
+                note((doctype, row.target), by, cint(row.n))
 
     dynamic_map = get_dynamic_link_map()
     for doctype, names in _by_doctype(records).items():
@@ -399,9 +462,12 @@ def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List
 
 
 def _changed_blockers(records: List[Record], session) -> List[Blocker]:
-    """Edited by another user than the session's, or later than the import plus the grace; or
-    created later than that (deleted by hand and made again under the same name)."""
+    """Created before the session started: not the import's record, though the session names it
+    (Frappe's merge rewrites the Created Records row to the record merged into). Edited by another
+    user than the session's, or later than the import plus the grace; or created later than that
+    (deleted by hand and made again under the same name)."""
     user = session.user or session.owner
+    started = get_datetime(session.creation)
     finished = finished_at(session)
     latest = finished + timedelta(minutes=UNDO_GRACE_MINUTES)
     rows: Dict[Key, frappe._dict] = {}
@@ -419,7 +485,11 @@ def _changed_blockers(records: List[Record], session) -> List[Blocker]:
         row = rows.get(_key(record))
         if not row:
             continue
-        if row.modified_by and row.modified_by != user:
+        if get_datetime(row.creation) < started:
+            detail = _(
+                "It existed before this import: it was created on {0}, before the session started ({1})."
+            ).format(row.creation, started)
+        elif row.modified_by and row.modified_by != user:
             detail = _("{0} changed it on {1}, after the import.").format(row.modified_by, row.modified)
         elif get_datetime(row.creation) > latest:
             detail = _("It was created again on {0}, after the import finished ({1}).").format(
@@ -1028,7 +1098,13 @@ def _run(session, mode: str) -> None:
 
     records = delete_order(plan.to_delete)
     total, deleted = len(records), 0
+    removed: List[str] = []  # the labels of the records removed, kept in the result
+    # Records deleted by hand before the undo: counted, and their Created Records rows dropped
+    gone = len(plan.already_removed)
+    for record in plan.already_removed:
+        _drop_row(session, record)
     held: Set[Key] = set()  # kept because a record that failed needs them
+    session.reload()
     session.progress = _progress("running", 0, total)
     session.save()
     for done, record in enumerate(records, start=1):
@@ -1036,6 +1112,9 @@ def _run(session, mode: str) -> None:
             error = _remove(session, record)
             if error is None:
                 deleted += 1
+                removed.append(_label(record.doctype, record.name))
+            elif error is GONE:
+                gone += 1  # deleted by hand since the plan: already removed, not a failure
             else:
                 failed = Blocker(record, "delete_failed", error)
                 blocked.append(failed)
@@ -1051,28 +1130,43 @@ def _run(session, mode: str) -> None:
                 frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
 
     session.reload()
-    _store_result(session, deleted, kept, blocked)
+    _store_result(session, deleted, kept, blocked, removed=removed, already_removed=gone)
     session.status = PARTIALLY_UNDONE if blocked or kept else UNDONE
     session.progress = _progress("done", total, total, deleted)
     if blocked or kept:
         message = _(
             "Removed {0} records; kept {1}: {2} can't be removed, and {3} are kept with them."
         ).format(deleted, len(blocked) + len(kept), len(blocked), len(kept))
-        session.log_step(STEP, "Warning", message, rows_ok=deleted, rows_failed=len(blocked) + len(kept))
+        outcome, failed_rows = "Warning", len(blocked) + len(kept)
     else:
-        session.log_step(STEP, "Success", _("Removed {0} records.").format(deleted), rows_ok=deleted)
+        message, outcome, failed_rows = _("Removed {0} records.").format(deleted), "Success", 0
+    if gone:
+        message += " " + _("{0} were already removed by hand.").format(gone)
+    session.log_step(STEP, outcome, message, rows_ok=deleted, rows_failed=failed_rows)
     session.save()
 
 
-def _store_result(session, deleted: int, kept: List[Tuple[Record, str]], blocked: List[Blocker]) -> None:
+def _store_result(
+    session,
+    deleted: int,
+    kept: List[Tuple[Record, str]],
+    blocked: List[Blocker],
+    removed: Iterable[str] = (),
+    already_removed: int = 0,
+) -> None:
+    """The undo's result, kept on the session: the counts, the blocked records with their
+    reasons, and the labels ("Doctype name") of the records removed, which outlive their Created
+    Records rows."""
     undo = _undo_options(session)
     undo["result"] = {
         "deleted": deleted,
+        "already_removed": already_removed,
         "kept": len(kept),
         "blocked": [
             {"record": _label(b.record.doctype, b.record.name), "reason": b.reason, "detail": b.detail}
             for b in blocked
         ],
+        "removed": list(removed),
     }
     _store_undo(session, undo)
 
@@ -1115,10 +1209,64 @@ def _remove_own_ledger_rows(doctype: str, name: str) -> None:
         ).run()
 
 
-def _remove(session, record: Record) -> Optional[str]:
+def _remove_own_bundles(doctype: str, name: str) -> None:
+    """Delete the Serial and Batch Bundles of one voucher this undo has just cancelled, with their
+    Serial and Batch Entry rows, so it (and its Batch) can be deleted.
+
+    Cancelling leaves a voucher's bundles submitted (docstatus 1, is_cancelled 1), linked to it
+    through voucher_no; Frappe's delete check then refuses the voucher, and their entries refuse
+    the Batch. ERPNext deletes a deleted voucher's bundles itself (remove_serial_and_batch_bundle)
+    only when they are not submitted. This removes them as _remove_own_ledger_rows removes the
+    ledger rows: the bundles whose voucher_type and voucher_no are this voucher, and their
+    entries; it clears a Batch's reference to them, as the bundle's on_trash does. Only for a
+    voucher this job cancelled, in the record's savepoint."""
+    if not frappe.db.exists("DocType", BUNDLE):
+        return
+    if frappe.db.get_value(doctype, name, "docstatus") != 2:
+        raise UndoProblem(_("{0} {1} is not cancelled, so its bundles are kept.").format(_(doctype), name))
+    bundle = frappe.qb.DocType(BUNDLE)
+    bundles = (
+        frappe.qb.from_(bundle)
+        .select(bundle.name)
+        .where((bundle.voucher_type == doctype) & (bundle.voucher_no == name))
+        .run(pluck=True)
+    )
+    entry, batch = frappe.qb.DocType(BUNDLE_ENTRY), frappe.qb.DocType("Batch")
+    for chunk in _chunks(bundles):
+        frappe.qb.from_(entry).delete().where((entry.parenttype == BUNDLE) & entry.parent.isin(chunk)).run()
+        frappe.qb.update(batch).set(batch.reference_doctype, None).set(batch.reference_name, None).where(
+            (batch.reference_doctype == BUNDLE) & batch.reference_name.isin(chunk)
+        ).run()
+        frappe.qb.from_(bundle).delete().where(bundle.name.isin(chunk)).run()
+
+
+class _Gone:
+    """What _remove returns for a record that no longer exists (deleted by hand meanwhile)."""
+
+
+GONE = _Gone()
+
+
+def _drop_row(session, record: Record) -> None:
+    """Delete the session's Created Records row of ``record`` on its own (the caller reloads the
+    session before saving it)."""
+    frappe.db.delete(
+        "FAC Import Session Record",
+        {
+            "parent": session.name,
+            "parenttype": SESSION_DOCTYPE,
+            "record_doctype": record.doctype,
+            "record_name": record.name,
+        },
+    )
+
+
+def _remove(session, record: Record):
     """Remove one record in a savepoint (spec §5 step 3): its Created Records row first (Frappe
-    counts that Dynamic Link and would refuse the delete), cancel it when submitted, then
-    delete it. Returns None, or what refused it: then all of it is rolled back, the row too.
+    counts that Dynamic Link and would refuse the delete), cancel it when submitted (and drop
+    its own ledger rows and bundles), then delete it. Returns None; GONE when it no longer
+    exists (its row is dropped all the same); or what refused it: then all of it is rolled
+    back, the row too.
 
     The row is deleted on its own, as import_opening_invoices inserts it: saving the session
     for each record would rewrite its whole Created Records table (and a Version) every time.
@@ -1126,19 +1274,16 @@ def _remove(session, record: Record) -> Optional[str]:
     since = len(frappe.local.message_log or [])
     frappe.db.savepoint(RECORD_SAVEPOINT)
     try:
-        frappe.db.delete(
-            "FAC Import Session Record",
-            {
-                "parent": session.name,
-                "parenttype": SESSION_DOCTYPE,
-                "record_doctype": record.doctype,
-                "record_name": record.name,
-            },
-        )
-        doc = frappe.get_doc(record.doctype, record.name)
+        _drop_row(session, record)
+        try:
+            doc = frappe.get_doc(record.doctype, record.name)
+        except frappe.DoesNotExistError:
+            frappe.local.message_log = list(frappe.local.message_log or [])[:since]  # "not found"
+            return GONE
         if doc.docstatus == 1:
             _cancel(doc)
             _remove_own_ledger_rows(record.doctype, record.name)
+            _remove_own_bundles(record.doctype, record.name)
         frappe.delete_doc(record.doctype, record.name)
     except Exception as e:
         error = _error_of(e, since)
@@ -1210,8 +1355,10 @@ def report(session) -> dict:
     return {
         "state": state,
         "deleted": cint(result.get("deleted", progress.get("deleted"))),
+        "already_removed": cint(result.get("already_removed")),
         "total": cint(progress.get("total")),
         "kept": cint(result.get("kept")),
         "blocked": list(result.get("blocked") or []),
+        "removed": list(result.get("removed") or []),
         "reason": undo.get("stopped") if state == "stopped" else None,
     }
