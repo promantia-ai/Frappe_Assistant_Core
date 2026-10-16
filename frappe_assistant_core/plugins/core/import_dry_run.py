@@ -667,7 +667,7 @@ def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) 
         "duplicate_key": checker.key_df.fieldname if checker.key_df else None,
         "groups": [_summary_group(g) for g in groups],
     }
-    if checker.matches is not None:
+    if getattr(checker, "matches", None) is not None:  # the opening engines' checkers have none
         summary["update"] = checker.preview
     if previous is not None:
         summary["previous"] = {"failed": len(previous), "fixed": len(previous - failed_rows)}
