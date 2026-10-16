@@ -401,6 +401,30 @@ class TestUndo(UndoToolsCase):
             self.assertEqual((reply["result"]["state"], reply["result"]["status"]), ("running", "Undoing"))
         self.assertTrue(all(self._exists("Customer Group", n) for n in names))
 
+    def test_a_second_call_racing_the_first_reports_the_progress(self):
+        session, names = self._session_with_groups(2)
+        preview = self._preview(session)
+        real_start = import_undo.start
+
+        def raced(doc, mode, fingerprint=None):
+            # Another undo_import call started the undo after this one loaded the session.
+            frappe.db.set_value(
+                "FAC Import Session",
+                doc.name,
+                {"status": "Undoing", "progress": import_undo._progress("queued")},
+            )
+            return real_start(doc, mode, fingerprint=fingerprint)
+
+        with patch.object(import_undo, "start", side_effect=raced), patch.object(
+            import_undo, "_job_running", return_value=True
+        ), patch.object(import_undo.frappe, "enqueue") as enqueue:
+            reply = self._undo(session, preview["records"], preview["blocked"], "all")
+
+        enqueue.assert_not_called()
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual((reply["result"]["state"], reply["result"]["status"]), ("running", "Undoing"))
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+
     def test_undo_after_the_job_reports_the_result(self):
         session, names = self._session_with_groups(2)
         preview = self._preview(session)

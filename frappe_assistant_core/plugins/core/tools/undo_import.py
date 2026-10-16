@@ -84,6 +84,10 @@ class UndoImport(BaseTool):
             session.reload()
         except import_undo.UndoProblem as e:
             return {"success": False, "error": str(e), "session": session_name}
+        except frappe.TimestampMismatchError:
+            # Another undo_import call saved the session first (it started the undo): report it.
+            frappe.clear_last_message()
+            return self._progress(session)
         except Exception as e:
             frappe.log_error(title=_("Undo Import Error"), message=frappe.get_traceback())
             return {"success": False, "error": exception_message(e), "session": session_name}
