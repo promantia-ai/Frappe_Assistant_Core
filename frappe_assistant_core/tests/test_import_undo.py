@@ -30,7 +30,10 @@ from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase
 
 @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
 class UndoCase(ImportRunCase):
-    """A session that created Customer Groups, and one that imported Customers."""
+    """A session that created Customer Groups, and one that imported Customers.
+
+    The run tests need the bench's Redis queue up: import_undo.start enqueues with
+    deduplicate=True, and Frappe asks the queue for the job before it honours now=True."""
 
     def _blank_session(self):
         file_doc = self._file("blank.csv", b"Customer Name\nx\n")
@@ -998,6 +1001,38 @@ class TestRun(BlockerCase):
         with self.assertRaises(import_undo.UndoProblem):
             self._start(session, "everything")
 
+    def test_a_user_who_cannot_delete_keeps_the_records_and_nothing_escalates(self):
+        session, names = self._session_with_groups(2)
+        user = self.make_throwaway_user("undo", roles=("Sales User",))  # reads Customer Groups only
+        self._doc(session).db_set("user", user)  # the user's own session, and own records
+        for name in names:
+            frappe.db.set_value("Customer Group", name, "modified_by", user, update_modified=False)
+        frappe.set_user(user)
+        self.assertFalse(frappe.has_permission("Customer Group", "delete"))
+
+        self._start(session, "unblocked")  # the plan finds it: no_permission
+
+        self.assertTrue(all(self._exists("Customer Group", name) for name in names))
+        result = self._undo_options(session)["result"]
+        self.assertEqual({b["reason"] for b in result["blocked"]}, {"no_permission"})
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+
+        with patch.object(import_undo, "_permission_blockers", return_value=[]):
+            self._start(session, "all")  # the plan misses it: Frappe's delete, as the user, refuses
+
+        self.assertEqual(frappe.session.user, user)
+        self.assertTrue(all(self._exists("Customer Group", name) for name in names))
+        doc = self._doc(session)
+        result = self._undo_options(session)["result"]
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(
+            {(b["record"], b["reason"]) for b in result["blocked"]},
+            {(f"Customer Group {name}", "delete_failed") for name in names},
+        )
+        self.assertTrue(all("not allowed" in b["detail"] for b in result["blocked"]), result)
+        self.assertEqual(sorted(r.record_name for r in doc.created_records), sorted(names))
+        self.assertEqual(doc.status, "Partially Undone")
+
 
 class TestRunSubmittedEntry(OpeningBalancesCase):
     """An opening Journal Entry made by import_opening_balances: cancelled, then deleted."""
@@ -1018,6 +1053,9 @@ class TestRunSubmittedEntry(OpeningBalancesCase):
         self.assertTrue(reply["success"], reply)
         entry = reply["result"]["journal_entry"]
         self.made_entries.append(entry)
+        # The class shares one transaction, and tearDown deletes a kept entry, so the next test's
+        # entry gets the same name: this session's row naming it must not outlive the test.
+        self.addCleanup(frappe.db.delete, "FAC Import Session Record", {"parent": session})
         return session, entry
 
     def _books_open(self):
@@ -1074,6 +1112,49 @@ class TestRunSubmittedEntry(OpeningBalancesCase):
         self.assertEqual(doc.status, "Undone", doc.steps[-1].message)
         self.assertEqual(frappe.db.get_single_value("Accounts Settings", "delete_linked_ledger_entries"), 0)
 
+    def test_a_failed_delete_restores_the_submitted_entry_and_its_ledger(self):
+        session, entry = self._imported()
+        before = ledger_counts("Journal Entry", entry)
+        self.assertTrue(before["GL Entry"][0])
+
+        with self._books_open(), patch.object(import_undo.frappe, "delete_doc", side_effect=refusing(entry)):
+            import_undo.start(self._doc(session), "all")
+
+        self.assertEqual(frappe.db.get_value("Journal Entry", entry, "docstatus"), 1)
+        self.assertEqual(ledger_counts("Journal Entry", entry), before)  # rows back, none cancelled
+        doc = self._doc(session)
+        result = (frappe.parse_json(doc.template_options) or {})["undo"]["result"]
+        self.assertEqual(
+            [(b["record"], b["reason"]) for b in result["blocked"]],
+            [(f"Journal Entry {entry}", "delete_failed")],
+        )
+        self.assertIn("Refused for the test", result["blocked"][0]["detail"])
+        self.assertEqual(
+            [(r.record_doctype, r.record_name) for r in doc.created_records], [("Journal Entry", entry)]
+        )
+        self.assertEqual(doc.status, "Partially Undone")
+
+
+def ledger_counts(voucher_type, voucher_no):
+    """Per ledger, (rows, rows cancelled or delinked) of one voucher."""
+    counts = {}
+    for ledger, flag in (("GL Entry", "is_cancelled"), ("Payment Ledger Entry", "delinked")):
+        filters = {"voucher_type": voucher_type, "voucher_no": voucher_no}
+        counts[ledger] = (frappe.db.count(ledger, filters), frappe.db.count(ledger, {**filters, flag: 1}))
+    return counts
+
+
+def refusing(*names):
+    """A frappe.delete_doc that refuses ``names`` and deletes everything else."""
+    real = frappe.delete_doc
+
+    def delete_doc(doctype=None, name=None, *args, **kwargs):
+        if name in names:
+            frappe.throw("Refused for the test")
+        return real(doctype, name, *args, **kwargs)
+
+    return delete_doc
+
 
 class TestRunSubmittedInvoice(OpeningInvoicesCase):
     """Opening Sales Invoices made by import_opening_invoices: cancelled, then deleted."""
@@ -1102,6 +1183,36 @@ class TestRunSubmittedInvoice(OpeningInvoicesCase):
                     frappe.db.count(ledger, {"voucher_type": "Sales Invoice", "voucher_no": name}), 0
                 )
         self.assertTrue(frappe.db.exists("Customer", self.customer))  # not made by the session
+
+    def test_a_failed_delete_restores_the_submitted_invoice_and_its_ledger(self):
+        numbers = [f"OI-{self.tag}-{i}" for i in (1, 2)]
+        session, result = self._ready([f"{self.customer},{n},{self.date},,10" for n in numbers])
+        self.assertTrue(self._run("import_opening_invoices", self._card(session, result))["success"])
+        refused, other = [
+            r.record_name for r in self._doc(session).created_records if r.record_doctype == "Sales Invoice"
+        ]
+        before = ledger_counts("Sales Invoice", refused)
+        outstanding = frappe.db.get_value("Sales Invoice", refused, "outstanding_amount")
+
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ), patch.object(import_undo.frappe, "delete_doc", side_effect=refusing(refused)):
+            import_undo.start(self._doc(session), "all")
+
+        self.assertEqual(
+            frappe.db.get_value("Sales Invoice", refused, ["docstatus", "outstanding_amount"]),
+            (1, outstanding),
+        )
+        self.assertEqual(ledger_counts("Sales Invoice", refused), before)
+        self.assertFalse(frappe.db.exists("Sales Invoice", other))
+        doc = self._doc(session)
+        result = (frappe.parse_json(doc.template_options) or {})["undo"]["result"]
+        self.assertEqual(
+            [(b["record"], b["reason"]) for b in result["blocked"]],
+            [(f"Sales Invoice {refused}", "delete_failed")],
+        )
+        self.assertIn(refused, [r.record_name for r in doc.created_records])
+        self.assertEqual(doc.status, "Partially Undone")
 
 
 class TestRunSubmittedStock(OpeningStockCase):
