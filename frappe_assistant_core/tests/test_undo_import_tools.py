@@ -605,12 +605,14 @@ NAMES_THE_STATUS = {
     "import_opening_stock": False,
     "import_opening_invoices": False,
     "import_opening_balances": False,
+    "set_column_mapping": True,
 }
 
 
 class TestUndoneSession(UndoToolsCase):
-    """Every path that imports refuses an Undone session. None needed a change: each already
-    allows only the statuses it can work from."""
+    """Every path that imports refuses an Undone session. The importing paths needed no change:
+    each already allows only the statuses it can work from. set_column_mapping, which would set
+    the session back to Mapped, refuses an Undoing or Undone session."""
 
     def _engine(self, session, key, **settings):
         doc = self._doc(session)
@@ -653,6 +655,7 @@ class TestUndoneSession(UndoToolsCase):
                 ("opening_balances", {"cut_off": today}),
                 {"company": company, "cut_off": today, "rows": 1, "total_debit": 1, "total_credit": 1},
             ),
+            "set_column_mapping": (None, {"mapping": MAPPING, "doctype": "Customer"}),
         }
 
     def test_an_undone_session_cannot_be_imported_again(self):
@@ -671,3 +674,17 @@ class TestUndoneSession(UndoToolsCase):
                 self.assertEqual("Undone" in reply["error"], NAMES_THE_STATUS[tool], reply["error"])
                 self.assertEqual(self._doc(session).status, "Undone")
                 self.assertEqual(self._imported(), set())
+
+    def test_an_undoing_session_cannot_be_remapped(self):
+        session, _names = self._session_with_groups(1)
+        self._doc(session).db_set("status", "Undoing")
+        before = self._doc(session).template_options
+
+        reply = self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Undoing", reply["error"])
+        self.assertIn("new import session", reply["error"])
+        self.assertEqual(reply["result"]["session"], session)
+        doc = self._doc(session)
+        self.assertEqual((doc.status, doc.template_options), ("Undoing", before))
