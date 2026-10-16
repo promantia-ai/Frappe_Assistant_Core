@@ -60,9 +60,9 @@ class ImportProblem(Exception):
 # -- can it run --------------------------------------------------------------------------
 
 
-def cannot_import(doctype: str) -> str:
+def cannot_import(doctype: str, import_type: str = INSERT) -> str:
     """Why the current user can't import into ``doctype`` now, or "" when they can."""
-    problem = import_target_problem(doctype)
+    problem = import_target_problem(doctype, import_type)
     if problem:
         return problem
     if not frappe.has_permission("Data Import", "create"):

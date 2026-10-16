@@ -118,7 +118,7 @@ def check_can_run(session) -> None:
     check_status(session)
     if not column_to_field_map(session):
         raise DryRunProblem(_("Map the columns first, with set_column_mapping."))
-    problem = import_target_problem(session.target_doctype)
+    problem = import_target_problem(session.target_doctype, session.import_type or INSERT)
     if problem:
         raise DryRunProblem(problem)
     reason = unsafe_reason(session.target_doctype)
@@ -678,6 +678,7 @@ def fingerprint(session, file_doc) -> str:
         session.sheet or "",
         session.target_doctype,
         session.import_type or "",
+        session.match_key or "",
         str(session.submit_after_import or 0),
         json.dumps(frappe.parse_json(session.template_options or "{}"), sort_keys=True),
         json.dumps(frappe.parse_json(session.transformation_rules or "null"), sort_keys=True),
