@@ -11,10 +11,10 @@ Undo an import (#34002): what a session created, whether it can be undone now, a
 background job that removes it.
 
 The undo set is the session's Created Records plus the records its Insert New Records Data
-Imports logged as created (each Data Import by its own import type). The plan says, for each of them, whether it can be
-removed: what blocks it (spec §4), and what a blocked record keeps with it. start() hands the
-plan's records to a background job, which removes them in delete order (spec §5), one savepoint
-per record, and report() says how far it got.
+Imports logged as created (each Data Import by its own import type). The plan says, for each of
+them, whether it can be removed: what blocks it (spec §4), and what a blocked record keeps with
+it. start() hands the plan's records to a background job, which removes them in delete order
+(spec §5), one savepoint per record, and report() says how far it got.
 """
 
 import hashlib
@@ -30,7 +30,6 @@ from pypika import functions as fn
 from pypika.terms import Tuple as Row
 
 INSERT = "Insert New Records"
-UPDATE = "Update Existing Records"
 UNDO_DAYS = 30  # default of the site config key fac_import_undo_days
 UNDO_GRACE_MINUTES = 10  # ERPNext may submit large opening documents in the background, later
 CHUNK = 1000  # names per IN (...) of one query
