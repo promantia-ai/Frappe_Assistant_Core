@@ -14,14 +14,16 @@ Give the file in one of two ways:
 
 | Parameter | Type | When |
 |-----------|------|------|
-| `file_url` | string | The file is **on this site**, e.g. a FAC Chat attachment such as `/private/files/customers.xlsx`. The tool reads its sheets itself. |
+| `file_id` (or `file_url`) | string | The file is **on this site**: uploaded in File Manager, or a FAC Chat attachment. Pass its **File ID** (its name in File Manager, e.g. `8f3a2b1c9d`), or its URL such as `/private/files/customers.xlsx`. The tool reads its sheets itself. The user must be allowed to read the file. |
 | `file_name` + `columns` + `row_count` (+ `sheet`) | string, array, integer | The file is **attached in this chat** (Claude, ChatGPT) and not on the site. Read the file yourself and pass its name, the sheet you used, the column headers and the number of data rows (not counting the header). **Never pass its rows.** |
+
+**When the user names a file** ("import item_master") instead of giving its ID, find the ID with `list_documents` on `File`, filtered by `file_name` (it lists only files the user may read). If several match, show them (name, size, uploaded on) and ask which one. **Never guess.**
 
 Other parameters:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `sheet` | string | No | For `file_url`: the sheet to use. Default: the first sheet with rows. For `file_name`: the sheet you read. |
+| `sheet` | string | No | For a file on this site: the sheet to use. Default: the first sheet with rows. For `file_name`: the sheet you read. |
 | `target_doctype` | string | No | DocType the rows become, if already known. The user's permission to import into it is checked **before** anything else. |
 | `import_type` | string | No | `Insert New Records` (default) or `Update Existing Records`. |
 
@@ -44,7 +46,7 @@ Supported files: `.csv`, `.xlsx`, `.xls`. **Row 1 must hold the column headers.*
 }
 ```
 
-- `sample_rows` (up to 10) come back only for `file_url`, so you can show the user what was read. They are text the way Data Import will read it: dates as `YYYY-MM-DD`, whole numbers without `.0`. They are **not stored** on the session. `row_count` skips blank rows.
+- `sample_rows` (up to 10) come back only for a file on this site, so you can show the user what was read. They are text the way Data Import will read it: dates as `YYYY-MM-DD`, whole numbers without `.0`. They are **not stored** on the session. `row_count` skips blank rows.
 - `note` appears when other sheets of a workbook also have rows. Only one sheet is used per session.
 
 ## Next
@@ -73,7 +75,8 @@ Its `status`, `template_options` (mapping), `transformation_rules`, `validation_
 ## Edge Cases
 
 - **Target not allowed** — returns `success: false` with the reason: no Create permission, no Import permission, Allow Import turned off for the DocType, or a child table (import it through its parent).
-- **File not found or not yours** (`file_url`) — a private file belonging to another user is reported the same way as a missing file.
+- **File not found or not readable** (`file_id`, `file_url`) — a file the user may not read (for example another user's private file) is reported the same way as a missing file. Every later step checks again, so a user who loses access to the file can't carry on.
+- **Both `file_id` and `file_url`** — refused; give one.
 - **Missing details** (`file_name`) — `columns` and `row_count` are required.
-- **Unknown sheet or no rows** (`file_url`) — refused, listing the sheets that exist.
+- **Unknown sheet or no rows** (file on this site) — refused, listing the sheets that exist.
 - **Who sees a session** — the user who started it, and System Managers.

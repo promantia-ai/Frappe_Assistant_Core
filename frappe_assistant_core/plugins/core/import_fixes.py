@@ -36,11 +36,13 @@ from frappe.utils import cstr
 from frappe.utils.nestedset import get_root_of
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+from frappe_assistant_core.plugins.core.import_session import readable_session_file
 
 MAP = "map"
 CREATE = "create"
 LEAVE_OUT = "leave_out"
-ACTIONS = (MAP, LEAVE_OUT)  # applied by dry_run_import; create is done with create_document
+ALLOW_ZERO_RATE = "allow_zero_rate"  # opening stock: bring an item in at zero value
+ACTIONS = (MAP, LEAVE_OUT, ALLOW_ZERO_RATE)  # applied by dry_run_import; create is done with create_document
 
 CLOSEST_LIMIT = 5
 MIN_SCORE = 0.5
@@ -281,6 +283,21 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
         closest = rank(value, options) or options[:CLOSEST_LIMIT]
         return {"explanation": explanation, "fixes": [{"action": MAP, "closest": closest}, leave_out]}
 
+    from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
+
+    if cause in opening_stock.NEW_CAUSES:
+        explanation = _("{0}: {1}").format(rows, group.get("message") or _(cause))
+        fixes = [leave_out]
+        if cause == opening_stock.CAUSE_NO_RATE:
+            fixes.insert(0, {"action": ALLOW_ZERO_RATE, "note": _("Only if this stock really has no value.")})
+        if cause in (opening_stock.CAUSE_OTHER_COMPANY, opening_stock.CAUSE_GROUP_WAREHOUSE):
+            fixes.insert(0, {"action": MAP, "closest": closest_names("Warehouse", value)})
+        return {
+            "explanation": explanation,
+            "fixes": fixes,
+            "fix_in_file": cause != opening_stock.CAUSE_TOTALS_ROW,
+        }
+
     explanations = {
         dry_run.CAUSE_BAD_DATE: _("{0}: {1} isn't a date ERPNext can read. {2}"),
         dry_run.CAUSE_BAD_VALUE: _("{0}: a value ERPNext can't use. {2}"),
@@ -315,6 +332,7 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
     """
     maps = value_maps(session)
     reasons = {str(entry["row"]): entry["reason"] for entry in left_out(session)}
+    zero_rate = list(_rules(session).get("zero_rate_items") or [])
     done, problems = [], []
     for fix in fixes:
         group = groups.get(cstr(fix.get("group")))
@@ -339,6 +357,16 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
                 for row in group["rows"]:
                     reasons.setdefault(str(row), reason)
                 done.append(_("Left out {0}: {1}.").format(_rows(group["count"]), row_ranges(group["rows"])))
+            elif action == ALLOW_ZERO_RATE:
+                from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
+
+                if group["cause"] != opening_stock.CAUSE_NO_RATE:
+                    raise FixProblem(_("Only rows with no valuation rate can be allowed a zero rate."))
+                if group["value"] not in zero_rate:
+                    zero_rate.append(group["value"])
+                done.append(
+                    _("{0} is brought in at zero value in {1}.").format(group["value"], _rows(group["count"]))
+                )
             elif action == CREATE:
                 raise FixProblem(
                     _(
@@ -354,7 +382,7 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
     if problems:
         raise FixProblems(problems)
 
-    rules = {"value_maps": maps, "left_out": reasons}
+    rules = {"value_maps": maps, "left_out": reasons, "zero_rate_items": zero_rate}
     rules = {key: value for key, value in rules.items() if value}
     session.transformation_rules = frappe.as_json(rules) if rules else None
     session.excluded_rows = frappe.as_json(sorted(int(row) for row in reasons)) if reasons else None
@@ -381,7 +409,10 @@ def forget_left_out(session) -> str:
 
 
 def _map(session, group, fix, maps):
-    if group["cause"] not in (dry_run.CAUSE_MISSING_LINK, dry_run.CAUSE_BAD_OPTION):
+    from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
+
+    warehouse_causes = (opening_stock.CAUSE_OTHER_COMPANY, opening_stock.CAUSE_GROUP_WAREHOUSE)
+    if group["cause"] not in (dry_run.CAUSE_MISSING_LINK, dry_run.CAUSE_BAD_OPTION, *warehouse_causes):
         raise FixProblem(
             _(
                 "Only a missing link or a value that isn't an allowed option can be mapped. "
@@ -391,8 +422,8 @@ def _map(session, group, fix, maps):
     to = cstr(fix.get("to")).strip()
     if not to:
         raise FixProblem(_("Say which existing value to use, in 'to'."))
-    if group["cause"] == dry_run.CAUSE_MISSING_LINK:
-        doctype = group.get("link_doctype")
+    if group["cause"] in (dry_run.CAUSE_MISSING_LINK, *warehouse_causes):
+        doctype = group.get("link_doctype") or ("Warehouse" if group["cause"] in warehouse_causes else None)
         if (
             not doctype
             or not frappe.db.exists(doctype, to)
@@ -709,7 +740,7 @@ def checked_as_is(session) -> bool:
     """Whether the last check was of the session as it is now: same file, mapping and fixes."""
     if not session.source_file or not session.validated_fingerprint:
         return False
-    file_doc = frappe.get_doc("File", session.source_file)
+    file_doc = readable_session_file(session)
     return dry_run.fingerprint(session, file_doc) == session.validated_fingerprint
 
 

@@ -24,7 +24,7 @@ from frappe_assistant_core.core.base_tool import BaseTool
 from frappe_assistant_core.plugins.core.import_session import (
     FileProblem,
     SheetSummary,
-    get_readable_file,
+    find_site_file,
     import_target_problem,
     read_spreadsheet,
 )
@@ -40,7 +40,10 @@ class StartImportSession(BaseTool):
             "Start a data import for a spreadsheet (.csv, .xlsx, .xls) the user wants to import. "
             "Opens an import session that records the file's details and every step, and keeps "
             "the mapping, fixes and validation results between messages. For a file on this site "
-            "(a FAC Chat attachment) pass file_url and the tool reads its sheets. For a file "
+            "(uploaded in File Manager, or a FAC Chat attachment) pass its file_id, or its file_url, "
+            "and the tool reads its sheets; the user must be allowed to read the file. When the "
+            "user names a file instead, find its ID with list_documents on File (filter by "
+            "file_name); if several match, show them and ask which one, never guess. For a file "
             "attached in this chat that is not on the site, read it yourself and pass file_name, "
             "sheet, columns and row_count; never pass its rows. The session stores no row of the "
             "file. Keep the returned session_id; read the session later with get_document (doctype "
@@ -53,6 +56,10 @@ class StartImportSession(BaseTool):
         self.inputSchema = {
             "type": "object",
             "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "ID of a file on this site: its name in File Manager, e.g. '8f3a2b1c9d'.",
+                },
                 "file_url": {
                     "type": "string",
                     "description": "File URL of a file on this site, e.g. '/private/files/customers.xlsx'.",
@@ -63,8 +70,8 @@ class StartImportSession(BaseTool):
                 },
                 "sheet": {
                     "type": "string",
-                    "description": "Sheet to use for an .xlsx or .xls file. Default for file_url: the first "
-                    "sheet with rows.",
+                    "description": "Sheet to use for an .xlsx or .xls file. Default for a file on this "
+                    "site: the first sheet with rows.",
                 },
                 "columns": {
                     "type": "array",
@@ -89,17 +96,18 @@ class StartImportSession(BaseTool):
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        file_id = (arguments.get("file_id") or "").strip()
         file_url = (arguments.get("file_url") or "").strip()
         file_name = (arguments.get("file_name") or "").strip()
         target_doctype = arguments.get("target_doctype") or None
         import_type = arguments.get("import_type") or "Insert New Records"
 
-        if not file_url and not file_name:
+        if not file_id and not file_url and not file_name:
             return {
                 "success": False,
                 "error": _(
-                    "Give file_url for a file on this site, or file_name with the columns and "
-                    "row_count of a file attached in the chat."
+                    "Give file_id or file_url for a file on this site, or file_name with the "
+                    "columns and row_count of a file attached in the chat."
                 ),
             }
 
@@ -110,8 +118,8 @@ class StartImportSession(BaseTool):
                 return {"success": False, "error": problem, "target_doctype": target_doctype}
 
         try:
-            if file_url:
-                file_doc = get_readable_file(file_url)
+            if file_id or file_url:
+                file_doc = find_site_file(file_id=file_id, file_url=file_url)
                 read = read_spreadsheet(file_doc, arguments.get("sheet") or None)
                 sheets, chosen = read.sheets, read.chosen
                 file_name = file_doc.file_name

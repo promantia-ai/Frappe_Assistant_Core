@@ -37,7 +37,6 @@ from frappe.utils import cstr, now_datetime, strip_html
 
 from frappe_assistant_core.plugins.core.import_session import (
     FileProblem,
-    get_readable_file,
     import_target_problem,
     read_sheet_rows,
     read_spreadsheet,
@@ -95,6 +94,10 @@ def check_status(session) -> None:
 
 def check_can_run(session) -> None:
     """Raise DryRunProblem when ``session`` can't be checked yet, saying what to do."""
+    from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
+
+    if opening_stock.is_opening_stock(session):
+        return opening_stock.check_can_run(session)
     check_status(session)
     if not column_to_field_map(session):
         raise DryRunProblem(_("Map the columns first, with set_column_mapping."))
@@ -111,9 +114,9 @@ def check_can_run(session) -> None:
     if not session.source_file:
         raise DryRunProblem(
             _(
-                "The file {0} is only in the chat, so its rows can't be checked here. Attach it "
-                "in FAC Chat (or upload it to this site) and call dry_run_import again with its "
-                "file_url. The mapping is kept."
+                "The file {0} is only in the chat, so its rows can't be checked here. Upload it "
+                "in File Manager (or attach it in FAC Chat) and call dry_run_import again with "
+                "its file_id. The mapping is kept."
             ).format(session.file_name)
         )
 
@@ -126,13 +129,13 @@ def unsafe_reason(doctype: str) -> Optional[str]:
     return None
 
 
-def link_site_file(session, file_url: str) -> None:
+def link_site_file(session, file_doc) -> None:
     """Give a session whose file stayed in the chat the same file, uploaded to the site; or a
     corrected one, as the failed-rows file came back (#33994): the same columns, perhaps with
-    the ones that file added after them, which are not imported."""
+    the ones that file added after them, which are not imported. ``file_doc`` is a File the
+    user may read (find_site_file)."""
     from frappe_assistant_core.plugins.core.import_failures import own_columns
 
-    file_doc = get_readable_file(file_url)
     try:
         read = read_spreadsheet(file_doc, session.sheet or None)
     except FileProblem:
@@ -245,10 +248,13 @@ def _progress(state: str, done: int, total: int) -> str:
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """Check every row of the session's file. Stores the result on the session and
     returns the summary, with up to three example rows per group for the model."""
+    from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
     from frappe_assistant_core.plugins.core.import_failures import imported_rows
     from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
 
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    if opening_stock.is_opening_stock(session):
+        return opening_stock.run(session_name, commit_progress=commit_progress)
     file_doc = readable_session_file(session)
     rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
     import_file = _parse(session, file_doc, rows)

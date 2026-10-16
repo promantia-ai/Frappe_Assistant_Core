@@ -333,6 +333,50 @@ class TestImportSession(BaseAssistantTest):
         self.assertNotIn("Customer 1", frappe.as_json(response))
         self.assertEqual(self._new_sessions(), 0)
 
+    def test_a_file_uploaded_in_file_manager_opens_by_its_id(self):
+        file_doc = self._upload("customers.csv", CSV_CONTENT)
+
+        result = self._start(file_id=file_doc.name)
+
+        self.assertEqual((result["file_name"], result["row_count"]), ("customers.csv", 25))
+        self.assertEqual(
+            frappe.db.get_value("FAC Import Session", result["session_id"], "source_file"), file_doc.name
+        )
+
+    def test_another_users_private_file_cannot_be_read_by_its_id(self):
+        frappe.set_user(self.make_throwaway_user("other", roles=("Blogger",)))
+        theirs = self._upload("theirs.csv", CSV_CONTENT)
+        frappe.set_user(self.user)
+
+        response = self._start_fails("don't have access", file_id=theirs.name)
+
+        self.assertNotIn("Customer 1", frappe.as_json(response))
+        self.assertEqual(self._new_sessions(), 0)
+
+    def test_an_unknown_id_or_a_folder_reads_the_same_as_a_file_the_user_cannot_read(self):
+        unknown = self._start_fails("don't have access", file_id="no-such-file")
+        folder = self._start_fails("don't have access", file_id="Home")
+
+        self.assertEqual(unknown["error"], folder["error"])
+        self.assertEqual(self._new_sessions(), 0)
+
+    def test_a_file_shared_with_the_user_can_be_read_by_its_id(self):
+        # Frappe's own rule decides who may read a file: here, a share.
+        frappe.set_user(self.make_throwaway_user("owner", roles=("Blogger",)))
+        theirs = self._upload("shared.csv", CSV_CONTENT)
+        frappe.set_user("Administrator")
+        frappe.share.add("File", theirs.name, self.user, read=1)
+        frappe.set_user(self.user)
+
+        self.assertEqual(self._start(file_id=theirs.name)["row_count"], 25)
+
+    def test_file_id_and_file_url_together_are_refused(self):
+        file_doc = self._upload("customers.csv", CSV_CONTENT)
+
+        self._start_fails("not both", file_id=file_doc.name, file_url=file_doc.file_url)
+
+        self.assertEqual(self._new_sessions(), 0)
+
     # -- criterion 2: the same conversation, later ------------------------------------------
 
     def test_session_records_the_conversation_it_belongs_to(self):

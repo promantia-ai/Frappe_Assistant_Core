@@ -140,6 +140,26 @@
     "content_file": "start_import.md"
   },
   {
+    "skill_id": "set-opening-stock-usage",
+    "title": "How to Use set_opening_stock",
+    "description": "Bringing the old system's closing stock in as opening stock: the company, the cut-off date, the account and the columns of a stock sheet, as a Stock Reconciliation with purpose Opening Stock",
+    "skill_type": "Tool Usage",
+    "linked_tool": "set_opening_stock",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "set_opening_stock.md"
+  },
+  {
+    "skill_id": "import-opening-stock-usage",
+    "title": "How to Use import_opening_stock",
+    "description": "Creating and submitting checked opening stock with one approval: documents of up to 1,000 rows, the totals per warehouse against the file, background submits and reposting, continuing after a failed chunk",
+    "skill_type": "Tool Usage",
+    "linked_tool": "import_opening_stock",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "import_opening_stock.md"
+  },
+  {
     "skill_id": "run-database-query-usage",
     "title": "How to Use run_database_query",
     "description": "SQL queries with analysis_type, validation, table naming conventions, JOINs, and aggregations",

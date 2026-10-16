@@ -334,7 +334,7 @@ class TestDryRunImport(BaseAssistantTest):
         session = started["result"]["session_id"]
         self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
 
-        self._check_fails(session, "Attach it in FAC Chat")
+        self._check_fails(session, "Upload it in File Manager")
 
         file_doc = frappe.get_doc(
             {
@@ -360,6 +360,56 @@ class TestDryRunImport(BaseAssistantTest):
         ).insert()
 
         self._check_fails(session, "columns don't match", file_url=other.file_url)
+
+        self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
+
+    def _chat_session(self):
+        """A mapped session whose file stayed in the chat."""
+        started = self._run(
+            "start_import_session", {"file_name": "customers.csv", "columns": list(MAPPING), "row_count": 1}
+        )
+        session = started["result"]["session_id"]
+        self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+        return session
+
+    def _upload(self, rows):
+        return frappe.get_doc(
+            {"doctype": "File", "file_name": "customers.csv", "content": self._csv(rows), "is_private": 1}
+        ).insert()
+
+    def test_the_file_uploaded_in_file_manager_is_given_by_its_id(self):
+        session = self._chat_session()
+        file_doc = self._upload([[f"Manager {self.tag}", GROUP, "Company", ""]])
+
+        result = self._check(session, file_id=file_doc.name)
+
+        self.assertEqual(result["ready"], 1)
+        self.assertEqual(frappe.db.get_value("FAC Import Session", session, "source_file"), file_doc.name)
+
+    def test_a_file_the_user_cannot_read_is_not_linked_by_its_id(self):
+        user = self.make_throwaway_user("clerk", roles=("Sales Master Manager", "Desk User"))
+        theirs = self._upload([["CEO pay", GROUP, "Company", ""]])  # Administrator's, private
+        frappe.set_user(user)
+        session = self._chat_session()
+
+        response = self._check_fails(session, "don't have access", file_id=theirs.name)
+
+        self.assertNotIn("CEO pay", frappe.as_json(response))
+        self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
+
+    def test_an_unknown_file_id_reads_the_same_as_one_the_user_cannot_read(self):
+        session = self._chat_session()
+
+        unknown = self._check_fails(session, "don't have access", file_id="no-such-file")
+        folder = self._check_fails(session, "don't have access", file_id="Home")
+
+        self.assertEqual(unknown["error"], folder["error"])
+
+    def test_file_id_and_file_url_together_are_refused(self):
+        session = self._chat_session()
+        file_doc = self._upload([[f"Both {self.tag}", GROUP, "Company", ""]])
+
+        self._check_fails(session, "not both", file_id=file_doc.name, file_url=file_doc.file_url)
 
         self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
 

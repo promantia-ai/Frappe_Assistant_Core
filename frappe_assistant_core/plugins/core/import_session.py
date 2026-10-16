@@ -70,6 +70,24 @@ def get_readable_file(file_url: str):
     raise FileProblem(_("File not found, or you don't have access to it."))
 
 
+def get_readable_file_by_id(file_id: str):
+    """Return the File named ``file_id`` (its ID in File Manager), if the current user may read it."""
+    if frappe.db.exists("File", {"name": file_id, "is_folder": 0}):
+        file_doc = frappe.get_doc("File", file_id)
+        if frappe.has_permission("File", "read", doc=file_doc):
+            return file_doc
+    raise FileProblem(_("File not found, or you don't have access to it."))
+
+
+def find_site_file(file_id: str = "", file_url: str = ""):
+    """The File the current user may read, by its ID or its URL; exactly one of them is given."""
+    if file_id and file_url:
+        raise FileProblem(_("Give file_id or file_url, not both."))
+    if file_id:
+        return get_readable_file_by_id(file_id)
+    return get_readable_file(file_url)
+
+
 def readable_session_file(session):
     """The session's file, when the current user may read it. A session's fields can be written
     over the REST API, read-only or not, so its source_file is checked each time it is read."""

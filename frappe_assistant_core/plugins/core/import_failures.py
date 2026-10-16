@@ -226,8 +226,8 @@ def failed_rows_file(session) -> Dict[str, Any]:
         "download_url": get_url(file_doc.file_url),
         "message": _(
             "{0} rows, with the user's columns, then '{1}' (the row's number in the file) and "
-            "'{2}'. Once corrected, the file can come back as it is: pass it to dry_run_import "
-            "as file_url, and it is checked before anything is imported."
+            "'{2}'. Once corrected, the file can come back as it is: once uploaded, pass it to "
+            "dry_run_import as file_id, and it is checked before anything is imported."
         ).format(count, ROW_COLUMN, REASON_COLUMN),
     }
 

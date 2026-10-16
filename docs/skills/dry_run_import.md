@@ -13,7 +13,7 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `session` | string | **Yes** | The import session id |
-| `file_url` | string | No | When the session's file is just in the chat (Claude, ChatGPT): the same file on this site, e.g. a FAC Chat attachment. Or the user's **corrected file** of failed rows (see **After an import**). Its columns must match the session's. The mapping is kept. A **different** file puts back the rows left out before (`notice` says so). Never send it with `fixes`. |
+| `file_id` (or `file_url`) | string | No | When the session's file is just in the chat (Claude, ChatGPT): the same file on this site, uploaded in File Manager or attached in FAC Chat. Pass its **File ID** (its name in File Manager), or its URL; not both. The user must be allowed to read it. Or the user's **corrected file** of failed rows (see **After an import**). Its columns must match the session's. The mapping is kept. A **different** file puts back the rows left out before (`notice` says so). Never send it with `fixes`. |
 | `fixes` | array | No | The user's fixes for the last check's groups: `{group, action, to?, reason?}`. See **Fixing the groups**. |
 | `failed_rows_file` | boolean | No | `true` to get the rows still not imported (failed, or left out), with the reason for each, as a CSV to download. Nothing is checked. Send it on its own. |
 
@@ -88,7 +88,8 @@ A file of more than 500 rows is checked in the background. The reply has `"state
 ## When it can't run
 
 - **Not mapped yet:** map the columns first with `set_column_mapping`.
-- **File only in the chat:** the rows can't be read on the site. Ask the user to attach the file in FAC Chat, then call again with its `file_url`.
+- **File only in the chat:** the rows can't be read on the site. Ask the user to upload the file in File Manager (or attach it in FAC Chat), then call again with its `file_id`.
+- **File not found or not readable:** the user can't read that file (or it doesn't exist). Both get the same message. The session's own file is checked again on every call, so a user who has lost access can't carry on.
 - **No permission** to create or import the target DocType: tell the user and stop.
 - **DocTypes whose side effects can't be held back** (DocType, Custom Field, Payment Request, or any the site lists): the check is refused, with the reason.
 - **Importing:** a session being imported isn't checked until the import ends. After an import (**Partially Completed**, **Failed** or **Completed**), it checks only what is left: see **After an import**.
@@ -146,7 +147,7 @@ The fixes are all or nothing. If any is wrong, none is saved and `problems` says
 - **`to` doesn't exist** or isn't an allowed option: the error lists the closest names or the choices.
 - **`create` sent in `fixes`**: refused. Use `create_document` instead.
 - **A group id that isn't in the latest check**: its rows already pass. Use the ids from the latest result.
-- **`fixes` with a new `file_url`**: refused. Check the new file first, then fix its groups.
+- **`fixes` with a new `file_id` or `file_url`**: refused. Check the new file first, then fix its groups.
 - **No check yet**, or the mapping changed since: call without `fixes` first.
 
 To change a mapping, map the same value again: the new choice replaces the earlier one.
@@ -186,4 +187,16 @@ Give the user the `download_url`. The file has the user's own columns (with the 
 
 ### The corrected file
 
-When the user uploads the corrected file, pass it as `file_url`. It must keep the same columns; the two added ones may stay, and are not imported. It becomes the session's file and is **checked like any file**, so nothing goes in unchecked: a row already imported that came back in it fails as **Already in ERPNext**, so it can't be imported twice. Then `start_import` imports it as another Data Import of the same session.
+When the user uploads the corrected file, pass its `file_id` (or `file_url`). It must keep the same columns; the two added ones may stay, and are not imported. It becomes the session's file and is **checked like any file**, so nothing goes in unchecked: a row already imported that came back in it fails as **Already in ERPNext**, so it can't be imported twice. Then `start_import` imports it as another Data Import of the same session.
+
+## Opening stock
+
+For a session set up with `set_opening_stock`, the check also reports: Totals row, Can't hold stock,
+Warehouse of another company, Group warehouse, No UOM conversion, Negative quantity, Zero quantity,
+No valuation rate, Batch needed, Serial numbers needed, Serial numbers don't match the quantity,
+Same item and warehouse, Already has stock. Its reply has `opening_stock`: `total_qty`, `total_value` and
+per-warehouse totals; pass those to `import_opening_stock`.
+
+The fix `allow_zero_rate` (only for **No valuation rate**) brings that item in at zero value. Offer it only
+when the user confirms the stock really has no value; otherwise the rate is corrected in the file.
+A warehouse of another company, or a group warehouse, can be mapped to a real one with `map`.
