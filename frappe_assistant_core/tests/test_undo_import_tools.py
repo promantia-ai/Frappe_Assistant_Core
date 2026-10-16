@@ -337,6 +337,31 @@ class TestUndo(UndoToolsCase):
         self.assertEqual(reply["result"]["status"], "Undone")
         self.assertFalse(any(self._exists("Customer Group", n) for n in names))
 
+    def test_the_job_deletes_nothing_when_the_records_changed_since_the_approval(self):
+        session, names = self._session_with_groups(2)
+        outside = self._outside_customer(names[0])
+        before = self._doc(session).status
+        preview = self._preview(session)
+        with patch.object(import_undo.frappe, "enqueue") as enqueue:  # approved; the job has not run
+            reply = self._undo(session, preview["records"], preview["blocked"], "unblocked")
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(enqueue.call_count, 1)
+        # Before the job runs, the user cancels the linking document: the blocker is gone.
+        frappe.db.set_value("Customer", outside, "docstatus", 2, update_modified=False)
+        self.assertEqual(self._plan(session).blocked, [])
+
+        kwargs = enqueue.call_args.kwargs
+        import_undo.undo_job(kwargs["session_name"], kwargs["user"], kwargs["mode"])
+
+        self.assertTrue(all(self._exists("Customer Group", n) for n in names))
+        doc = self._doc(session)
+        self.assertEqual(doc.status, before)
+        self.assertEqual((doc.steps[-1].step, doc.steps[-1].outcome), ("Undo", "Failed"))
+        self.assertIn("changed since the approval", doc.steps[-1].message)
+        report = import_undo.report(doc)
+        self.assertEqual(report["state"], "stopped")
+        self.assertIn("preview again", report["reason"])
+
     def test_undo_reports_progress_on_a_second_call_and_does_not_run_twice(self):
         session, names = self._session_with_groups(2)
         preview = self._preview(session)

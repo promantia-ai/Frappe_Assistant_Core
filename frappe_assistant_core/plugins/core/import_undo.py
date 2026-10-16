@@ -922,10 +922,12 @@ def _stalled(session) -> bool:
     )
 
 
-def start(session, mode: str) -> str:
+def start(session, mode: str, fingerprint: Optional[str] = None) -> str:
     """Hand the undo to a background job, as the current user: "started", or "running" when its
     job is already queued (nothing is queued again). The caller has checked the plan; the job
-    builds it again. A session left Undoing by a job that died is set back first."""
+    builds it again and, given the ``fingerprint`` of the plan the user approved, deletes nothing
+    unless the plan is still that one. A session left Undoing by a job that died is set back
+    first."""
     if mode not in MODES:
         raise UndoProblem(_("The mode is all or unblocked, not {0}.").format(mode))
     if session.status == UNDOING:
@@ -939,6 +941,9 @@ def start(session, mode: str) -> str:
     undo = _undo_options(session)
     undo.pop("result", None)
     undo.pop("stopped", None)
+    undo.pop("approved_fingerprint", None)
+    if fingerprint:
+        undo["approved_fingerprint"] = fingerprint
     undo.update(previous_status=session.status, mode=mode)
     _store_undo(session, undo)
     session.status = UNDOING
@@ -986,6 +991,12 @@ def undo_job(session_name: str, user: str, mode: str) -> None:
 
 def _run(session, mode: str) -> None:
     plan = build_plan(session)
+    approved = _undo_options(session).get("approved_fingerprint")
+    if approved and approved != plan.fingerprint:
+        # What the user approved is not what would be removed now (a blocker cleared, a record
+        # added or removed since): nothing is deleted.
+        _restore(session, _("The records changed since the approval; preview again."))
+        return
     blocked: List[Blocker] = list(plan.blocked)
     kept: List[Tuple[Record, str]] = list(plan.kept)
     if mode == "all" and blocked:

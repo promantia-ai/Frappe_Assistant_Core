@@ -77,8 +77,8 @@ class UndoImport(BaseTool):
                 return self._progress(session, already_ended=earlier != import_undo.UNDOING)
             if mode not in import_undo.MODES:
                 raise import_undo.UndoProblem(_("The mode is all or unblocked, not {0}.").format(mode))
-            self._check(session, arguments)
-            state = import_undo.start(session, mode)
+            plan = self._check(session, arguments)
+            state = import_undo.start(session, mode, fingerprint=plan.fingerprint)
             session.reload()
         except import_undo.UndoProblem as e:
             return {"success": False, "error": str(e), "session": session_name}
@@ -110,8 +110,9 @@ class UndoImport(BaseTool):
         return not fresh
 
     @staticmethod
-    def _check(session, arguments: Dict[str, Any]) -> None:
-        """Raise UndoProblem unless the session can be undone now, as previewed and as passed."""
+    def _check(session, arguments: Dict[str, Any]) -> "import_undo.Plan":
+        """The plan the user approved; UndoProblem unless the session can be undone now, as
+        previewed and as passed."""
         reason = import_undo.refusal(session)
         if reason:
             raise import_undo.UndoProblem(reason)
@@ -146,6 +147,7 @@ class UndoImport(BaseTool):
                     "unblocked to remove the rest and keep those."
                 ).format(len(plan.blocked))
             )
+        return plan
 
     @staticmethod
     def _progress(session, queued: bool = False, already_ended: bool = False) -> Dict[str, Any]:

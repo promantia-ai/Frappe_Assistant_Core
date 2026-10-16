@@ -30,7 +30,7 @@ The approval card shows `records`, `blocked` and `mode`, so the user sees what g
 4. **Follow it.** The undo runs in the background. Call `undo_import` again to see how far it got: while it runs it only reports, with any values, and never starts a second undo. The reply has `state`:
    - `running`: `deleted` of `total` removed so far. Tell the user, and check again in a minute or so.
    - `done`: the end. The session's `status` is **Undone** (nothing kept) or **Partially Undone** (something kept).
-   - `stopped`: the job ended early, or did not start and has shown no progress for 10 minutes; `reason` says why. What it removed stays removed. After a new preview the user can undo again for the rest.
+   - `stopped`: the job ended early, or did not start and has shown no progress for 10 minutes, or found that the records changed between the approval and its start (then it removed nothing); `reason` says why. What it removed stays removed. After a new preview the user can undo again for the rest.
 5. **Report the end:** how many records were removed (`deleted`), how many are kept (`kept`), and the blocked records with their reasons (`blocked`). Say what the user can do about each reason (a linked document can be cancelled by them, then the undo run again after a new preview).
 
 ## Reply

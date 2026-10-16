@@ -1134,6 +1134,26 @@ class TestRun(BlockerCase):
         self.assertEqual(self._doc(session).status, "Undone")
         self.assertEqual(self._undo_options(session)["result"]["deleted"], 3)
 
+    def test_the_job_refuses_a_plan_other_than_the_approved_one(self):
+        session, names = self._session_with_groups(2)
+        before = self._doc(session).status
+        approved = self._plan(session).fingerprint
+
+        import_undo.start(self._doc(session), "all", fingerprint="not " + approved)
+
+        self.assertTrue(all(self._exists("Customer Group", name) for name in names))
+        doc = self._doc(session)
+        self.assertEqual(doc.status, before)
+        self.assertEqual(len(doc.created_records), 2)
+        step = self._last_step(session)
+        self.assertEqual((step.step, step.outcome), ("Undo", "Failed"))
+        self.assertIn("changed since the approval", step.message)
+
+        import_undo.start(self._doc(session), "all", fingerprint=approved)  # the approved plan runs
+
+        self.assertEqual(self._doc(session).status, "Undone")
+        self.assertFalse(any(self._exists("Customer Group", name) for name in names))
+
     def test_an_unknown_mode_is_refused(self):
         session, _names = self._session_with_groups(1)
 
