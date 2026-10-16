@@ -52,6 +52,8 @@ class StartImportSession(BaseTool):
             "set_column_mapping. Writes no business data."
         )
         self.requires_permission = None  # file access and target permission are checked per call
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = ("file_name", "columns", "sheets", "sample_rows", "note", "error")
 
         self.inputSchema = {
             "type": "object",
@@ -171,7 +173,7 @@ class StartImportSession(BaseTool):
                 "status": "File Read",
             }
         )
-        where = _(" from sheet {0}").format(chosen.name) if chosen.name else ""
+        where = " " + _("from sheet {0}").format(chosen.name) if chosen.name else ""
         session.log_step(
             "Read File",
             "Success",

@@ -62,6 +62,17 @@ class SetColumnMapping(BaseTool):
             "check every row."
         )
         self.requires_permission = None  # Checked on the session and the target DocType
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = (
+            "mapping",
+            "child_tables",
+            "not_imported",
+            "unmapped_columns",
+            "summary",
+            "problems",
+            "columns",
+            "error",
+        )
 
         self.inputSchema = {
             "type": "object",

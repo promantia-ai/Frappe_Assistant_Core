@@ -36,6 +36,8 @@ class ImportOpeningStock(BaseTool):
             "background, and stock values can change until its reposting finishes: say so."
         )
         self.requires_permission = None  # checked on the session and Stock Reconciliation
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = ("message", "error")
         self.inputSchema = {
             "type": "object",
             "properties": {
