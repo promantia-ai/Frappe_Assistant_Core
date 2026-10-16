@@ -7,9 +7,10 @@
 # (at your option) any later version.
 
 """
-Undo an import (#34002): the undo set (what a session created) and when a session can be
-undone at all. Sessions are built the way the import's own tests build them: masters through
-create_document with import_session, Customers through a Data Import.
+Undo an import (#34002): the undo set (what a session created), when a session can be undone at
+all, what blocks a record, the delete order and the background job. Sessions are built the way
+the import's own tests build them: masters through create_document with import_session,
+Customers through a Data Import, opening documents through the opening import tools.
 """
 
 import unittest
@@ -21,6 +22,9 @@ import frappe
 from frappe.utils import add_days, add_to_date, getdate, now_datetime, nowdate
 
 from frappe_assistant_core.plugins.core import import_undo
+from frappe_assistant_core.tests.test_import_opening_balances import OpeningBalancesCase
+from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
+from frappe_assistant_core.tests.test_import_opening_stock import OpeningStockCase
 from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase
 
 
@@ -726,3 +730,400 @@ class TestPlan(BlockerCase):
             [("Customer", n["gamma"]), ("Customer", n["delta"])],
         )
         self.assertEqual((plan.already_removed, plan.note), ([], None))
+
+
+class TestOrder(UndoCase):
+    def _order(self, records):
+        return [(r.doctype, r.name) for r in import_undo.delete_order(records)]
+
+    def test_documents_are_removed_before_the_masters_they_link_to(self):
+        R = import_undo.Record
+        created = [
+            R("Customer Group", "g", "All Customer Groups"),
+            R("Item", "i"),
+            R("Customer", "c"),
+            R("Batch", "b"),
+            R("Stock Reconciliation", "sr"),
+            R("Sales Invoice", "si"),
+        ]
+
+        for records in (created, list(reversed(created))):
+            order = [doctype for doctype, _name in self._order(records)]
+            self.assertEqual(len(order), len(created))
+            before = order.index
+            self.assertLess(before("Sales Invoice"), before("Customer"))
+            self.assertLess(before("Sales Invoice"), before("Item"))
+            self.assertLess(before("Customer"), before("Customer Group"))
+            self.assertLess(before("Stock Reconciliation"), before("Batch"))
+            self.assertLess(before("Batch"), before("Item"))
+
+    def test_tree_children_are_removed_before_their_parents(self):
+        R = import_undo.Record
+        records = [
+            R("Customer Group", "child", "top"),  # listed before its parent
+            R("Customer Group", "top", "All Customer Groups"),
+            R("Customer Group", "leaf", "child"),
+            R("Customer Group", "other", "All Customer Groups"),
+        ]
+
+        order = [name for _doctype, name in self._order(records)]
+
+        self.assertLess(order.index("leaf"), order.index("child"))
+        self.assertLess(order.index("child"), order.index("top"))
+        self.assertEqual(order, ["leaf", "child", "other", "top"])  # then reverse creation
+
+
+class TestRun(BlockerCase):
+    """The undo job, run inline (frappe.flags.in_test) by start()."""
+
+    def _start(self, session, mode="all"):
+        return import_undo.start(self._doc(session), mode)
+
+    def _undo_options(self, session):
+        return (frappe.parse_json(self._doc(session).template_options or "{}") or {}).get("undo") or {}
+
+    def _last_step(self, session):
+        return self._doc(session).steps[-1]
+
+    def _exists(self, doctype, name):
+        return bool(frappe.db.exists(doctype, name))
+
+    def test_the_job_removes_the_created_records_and_ends_undone(self):
+        session, names = self._session_with_groups(2)
+
+        self.assertEqual(self._start(session), "started")
+
+        doc = self._doc(session)
+        self.assertEqual([n for n in names if self._exists("Customer Group", n)], [])
+        self.assertEqual(doc.status, "Undone")
+        self.assertEqual(doc.created_records, [])
+        step = self._last_step(session)
+        self.assertEqual((step.step, step.outcome), ("Undo", "Success"))
+        self.assertEqual(self._undo_options(session)["result"], {"deleted": 2, "kept": 0, "blocked": []})
+
+    def test_the_created_records_row_goes_before_the_delete(self):
+        session, names = self._session_with_groups(1)
+        frappe.db.savepoint("fac_test_link")
+        with self.assertRaises(frappe.LinkExistsError):  # the session's Dynamic Link holds it
+            frappe.delete_doc("Customer Group", names[0])
+        frappe.db.rollback(save_point="fac_test_link")
+        frappe.clear_messages()
+
+        self._start(session)
+
+        self.assertFalse(self._exists("Customer Group", names[0]))
+        self.assertEqual(self._doc(session).status, "Undone")
+
+    def test_a_record_that_fails_to_delete_is_kept_with_its_dependencies_and_the_session_is_partially_undone(
+        self,
+    ):
+        session = self._session_with_customers()
+        self._add(session, "Customer Group", self.group, "All Customer Groups")
+        n = self._names()
+        real = frappe.delete_doc
+
+        def refuse(doctype=None, name=None, *args, **kwargs):
+            if name == n["alpha"]:
+                frappe.throw("Alpha is refused")
+            if name == n["gamma"]:  # deleted, then refused: the savepoint brings it back
+                real(doctype, name, *args, **kwargs)
+                raise frappe.ValidationError("Gamma is refused after its delete")
+            return real(doctype, name, *args, **kwargs)
+
+        with patch.object(import_undo.frappe, "delete_doc", side_effect=refuse):
+            self._start(session)
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Partially Undone")
+        self.assertTrue(self._exists("Customer", n["alpha"]))
+        self.assertTrue(self._exists("Customer", n["gamma"]))
+        self.assertFalse(self._exists("Customer", n["delta"]))
+        self.assertTrue(self._exists("Customer Group", self.group))  # alpha and gamma need it
+        self.assertIn(self.group, [r.record_name for r in doc.created_records])
+        result = self._undo_options(session)["result"]
+        self.assertEqual((result["deleted"], result["kept"]), (1, 1))
+        blocked = {b["record"]: b for b in result["blocked"]}
+        self.assertEqual(set(blocked), {f"Customer {n['alpha']}", f"Customer {n['gamma']}"})
+        self.assertEqual({b["reason"] for b in blocked.values()}, {"delete_failed"})
+        self.assertIn("Alpha is refused", blocked[f"Customer {n['alpha']}"]["detail"])
+        self.assertEqual(self._last_step(session).outcome, "Warning")
+
+    def test_unblocked_mode_keeps_blocked_records_and_removes_the_rest(self):
+        session, names = self._session_with_groups(2)
+        outside = self._outside_customer(names[0])
+
+        self._start(session, "unblocked")
+
+        self.assertTrue(self._exists("Customer Group", names[0]))
+        self.assertFalse(self._exists("Customer Group", names[1]))
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+        result = self._undo_options(session)["result"]
+        self.assertEqual((result["deleted"], result["kept"]), (1, 0))
+        self.assertEqual(
+            [(b["record"], b["reason"]) for b in result["blocked"]],
+            [(f"Customer Group {names[0]}", "linked")],
+        )
+        self.assertIn(outside, result["blocked"][0]["detail"])
+
+    def test_all_mode_with_blocked_records_removes_nothing_and_restores_the_status(self):
+        session, names = self._session_with_groups(2)
+        self._outside_customer(names[0])
+        before = self._doc(session).status
+
+        self._start(session, "all")
+
+        self.assertTrue(all(self._exists("Customer Group", name) for name in names))
+        self.assertEqual(self._doc(session).status, before)
+        step = self._last_step(session)
+        self.assertEqual((step.step, step.outcome), ("Undo", "Failed"))
+        self.assertIn("unblocked", step.message)
+        self.assertEqual(import_undo.report(self._doc(session))["state"], "stopped")
+
+    def test_progress_is_written_and_the_result_is_kept(self):
+        session, _names = self._session_with_groups(3)
+        written = []
+        real = import_undo._progress
+
+        def spy(state, done=0, total=0, deleted=0):
+            written.append((state, done, total))
+            return real(state, done, total, deleted)
+
+        with patch.object(import_undo, "BATCH", 2), patch.object(
+            import_undo, "_progress", side_effect=spy
+        ), patch.object(frappe.db, "commit") as commit:
+            self._start(session)
+
+        self.assertIn(("running", 2, 3), written)
+        self.assertEqual(written[-1], ("done", 3, 3))
+        commit.assert_not_called()  # a test's transaction is never committed
+        progress = frappe.parse_json(self._doc(session).progress)
+        self.assertEqual(
+            (progress["step"], progress["state"], progress["done"], progress["total"]), ("Undo", "done", 3, 3)
+        )
+        self.assertEqual(self._undo_options(session)["result"], {"deleted": 3, "kept": 0, "blocked": []})
+        report = import_undo.report(self._doc(session))
+        self.assertEqual(
+            report, {"state": "done", "deleted": 3, "total": 3, "kept": 0, "blocked": [], "reason": None}
+        )
+
+    def test_a_second_start_while_running_does_not_enqueue_again(self):
+        session, names = self._session_with_groups(1)
+        with patch.object(import_undo.frappe, "enqueue") as enqueue:
+            self.assertEqual(self._start(session), "started")
+        self.assertEqual(enqueue.call_count, 1)
+        kwargs = enqueue.call_args.kwargs
+        self.assertEqual(enqueue.call_args.args, (f"{import_undo.__name__}.undo_job",))
+        self.assertEqual(
+            {
+                k: kwargs[k]
+                for k in ("queue", "timeout", "job_id", "deduplicate", "enqueue_after_commit", "now")
+            },
+            {
+                "queue": "long",
+                "timeout": 4 * 60 * 60,
+                "job_id": f"fac_import_undo::{session}",
+                "deduplicate": True,
+                "enqueue_after_commit": True,
+                "now": True,
+            },
+        )
+        self.assertEqual(
+            (kwargs["session_name"], kwargs["user"], kwargs["mode"]), (session, "Administrator", "all")
+        )
+        self.assertEqual(self._doc(session).status, "Undoing")
+
+        with patch.object(import_undo, "_job_running", return_value=True), patch.object(
+            import_undo.frappe, "enqueue"
+        ) as again:
+            self.assertEqual(self._start(session), "running")
+            self.assertEqual(import_undo.report(self._doc(session))["state"], "running")
+
+        again.assert_not_called()
+        self.assertEqual(self._doc(session).status, "Undoing")
+        self.assertTrue(self._exists("Customer Group", names[0]))
+
+    def test_a_dead_job_is_reported_stopped_and_the_status_restored(self):
+        session, names = self._session_with_groups(1)
+        before = self._doc(session).status
+        with patch.object(import_undo.frappe, "enqueue"):
+            self._start(session)
+        self.assertEqual(self._undo_options(session)["previous_status"], before)
+
+        with patch.object(import_undo, "_job_running", return_value=False):
+            report = import_undo.report(self._doc(session))
+
+        self.assertEqual(report["state"], "stopped")
+        doc = self._doc(session)
+        self.assertEqual(doc.status, before)
+        step = self._last_step(session)
+        self.assertEqual((step.step, step.outcome), ("Undo", "Failed"))
+        self.assertTrue(self._exists("Customer Group", names[0]))
+        self.assertEqual(import_undo.refusal(doc), "")  # it can be undone again
+
+    def test_an_unexpected_error_rolls_back_and_restores_the_status(self):
+        session, names = self._session_with_groups(2)
+        before = self._doc(session).status
+        real = import_undo._remove
+
+        def remove_then_fail(session_doc, record):
+            real(session_doc, record)
+            raise RuntimeError("the database went away")
+
+        with patch.object(import_undo, "_remove", side_effect=remove_then_fail):
+            self._start(session)
+
+        self.assertTrue(all(self._exists("Customer Group", name) for name in names))
+        doc = self._doc(session)
+        self.assertEqual(doc.status, before)
+        self.assertEqual(len(doc.created_records), 2)
+        self.assertEqual((doc.steps[-1].step, doc.steps[-1].outcome), ("Undo", "Failed"))
+
+    def test_data_import_records_are_deleted(self):
+        session = self._session_with_customers()
+        doc = self._doc(session)
+        data_import = doc.data_imports[-1].data_import
+        logs = frappe.db.count("Data Import Log", {"data_import": data_import})
+
+        self._start(session)
+
+        self.assertEqual(self._imported(), set())
+        self.assertTrue(self._exists("Data Import", data_import))
+        self.assertEqual(frappe.db.count("Data Import Log", {"data_import": data_import}), logs)
+        self.assertEqual(self._doc(session).status, "Undone")
+        self.assertEqual(self._undo_options(session)["result"]["deleted"], 3)
+
+    def test_an_unknown_mode_is_refused(self):
+        session, _names = self._session_with_groups(1)
+
+        with self.assertRaises(import_undo.UndoProblem):
+            self._start(session, "everything")
+
+
+class TestRunSubmittedEntry(OpeningBalancesCase):
+    """An opening Journal Entry made by import_opening_balances: cancelled, then deleted."""
+
+    def _imported(self):
+        session = self._session()
+        self.assertTrue(self._setup(session)["success"])
+        result = self._run("dry_run_import", {"session": session})["result"]
+        card = {
+            "session": session,
+            "company": self.company,
+            "cut_off": result["opening_balances"]["cut_off"],
+            "rows": result["ready"],
+            "total_debit": result["opening_balances"]["total_debit"],
+            "total_credit": result["opening_balances"]["total_credit"],
+        }
+        reply = self._run("import_opening_balances", card)
+        self.assertTrue(reply["success"], reply)
+        entry = reply["result"]["journal_entry"]
+        self.made_entries.append(entry)
+        return session, entry
+
+    def _books_open(self):
+        return patch.multiple(import_undo, _frozen_till=lambda: None, _closed_till=lambda companies: {})
+
+    def test_a_voucher_cancelled_before_the_undo_keeps_its_ledger_and_is_kept(self):
+        session, entry = self._imported()
+        frappe.get_doc("Journal Entry", entry)._cancel()
+        own = frappe.db.count("GL Entry", {"voucher_type": "Journal Entry", "voucher_no": entry})
+
+        with self._books_open():
+            import_undo.start(self._doc(session), "all")
+
+        self.assertEqual(frappe.db.get_value("Journal Entry", entry, "docstatus"), 2)
+        self.assertEqual(
+            frappe.db.count("GL Entry", {"voucher_type": "Journal Entry", "voucher_no": entry}), own
+        )
+        result = (frappe.parse_json(self._doc(session).template_options) or {})["undo"]["result"]
+        self.assertEqual(
+            [(b["record"], b["reason"]) for b in result["blocked"]],
+            [(f"Journal Entry {entry}", "delete_failed")],
+        )
+        self.assertIn("GL Entry", result["blocked"][0]["detail"])
+        self.assertEqual(self._doc(session).status, "Partially Undone")
+
+    def test_a_submitted_document_is_cancelled_then_deleted(self):
+        session, entry = self._imported()
+        self.assertEqual(frappe.db.get_value("Journal Entry", entry, "docstatus"), 1)
+        others = {
+            ledger: frappe.db.count(ledger, {"voucher_no": ["!=", entry]})
+            for ledger in import_undo.VOUCHER_LEDGERS
+        }
+        cancelled = []
+        real = import_undo._cancel
+
+        def spy(doc):
+            real(doc)
+            cancelled.append((doc.name, frappe.db.get_value("Journal Entry", doc.name, "docstatus")))
+
+        with patch.object(import_undo, "_cancel", side_effect=spy), patch.object(
+            import_undo, "_frozen_till", return_value=None
+        ), patch.object(import_undo, "_closed_till", return_value={}):
+            import_undo.start(self._doc(session), "all")
+
+        self.assertEqual(cancelled, [(entry, 2)])
+        self.assertFalse(frappe.db.exists("Journal Entry", entry))
+        for ledger in ("GL Entry", "Payment Ledger Entry"):
+            self.assertEqual(
+                frappe.db.count(ledger, {"voucher_type": "Journal Entry", "voucher_no": entry}), 0
+            )
+        for ledger, count in others.items():  # no other voucher's rows
+            self.assertEqual(frappe.db.count(ledger, {"voucher_no": ["!=", entry]}), count, ledger)
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undone", doc.steps[-1].message)
+        self.assertEqual(frappe.db.get_single_value("Accounts Settings", "delete_linked_ledger_entries"), 0)
+
+
+class TestRunSubmittedInvoice(OpeningInvoicesCase):
+    """Opening Sales Invoices made by import_opening_invoices: cancelled, then deleted."""
+
+    def test_submitted_opening_invoices_are_cancelled_then_deleted(self):
+        numbers = [f"OI-{self.tag}-{i}" for i in (1, 2)]
+        session, result = self._ready([f"{self.customer},{n},{self.date},,10" for n in numbers])
+        reply = self._run("import_opening_invoices", self._card(session, result))
+        self.assertTrue(reply["success"], reply)
+        invoices = [
+            r.record_name for r in self._doc(session).created_records if r.record_doctype == "Sales Invoice"
+        ]
+        self.assertEqual(len(invoices), 2)
+
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ):
+            import_undo.start(self._doc(session), "all")
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undone", doc.steps[-1].message)
+        for name in invoices:
+            self.assertFalse(frappe.db.exists("Sales Invoice", name))
+            for ledger in ("GL Entry", "Payment Ledger Entry"):
+                self.assertEqual(
+                    frappe.db.count(ledger, {"voucher_type": "Sales Invoice", "voucher_no": name}), 0
+                )
+        self.assertTrue(frappe.db.exists("Customer", self.customer))  # not made by the session
+
+
+class TestRunSubmittedStock(OpeningStockCase):
+    """An opening Stock Reconciliation made by import_opening_stock: cancelled, then deleted."""
+
+    def test_a_submitted_stock_reconciliation_is_cancelled_then_deleted(self):
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        reply = self._run("import_opening_stock", self._card(session, result))
+        self.assertTrue(reply["success"], reply)
+        recon = reply["result"]["documents"][0]
+        self.assertEqual(self._qty(self.item, self.stores), 5)
+
+        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+            import_undo, "_closed_till", return_value={}
+        ):
+            import_undo.start(self._doc(session), "all")
+
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Undone", doc.steps[-1].message)
+        self.assertFalse(frappe.db.exists("Stock Reconciliation", recon))
+        for ledger in ("Stock Ledger Entry", "GL Entry"):
+            self.assertEqual(
+                frappe.db.count(ledger, {"voucher_type": "Stock Reconciliation", "voucher_no": recon}), 0
+            )
+        self.assertEqual(self._qty(self.item, self.stores), 0)

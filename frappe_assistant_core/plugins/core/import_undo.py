@@ -7,12 +7,14 @@
 # (at your option) any later version.
 
 """
-Undo an import (#34002): what a session created, and whether it can be undone now.
+Undo an import (#34002): what a session created, whether it can be undone now, and the
+background job that removes it.
 
 The undo set is the session's Created Records plus, for an Insert New Records session, the
 records its Data Imports logged as created. The plan says, for each of them, whether it can be
-removed: what blocks it (spec §4), and what a blocked record keeps with it. This module only
-reads; the delete order and the job are added on top of it.
+removed: what blocks it (spec §4), and what a blocked record keeps with it. start() hands the
+plan's records to a background job, which removes them in delete order (spec §5), one savepoint
+per record, and report() says how far it got.
 """
 
 import hashlib
@@ -698,3 +700,403 @@ def build_plan(session) -> Plan:
         note=note,
         fingerprint=_fingerprint(present, blocked),
     )
+
+
+# -- delete order --------------------------------------------------------------------------
+
+
+def _links_between(doctypes: List[str]) -> Dict[str, Set[str]]:
+    """For each doctype of the set, the other set doctypes it links to: through the Link fields
+    of the doctype and of its child tables, and through the Dynamic Link fields that Frappe's
+    delete check counts as pointing to a set doctype (get_dynamic_link_map)."""
+    from frappe.model.dynamic_links import get_dynamic_link_map
+
+    wanted = set(doctypes)
+    links: Dict[str, Set[str]] = {doctype: set() for doctype in doctypes}
+    holders: Dict[str, Set[str]] = defaultdict(set)  # doctype or child table -> set doctypes
+    for doctype in doctypes:
+        meta = frappe.get_meta(doctype)
+        holders[doctype].add(doctype)
+        metas = [meta]
+        for table_field in meta.get_table_fields():
+            holders[table_field.options].add(doctype)
+            metas.append(frappe.get_meta(table_field.options))
+        for part in metas:
+            links[doctype].update(df.options for df in part.get_link_fields() if df.options in wanted)
+    dynamic = get_dynamic_link_map()
+    for target in doctypes:
+        for df in dynamic.get(target, []):
+            for holder in holders.get(df.parent, ()):
+                links[holder].add(target)
+    for doctype in doctypes:
+        links[doctype].discard(doctype)
+    return links
+
+
+def _doctype_order(doctypes: List[str]) -> List[str]:
+    """A doctype that links to another goes first. Each pick is the first by name among the
+    doctypes nothing left links to; inside a cycle, the first by name among the cycle's
+    doctypes (a cycle nothing outside it links to)."""
+    links = _links_between(doctypes)
+    left = set(doctypes)
+    order: List[str] = []
+
+    def reach(start: str) -> Set[str]:
+        seen: Set[str] = set()
+        stack = [start]
+        while stack:
+            for nxt in links[stack.pop()] & left:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return seen
+
+    while left:
+        reached = {doctype: reach(doctype) for doctype in left}
+        first = [
+            doctype
+            for doctype in left
+            if all(other in reached[doctype] for other in left if doctype in reached[other])
+        ]
+        pick = min(first or left)
+        order.append(pick)
+        left.remove(pick)
+    return order
+
+
+def _tree_order(records: List[Record]) -> List[Record]:
+    """Records of one doctype: deepest in the set's own tree first (a child before its parent,
+    by the session's parent_record), then reverse creation."""
+    by_name = {r.name: r for r in records}
+    position = {r.name: i for i, r in enumerate(records)}
+
+    def depth(record: Record) -> int:
+        seen, parent, level = {record.name}, record.parent, 0
+        while parent in by_name and parent not in seen:
+            seen.add(parent)
+            level += 1
+            parent = by_name[parent].parent
+        return level
+
+    return sorted(records, key=lambda r: (-depth(r), -position[r.name]))
+
+
+def delete_order(records: List[Record]) -> List[Record]:
+    """The order to remove ``records`` in (spec §5 steps 1-2): by doctype, a doctype that links
+    to another first (invoices, then parties, then masters); inside one doctype, tree children
+    before their parents, then reverse creation. ``records`` is in creation order."""
+    by_doctype: Dict[str, List[Record]] = defaultdict(list)
+    for record in records:
+        by_doctype[record.doctype].append(record)
+    return [r for doctype in _doctype_order(list(by_doctype)) for r in _tree_order(by_doctype[doctype])]
+
+
+# -- the job -------------------------------------------------------------------------------
+
+SESSION_DOCTYPE = "FAC Import Session"
+JOB = "fac_import_undo::{}"
+MODES = ("all", "unblocked")
+BATCH = 25  # records between progress writes (and commits, outside tests)
+STEP = "Undo"
+UNDOING, UNDONE, PARTIALLY_UNDONE = "Undoing", "Undone", "Partially Undone"
+RESTORED_DEFAULT = "Completed"  # when no previous status was kept
+RECORD_SAVEPOINT = "fac_import_undo_record"
+JOB_SAVEPOINT = "fac_import_undo_job"
+
+
+def _undo_options(session) -> dict:
+    return dict((frappe.parse_json(session.template_options or "{}") or {}).get("undo") or {})
+
+
+def _store_undo(session, undo: dict) -> None:
+    options = frappe.parse_json(session.template_options or "{}") or {}
+    options["undo"] = undo
+    session.template_options = frappe.as_json(options)
+
+
+def _progress(state: str, done: int = 0, total: int = 0, deleted: int = 0) -> str:
+    return frappe.as_json(
+        {
+            "step": STEP,
+            "state": state,
+            "done": done,
+            "total": total,
+            "deleted": deleted,
+            "updated_on": str(frappe.utils.now_datetime()),
+        }
+    )
+
+
+def _commits() -> bool:
+    """Whether the job commits its batches (not under tests, which roll back at the end)."""
+    return not frappe.flags.in_test
+
+
+def _job_running(session) -> bool:
+    from frappe.utils.background_jobs import is_job_enqueued
+
+    try:
+        return bool(is_job_enqueued(JOB.format(session.name)))
+    except Exception:
+        return True  # the queue can't be asked (Redis down, say): don't call the job stopped
+
+
+def start(session, mode: str) -> str:
+    """Hand the undo to a background job, as the current user: "started", or "running" when its
+    job is already queued (nothing is queued again). The caller has checked the plan; the job
+    builds it again. A session left Undoing by a job that died is set back first."""
+    if mode not in MODES:
+        raise UndoProblem(_("The mode is all or unblocked, not {0}.").format(mode))
+    if session.status == UNDOING:
+        if _job_running(session):
+            return "running"
+        _stopped(session.name, _("the background job stopped."))
+        session.reload()
+    reason = refusal(session)
+    if reason:
+        raise UndoProblem(reason)
+    undo = _undo_options(session)
+    undo.pop("result", None)
+    undo.pop("stopped", None)
+    undo.update(previous_status=session.status, mode=mode)
+    _store_undo(session, undo)
+    session.status = UNDOING
+    session.progress = _progress("queued")
+    session.save()
+    frappe.enqueue(
+        f"{__name__}.undo_job",
+        queue="long",
+        timeout=4 * 60 * 60,
+        job_id=JOB.format(session.name),
+        deduplicate=True,
+        enqueue_after_commit=True,
+        now=bool(frappe.flags.in_test),
+        session_name=session.name,
+        user=frappe.session.user,
+        mode=mode,
+    )
+    return "started"
+
+
+def undo_job(session_name: str, user: str, mode: str) -> None:
+    """Background job: the undo, as the user who approved it. A record that can't be removed
+    is kept (delete_failed) with what it needs; anything else that goes wrong rolls back and
+    sets the session back to its status before the undo."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the undo
+    session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    if session.status != UNDOING:
+        return  # set back meanwhile (report found no job), or already finished
+    frappe.db.savepoint(JOB_SAVEPOINT)
+    try:
+        _run(session, mode)
+    except Exception as e:
+        message = dry_run._message_of(e)
+        if _commits():
+            frappe.db.rollback()
+        else:
+            frappe.db.rollback(save_point=JOB_SAVEPOINT)
+        _stopped(session_name, _("{0}.").format(message.rstrip(".")))
+        frappe.log_error(title=_("FAC import undo failed"), message=frappe.get_traceback())
+    if _commits():
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
+
+
+def _run(session, mode: str) -> None:
+    plan = build_plan(session)
+    blocked: List[Blocker] = list(plan.blocked)
+    kept: List[Tuple[Record, str]] = list(plan.kept)
+    if mode == "all" and blocked:
+        _store_result(session, 0, kept, blocked)
+        _restore(
+            session,
+            _(
+                "Nothing was removed: {0} records can't be removed. Undo with mode unblocked to remove "
+                "the rest and keep those."
+            ).format(len(blocked)),
+        )
+        return
+
+    records = delete_order(plan.to_delete)
+    total, deleted = len(records), 0
+    held: Set[Key] = set()  # kept because a record that failed needs them
+    session.progress = _progress("running", 0, total)
+    session.save()
+    for done, record in enumerate(records, start=1):
+        if _key(record) not in held:
+            error = _remove(session, record)
+            if error is None:
+                deleted += 1
+            else:
+                failed = Blocker(record, "delete_failed", error)
+                blocked.append(failed)
+                pending = [r for r in records[done:] if _key(r) not in held]
+                for needed, because in _cascade([record, *pending], [failed]):
+                    held.add(_key(needed))
+                    kept.append((needed, because))
+        if done % BATCH == 0 and done < total:
+            session.progress = _progress("running", done, total, deleted)
+            session.save()
+            if _commits():
+                frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
+
+    session.reload()
+    _store_result(session, deleted, kept, blocked)
+    session.status = PARTIALLY_UNDONE if blocked or kept else UNDONE
+    session.progress = _progress("done", total, total, deleted)
+    if blocked or kept:
+        message = _(
+            "Removed {0} records; kept {1}: {2} can't be removed, and {3} are kept with them."
+        ).format(deleted, len(blocked) + len(kept), len(blocked), len(kept))
+        session.log_step(STEP, "Warning", message, rows_ok=deleted, rows_failed=len(blocked) + len(kept))
+    else:
+        session.log_step(STEP, "Success", _("Removed {0} records.").format(deleted), rows_ok=deleted)
+    session.save()
+
+
+def _store_result(session, deleted: int, kept: List[Tuple[Record, str]], blocked: List[Blocker]) -> None:
+    undo = _undo_options(session)
+    undo["result"] = {
+        "deleted": deleted,
+        "kept": len(kept),
+        "blocked": [
+            {"record": _label(b.record.doctype, b.record.name), "reason": b.reason, "detail": b.detail}
+            for b in blocked
+        ],
+    }
+    _store_undo(session, undo)
+
+
+def _cancel(doc) -> None:
+    """Cancel now, in this job: Document._cancel, not cancel(), which ERPNext overrides to queue
+    large documents (Journal Entry, Stock Reconciliation over 100 rows) in another background
+    job, while the delete follows at once. Frappe still checks the user's cancel permission."""
+    doc._cancel()
+
+
+# The ledger tables whose rows ERPNext's AccountsController.on_trash deletes by voucher_type and
+# voucher_no when Accounts Settings' delete_linked_ledger_entries is on.
+VOUCHER_LEDGERS = ("Payment Ledger Entry", "GL Entry", "Stock Ledger Entry", "Advance Payment Ledger Entry")
+
+
+def _remove_own_ledger_rows(doctype: str, name: str) -> None:
+    """Delete the ledger rows of one voucher that this undo has just cancelled, so it can be
+    deleted.
+
+    Cancelling marks a voucher's GL, Payment Ledger and Stock Ledger rows cancelled (or posts
+    reversing rows) but keeps them, submitted, linked to it through voucher_no; Frappe's delete
+    check then refuses to delete the cancelled voucher ("is linked with GL Entry ..."), unless
+    Accounts Settings' delete_linked_ledger_entries is on, in which case ERPNext's on_trash
+    deletes them first. This does the part of that routine that concerns the voucher's own rows,
+    for this voucher only, without changing the setting: rows whose voucher_type and voucher_no
+    are this voucher, in the tables ERPNext clears (VOUCHER_LEDGERS). It leaves out what that
+    routine also does to other vouchers (cancelling exchange gain/loss Journal Entries, rows of
+    other vouchers against this one): a row of another voucher still refuses the delete, and the
+    record is kept. Only for a voucher this job cancelled: the caller has just cancelled it, and
+    it must be cancelled now. Rolled back with the record's savepoint if the delete fails."""
+    if frappe.db.get_value(doctype, name, "docstatus") != 2:
+        raise UndoProblem(_("{0} {1} is not cancelled, so its ledger is kept.").format(_(doctype), name))
+    for ledger in VOUCHER_LEDGERS:
+        if not frappe.db.exists("DocType", ledger):
+            continue
+        table = frappe.qb.DocType(ledger)
+        frappe.qb.from_(table).delete().where(
+            (table.voucher_type == doctype) & (table.voucher_no == name)
+        ).run()
+
+
+def _remove(session, record: Record) -> Optional[str]:
+    """Remove one record in a savepoint (spec §5 step 3): its Created Records row first (Frappe
+    counts that Dynamic Link and would refuse the delete), cancel it when submitted, then
+    delete it. Returns None, or what refused it: then all of it is rolled back."""
+    since = len(frappe.local.message_log or [])
+    frappe.db.savepoint(RECORD_SAVEPOINT)
+    try:
+        session.reload()
+        rows = [
+            row
+            for row in session.created_records
+            if not (row.record_doctype == record.doctype and row.record_name == record.name)
+        ]
+        if len(rows) != len(session.created_records):
+            session.created_records = rows
+            session.save()
+        doc = frappe.get_doc(record.doctype, record.name)
+        if doc.docstatus == 1:
+            _cancel(doc)
+            _remove_own_ledger_rows(record.doctype, record.name)
+        frappe.delete_doc(record.doctype, record.name)
+    except Exception as e:
+        error = _error_of(e, since)
+        frappe.db.rollback(save_point=RECORD_SAVEPOINT)
+        frappe.clear_document_cache(record.doctype, record.name)
+        session.reload()
+        return error
+    return None
+
+
+def _error_of(e: Exception, since: int) -> str:
+    """What refused a record: the messages shown since ``since``, which are then dropped, so
+    one record's failure isn't shown with the next."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    log = list(frappe.local.message_log or [])
+    frappe.local.message_log = log[since:]
+    try:
+        return dry_run._message_of(e)
+    finally:
+        frappe.local.message_log = log[:since]
+
+
+def _restore(session, message: str) -> None:
+    """Set the session back to its status before the undo, with a Failed step saying why."""
+    undo = _undo_options(session)
+    undo["stopped"] = message
+    _store_undo(session, undo)
+    session.status = undo.get("previous_status") or RESTORED_DEFAULT
+    progress = frappe.parse_json(session.progress or "{}") or {}
+    session.progress = _progress(
+        "stopped", cint(progress.get("done")), cint(progress.get("total")), cint(progress.get("deleted"))
+    )
+    session.log_step(STEP, "Failed", message)
+    session.save()
+
+
+def _stopped(session_name: str, reason: str) -> None:
+    """An undo that stopped before its end: what it committed stays removed, and undo can be run
+    again for the rest."""
+    session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    if session.status != UNDOING:
+        return
+    _restore(
+        session,
+        _("The undo stopped: {0} What it removed stays removed; undo again for the rest.").format(reason),
+    )
+
+
+def report(session) -> dict:
+    """How far the undo got: state running, done or stopped, with the counts. A session Undoing
+    with no job in the queue is stopped, and set back to its status before the undo."""
+    if session.status == UNDOING and not _job_running(session):
+        _stopped(session.name, _("the background job stopped."))
+        session.reload()
+    if session.status == UNDOING:
+        state = "running"
+    elif session.status in (UNDONE, PARTIALLY_UNDONE):
+        state = "done"
+    else:
+        state = "stopped"
+    undo = _undo_options(session)
+    result = undo.get("result") or {}
+    progress = frappe.parse_json(session.progress or "{}") or {}
+    if progress.get("step") != STEP:
+        progress = {}
+    return {
+        "state": state,
+        "deleted": cint(result.get("deleted", progress.get("deleted"))),
+        "total": cint(progress.get("total")),
+        "kept": cint(result.get("kept")),
+        "blocked": list(result.get("blocked") or []),
+        "reason": undo.get("stopped") if state == "stopped" else None,
+    }
