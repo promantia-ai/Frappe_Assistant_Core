@@ -202,3 +202,32 @@ class TestTheRowLimit(GuardrailCase):
         self._limit(0)  # existing sites read 0: the schema default never applied to them
         set_max_import_rows.execute()
         self.assertEqual(frappe.db.get_single_value("Assistant Core Settings", "max_import_rows"), 50000)
+
+
+class TestTheLogRecordsTheFile(GuardrailCase):
+    def test_each_step_records_the_file_it_worked_on(self):
+        first = self._csv([f"Acme {self.tag},{self.group},Company"])
+        session = self._run("start_import_session", {"file_id": first.name})["result"]["session_id"]
+        self._run(
+            "set_column_mapping", {"session": session, "mapping": run_tests.MAPPING, "doctype": "Customer"}
+        )
+        self._run("dry_run_import", {"session": session})
+        corrected = self._csv(  # the corrected file: another File, same columns
+            [f"Acme {self.tag},{self.group},Company", f"Beta {self.tag},{self.group},Company"]
+        )
+        self._run("dry_run_import", {"session": session, "file_id": corrected.name})
+
+        steps = self._doc(session).steps
+
+        by_step = [(s.step, s.file, s.user) for s in steps]
+        self.assertEqual(by_step[0], ("Read File", first.name, "Administrator"))
+        self.assertIn(("Link File", corrected.name, "Administrator"), by_step)
+        self.assertEqual(steps[-1].file, corrected.name)
+        self.assertTrue(all(s.file for s in steps), by_step)
+
+    def test_a_chat_file_records_its_name(self):
+        reply = self._run(
+            "start_import_session",
+            {"file_name": "in-chat.csv", "columns": list(run_tests.MAPPING), "row_count": 2},
+        )
+        self.assertEqual(self._doc(reply["result"]["session_id"]).steps[0].file, "in-chat.csv")
