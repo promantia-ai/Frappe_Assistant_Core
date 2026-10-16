@@ -226,3 +226,60 @@ class TestMatching(UpdateCase):
 
         self.assertEqual(out, rows)
         self.assertEqual(column_map["0"], "name")
+
+
+class TestUpdateCheck(UpdateCase):
+    def _check(self, lines, **kwargs):
+        session, mapped = self._session(lines, **kwargs)
+        self.assertTrue(mapped["success"], mapped)
+        reply = self._run("dry_run_import", {"session": session})
+        self.assertTrue(reply["success"], reply)
+        return session, reply["result"]
+
+    def test_rows_with_no_match_or_many_are_reported_apart(self):
+        frappe.db.set_value("Customer", self.customers["b"], "tax_id", f"TAX-A-{self.tag}")
+
+        _session, result = self._check(
+            [
+                f"TAX-A-{self.tag},{self.group},x",
+                f"TAX-Z-{self.tag},{self.group},y",
+                f"TAX-Y-{self.tag},{self.group},z",
+            ]
+        )
+
+        causes = {g["cause"]: g for g in result["groups"]}
+        self.assertEqual(causes["No match"]["count"], 2)
+        self.assertEqual(causes["More than one match"]["count"], 1)
+        self.assertEqual(sorted(causes["More than one match"]["records"]), sorted(self.customers.values()))
+        self.assertEqual((result["ready"], result["failed"]), (0, 3))
+
+    def test_two_rows_for_the_same_record_are_both_refused(self):
+        _session, result = self._check(
+            [
+                f"TAX-A-{self.tag},{self.group},https://one.example",
+                f"tax-a-{self.tag},{self.group},https://two.example",
+            ]
+        )
+
+        self.assertEqual([g["cause"] for g in result["groups"]], ["Same record twice"])
+        self.assertEqual(result["failed"], 1)  # the second; the first stays ready
+
+    def test_a_row_that_changes_nothing_is_unchanged_not_failed(self):
+        _session, result = self._check([f"TAX-A-{self.tag},{self.group},https://a.example"])
+
+        self.assertEqual((result["ready"], result["failed"], result["unchanged"]), (0, 0, 1))
+
+    def test_the_check_writes_nothing(self):
+        self._check([f"TAX-A-{self.tag},{self.group},https://new.example"])
+
+        self.assertEqual(frappe.db.get_value("Customer", self.customers["a"], "website"), "https://a.example")
+
+    def test_erpnext_rules_still_apply_to_an_update(self):
+        _session, result = self._check([f"TAX-A-{self.tag},No Such Group {self.tag},x"])
+
+        self.assertEqual(result["groups"][0]["cause"], "Missing link")
+
+    def test_the_results_keep_each_rows_record(self):
+        session, _result = self._check([f"TAX-A-{self.tag},{self.group},https://new.example"])
+
+        self.assertEqual(import_update.checked_records(self._doc(session)), {2: self.customers["a"]})

@@ -22,12 +22,14 @@ from typing import Dict, List, Tuple
 import frappe
 from frappe import _
 from frappe.core.doctype.data_import.importer import get_id_field
-from frappe.utils import cstr
+from frappe.utils import cstr, flt, get_datetime, getdate
 
 UPDATE = "Update Existing Records"
 ID_HEADER = "ID"
 DONT_IMPORT = "Don't Import"
 MATCH_CHUNK = 500
+NUMBER_TYPES = ("Currency", "Float", "Percent", "Int", "Check")
+SKIPPED = ("name", "doctype")
 
 
 def is_update(session) -> bool:
@@ -153,3 +155,50 @@ def key_label(session) -> str:
         df = meta.get_field(field)
         labels.append(_("ID") if field == "name" else _(df.label if df else field))
     return " + ".join(labels)
+
+
+# -- what an update changes -----------------------------------------------------------------
+
+
+def _same(df, old, new) -> bool:
+    if df.fieldtype in NUMBER_TYPES:
+        return flt(old, 9) == flt(new, 9)
+    if df.fieldtype == "Date" and old and new:
+        return getdate(old) == getdate(new)
+    if df.fieldtype == "Datetime" and old and new:
+        return get_datetime(old) == get_datetime(new)
+    return cstr(old).strip() == cstr(new).strip()
+
+
+def changes(doctype: str, record: str, doc: Dict) -> List[Dict]:
+    """What updating ``record`` with the parsed row ``doc`` changes: one {field, label, old, new}
+    per field whose value differs. A blank cell is no change: Data Import leaves it as it is."""
+    meta = frappe.get_meta(doctype)
+    skip = {*SKIPPED, id_fieldname(doctype)}
+    fields = []
+    for field in doc:
+        df = meta.get_field(field)
+        if field not in skip and df and not df.is_virtual and df.fieldtype not in frappe.model.table_fields:
+            fields.append(field)
+    current = frappe.db.get_value(doctype, record, fields, as_dict=True) if fields else {}
+    out = []
+    for field in fields:
+        df = meta.get_field(field)
+        if not _same(df, current.get(field), doc[field]):
+            out.append({"field": field, "label": _(df.label), "old": current.get(field), "new": doc[field]})
+    return out
+
+
+def checked_records(session) -> Dict[int, str]:
+    """The record of each row the last check found ready, from its results file."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    file_doc = dry_run._results_file(session)
+    if not file_doc:
+        return {}
+    content = frappe.parse_json(file_doc.get_content()) or {}
+    return {
+        int(row["row"]): row["record"]
+        for row in content.get("rows") or []
+        if row.get("status") == "ready" and row.get("record")
+    }

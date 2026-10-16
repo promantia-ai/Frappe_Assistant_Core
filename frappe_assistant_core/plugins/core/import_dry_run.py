@@ -50,6 +50,7 @@ PROGRESS_EVERY = 100
 EXAMPLES_PER_GROUP = 3
 STALE_AFTER_SECONDS = 2 * 60 * 60  # a run this old without finishing is taken as dead
 SAVEPOINT = "fac_dry_run_row"
+SAMPLES_KEPT = 5  # records whose old and new values an update's check shows
 # After an import, what it didn't get in is checked again on its own (#33994): rows that failed,
 # or a corrected file of them, or of the rows left out of a completed one.
 RUNNABLE_STATUSES = (
@@ -76,6 +77,10 @@ CAUSE_BAD_VALUE = "Invalid value"
 CAUSE_DUPLICATE_IN_FILE = "Duplicate in the file"
 CAUSE_ALREADY_EXISTS = "Already in ERPNext"
 CAUSE_REJECTED = "Rejected by ERPNext"
+# An update (#34005): the row's record isn't found, is found more than once, or another row has it.
+CAUSE_NO_MATCH = "No match"
+CAUSE_MANY_MATCHES = "More than one match"
+CAUSE_SAME_RECORD = "Same record twice"
 
 
 class DryRunProblem(Exception):
@@ -277,11 +282,18 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     if engine:
         return engine.run(session_name, commit_progress=commit_progress)
     file_doc = readable_session_file(session)
+    from frappe_assistant_core.plugins.core import import_update
+
     rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
-    import_file = _parse(session, file_doc, rows)
+    matches, column_map = None, None
+    if import_update.is_update(session) and import_update.match_fields(session):
+        matches = import_update.match_records(session, rows)
+        single = {n: names[0] for n, names in matches.items() if len(names) == 1}
+        rows, column_map = import_update.with_ids(session, rows, single)
+    import_file = _parse(session, file_doc, rows, column_map)
     payloads = import_file.get_payloads_for_import()
 
-    checker = _Checker(session, import_file.header)
+    checker = _Checker(session, import_file.header, matches)
     excluded = _excluded_rows(session)
     imported = imported_rows(session)
     total = len(payloads)
@@ -300,8 +312,10 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     return _store(session_name, file_doc, checker, total)
 
 
-def _parse(session, file_doc, rows) -> ImportFile:
+def _parse(session, file_doc, rows, column_map=None) -> ImportFile:
     options = frappe._dict(frappe.parse_json(session.template_options or "{}") or {})
+    if column_map is not None:
+        options.column_to_field_map = column_map
     options.column_to_field_map = frappe._dict(options.get("column_to_field_map") or {})
     try:
         return _SessionRows(session.target_doctype, file_doc.file_url, rows, options, session.import_type)
@@ -328,7 +342,7 @@ def _excluded_rows(session) -> set:
 class _Checker:
     """Checks payloads one by one and collects the groups and the per-row list."""
 
-    def __init__(self, session, header):
+    def __init__(self, session, header, matches=None):
         self.doctype = session.target_doctype
         self.import_type = session.import_type or INSERT
         self.header = header
@@ -346,6 +360,13 @@ class _Checker:
         self.seen_keys: Dict[str, int] = {}
         self.groups: Dict[Tuple, Dict[str, Any]] = {}
         self.rows: List[Dict[str, Any]] = []
+        self.matches = matches  # None unless updating on match fields: row → matching records
+        self.seen_records: Dict[str, int] = {}
+        self.preview = {"records_changing": 0, "fields_changing": 0, "by_field": {}, "samples": []}
+        if matches is not None:
+            from frappe_assistant_core.plugins.core import import_update
+
+            self.key_label = import_update.key_label(session)
 
     def check(self, payload, excluded: set, imported: set = frozenset()) -> None:
         row_numbers = [row.row_number for row in payload.rows]
@@ -356,17 +377,64 @@ class _Checker:
             self.rows += [{"row": n, "status": "excluded"} for n in row_numbers]
             return
 
-        problems = self._parse_problems(payload)
+        problems = self._match_problems(payload) if self.matches is not None else []
+        if not problems:
+            problems = self._parse_problems(payload)
         if not problems:
             problems = self._duplicate_problems(payload)
+        record, changed = self._record(payload), []
+        if not problems and record:
+            from frappe_assistant_core.plugins.core import import_update
+
+            changed = import_update.changes(self.doctype, record, payload.doc)
+            if not changed:  # Data Import would fail it: "No changes to update"
+                self.rows += [{"row": n, "status": "unchanged", "record": record} for n in row_numbers]
+                return
         if not problems:
             problems = self._insert_problems(payload)
 
         if not problems:
-            self.rows += [{"row": n, "status": "ready"} for n in row_numbers]
+            extra = {"record": record} if record else {}
+            self.rows += [{"row": n, "status": "ready", **extra} for n in row_numbers]
+            if record:
+                self._add_to_preview(payload.rows[0].row_number, record, changed)
             return
         ids = [self._group(key, info, payload) for key, info in problems]
         self.rows += [{"row": n, "status": "failed", "groups": ids} for n in row_numbers]
+
+    # An update: the row's record, found on the match fields.
+    def _record(self, payload) -> Optional[str]:
+        if self.matches is None:
+            return None
+        names = self.matches.get(payload.rows[0].row_number) or []
+        return names[0] if len(names) == 1 else None
+
+    def _match_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
+        names = self.matches.get(payload.rows[0].row_number) or []
+        if len(names) == 1:
+            return []
+        info = {"label": self.key_label}
+        if not names:
+            message = _("No {0} has this {1}.").format(_(self.doctype), self.key_label)
+            return [((CAUSE_NO_MATCH,), {**info, "cause": CAUSE_NO_MATCH, "message": message})]
+        key = tuple(sorted(names))
+        message = _("{0} {1} records have this {2}: {3}.").format(
+            len(names), _(self.doctype), self.key_label, ", ".join(key)
+        )
+        return [
+            (
+                (CAUSE_MANY_MATCHES, *key),
+                {**info, "cause": CAUSE_MANY_MATCHES, "records": list(key), "message": message},
+            )
+        ]
+
+    def _add_to_preview(self, row: int, record: str, changed: List[Dict]) -> None:
+        self.preview["records_changing"] += 1
+        self.preview["fields_changing"] += len(changed)
+        for change in changed:
+            self.preview["by_field"][change["label"]] = self.preview["by_field"].get(change["label"], 0) + 1
+        if len(self.preview["samples"]) < SAMPLES_KEPT:
+            self.preview["samples"].append({"row": row, "record": record, "changes": changed})
 
     # Data Import's own value checks, made while it parsed the rows.
     def _parse_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
@@ -420,6 +488,20 @@ class _Checker:
         return ""
 
     def _duplicate_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
+        if self.matches is not None:  # an update: two rows for one record
+            record = self._record(payload)
+            if not record:
+                return []
+            first = self.seen_records.setdefault(record, payload.rows[0].row_number)
+            if first == payload.rows[0].row_number:
+                return []
+            message = _("Row {0} updates the same {1}, {2}.").format(first, _(self.doctype), record)
+            return [
+                (
+                    (CAUSE_SAME_RECORD,),
+                    {"cause": CAUSE_SAME_RECORD, "label": self.key_label, "message": message},
+                )
+            ]
         if not self.key_df:
             return []
         value = cstr(payload.doc.get(self.key_df.fieldname)).strip()
@@ -568,7 +650,7 @@ def held_back():
 
 def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) -> Dict[str, Any]:
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
-    counts = {"ready": 0, "failed": 0, "excluded": 0, "imported": 0}
+    counts = {"ready": 0, "failed": 0, "excluded": 0, "imported": 0, "unchanged": 0}
     for row in checker.rows:
         counts[row["status"]] += 1
     failed_rows = {row["row"] for row in checker.rows if row["status"] == "failed"}
@@ -585,6 +667,8 @@ def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) 
         "duplicate_key": checker.key_df.fieldname if checker.key_df else None,
         "groups": [_summary_group(g) for g in groups],
     }
+    if checker.matches is not None:
+        summary["update"] = checker.preview
     if previous is not None:
         summary["previous"] = {"failed": len(previous), "fixed": len(previous - failed_rows)}
 
@@ -595,8 +679,8 @@ def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) 
     session.validation_summary = frappe.as_json(summary)
     session.validated_fingerprint = fingerprint(session, file_doc)
     session.status = "Dry Run Failed" if counts["failed"] else "Ready to Import"
-    if counts["imported"] and not counts["ready"] and not counts["failed"]:
-        session.status = "Completed"  # the rest is left out: everything to import is in
+    if (counts["imported"] or counts["unchanged"]) and not counts["ready"] and not counts["failed"]:
+        session.status = "Completed"  # the rest is left out or already so: nothing left to do
     session.progress = frappe.as_json(
         {"step": "Dry Run", "state": "done", "done": total_payloads, "total": total_payloads}
     )
@@ -623,6 +707,8 @@ def headline(summary: Dict[str, Any]) -> str:
         text += _(", {0} left out").format(summary["excluded"])
     if summary.get("imported"):
         text += _(", {0} already imported").format(summary["imported"])
+    if summary.get("unchanged"):
+        text += _(", {0} unchanged").format(summary["unchanged"])
     return text + "."
 
 

@@ -354,6 +354,11 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
             "{0}: a record with this {1} is already in ERPNext, so importing would duplicate it."
         ),
         dry_run.CAUSE_REJECTED: _("{0} rejected by ERPNext: {2}"),
+        dry_run.CAUSE_NO_MATCH: _("{0}: no record has this {1}, so there is nothing to update. {2}"),
+        dry_run.CAUSE_MANY_MATCHES: _(
+            "{0}: more than one record has this {1}, so FACO can't tell which. {2}"
+        ),
+        dry_run.CAUSE_SAME_RECORD: _("{0}: another row updates the same record, so only the first can. {2}"),
     }
     template = explanations.get(cause, _("{0} would fail. {2}"))
     explanation = template.format(rows, label, group.get("message") or "").strip()
