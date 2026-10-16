@@ -24,7 +24,7 @@ from frappe.utils import get_datetime
 
 INSERT = "Insert New Records"
 UPDATE = "Update Existing Records"
-UNDO_DAYS = 30
+UNDO_DAYS = 30  # default of the site config key fac_import_undo_days
 
 
 @dataclass
@@ -39,14 +39,19 @@ class UndoProblem(Exception):
 
 
 def finished_at(session) -> datetime:
-    """When the session's last import step finished (its last successful Import step; the
-    session's modified time if it has none, as a session of created masters has not)."""
-    stamps = [
+    """When the session's last import step finished: its last successful Import step. A session
+    with no Import step (created masters only) uses its latest step of any kind, and one with
+    no steps its creation time. Step timestamps are written once, so this does not move when
+    the session is saved."""
+    imports = [
         get_datetime(s.timestamp)
         for s in session.steps
         if s.step == "Import" and s.outcome == "Success" and s.timestamp
     ]
-    return max(stamps) if stamps else get_datetime(session.modified)
+    if imports:
+        return max(imports)
+    stamps = [get_datetime(s.timestamp) for s in session.steps if s.timestamp]
+    return max(stamps) if stamps else get_datetime(session.creation)
 
 
 def _days() -> int:
@@ -115,6 +120,8 @@ def undo_set(session) -> Tuple[List[Record], List[Record], Optional[str]]:
             "import and are never deleted, so there is nothing to undo for them."
         )
 
-    present = [r for r in found if _exists(r.doctype, r.name)]
-    removed = [r for r in found if not _exists(r.doctype, r.name)]
+    present: List[Record] = []
+    removed: List[Record] = []
+    for record in found:
+        (present if _exists(record.doctype, record.name) else removed).append(record)
     return present, removed, note

@@ -155,5 +155,26 @@ class TestRefusal(UndoCase):
         with patch.dict(frappe.conf, {"fac_import_undo_days": 30}):
             doc = self._doc(session)
             self.assertEqual(import_undo.refusal(doc), "")
-            self.assertEqual(import_undo.finished_at(doc), doc.steps[-1].timestamp)
+            last_import = [s for s in doc.steps if s.step == "Import"][-1]
+            self.assertEqual(import_undo.finished_at(doc), last_import.timestamp)
             self.assertEqual(import_undo.window_ends(doc), import_undo.finished_at(doc) + timedelta(days=30))
+
+    def test_a_masters_only_session_is_measured_from_its_last_step_and_does_not_move_on_save(self):
+        session, _names = self._session_with_groups()
+        doc = self._doc(session)
+        self.assertFalse([s for s in doc.steps if s.step == "Import"])
+        expected = max(s.timestamp for s in doc.steps)
+        self.assertEqual(import_undo.finished_at(doc), expected)
+
+        frappe.db.set_value("FAC Import Session", session, "modified", add_to_date(now_datetime(), days=2))
+        doc = self._doc(session)
+        doc.save()
+
+        self.assertEqual(import_undo.finished_at(self._doc(session)), expected)
+
+    def test_a_session_with_no_steps_is_measured_from_its_creation(self):
+        session = self._blank_session()
+        doc = self._doc(session)
+        doc.steps = []
+
+        self.assertEqual(import_undo.finished_at(doc), doc.creation)
