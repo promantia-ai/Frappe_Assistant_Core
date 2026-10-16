@@ -367,3 +367,74 @@ class TestUpdateFieldPermissions(UpdateCase):
 
         self.assertNotIn("https://a.example", json.dumps(result, default=str))
         self.assertEqual(result["update"]["records_changing"], 0)
+
+
+class TestUpdateRun(UpdateCase):
+    def _ready(self, lines):
+        session, mapped = self._session(lines)
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        return session, checked
+
+    def _update(self, session, checked):
+        return self._run(
+            "start_import",
+            {"session": session, "doctype": "Customer", "rows": checked["ready"], "import_type": UPDATE},
+        )
+
+    def test_an_approved_update_changes_the_records_through_data_import(self):
+        session, checked = self._ready(
+            [
+                f"tax-a-{self.tag},{self.group},https://new-a.example",
+                f"TAX-B-{self.tag},{self.group},https://b.example",
+            ]
+        )
+
+        response = self._update(session, checked)
+
+        self.assertTrue(response["success"], response)
+        a = frappe.db.get_value("Customer", self.customers["a"], ["website", "tax_id"])
+        self.assertEqual(a, ("https://new-a.example", f"TAX-A-{self.tag}"))  # the key isn't rewritten
+        di = frappe.get_doc("Data Import", response["result"]["data_import"])
+        self.assertEqual(di.import_type, UPDATE)
+        self.assertIn("Updated 1 Customer records", response["result"]["message"])
+        self.assertEqual(self._doc(session).status, "Completed")
+
+    def test_the_update_changes_the_records_the_check_matched(self):
+        session, checked = self._ready([f"TAX-A-{self.tag},{self.group},https://new-a.example"])
+        # after the check, another customer takes the same tax ID: the approved record is still the one
+        frappe.db.set_value("Customer", self.customers["b"], "tax_id", f"TAX-A-{self.tag}")
+
+        self._update(session, checked)
+
+        self.assertEqual(
+            frappe.db.get_value("Customer", self.customers["a"], "website"), "https://new-a.example"
+        )
+        self.assertEqual(frappe.db.get_value("Customer", self.customers["b"], "website"), "https://b.example")
+
+    def test_a_record_deleted_since_the_check_fails_and_mig09_lists_it(self):
+        session, checked = self._ready(
+            [
+                f"TAX-A-{self.tag},{self.group},https://new-a.example",
+                f"TAX-B-{self.tag},{self.group},https://new-b.example",
+            ]
+        )
+        frappe.delete_doc("Customer", self.customers["b"], force=True)
+
+        with self._each_row_commits():
+            response = self._update(session, checked)
+
+        result = response["result"]
+        self.assertEqual((result["created"], result["failed"]), (1, 1), result)
+        self.assertEqual(self._doc(session).status, "Partially Completed")
+        failed = self._run("dry_run_import", {"session": session, "failed_rows_file": True})
+        self.assertTrue(failed["success"], failed)
+
+    def test_nothing_to_update_starts_no_data_import(self):
+        session, checked = self._ready([f"TAX-A-{self.tag},{self.group},https://a.example"])
+
+        self.assertIn("Nothing to update", checked["message"])
+        response = self._update(session, checked)
+
+        self.assertFalse(response["success"], response)
+        self.assertFalse(self._doc(session).data_imports)
