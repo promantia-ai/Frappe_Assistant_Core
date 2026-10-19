@@ -230,6 +230,15 @@
     "content_file": "undo_import.md"
   },
   {
+    "skill_id": "migrate-data",
+    "title": "Migrate Data",
+    "description": "Use when the user wants to migrate data into ERPNext or import a file: \"migrate my data\", \"import my customers\", \"import my items\", \"bring my data from Tally\" or another system, \"load my opening stock\" or opening balances, or attaches a spreadsheet to import. Follow its workflow every time: session, mapping, cleaning, dry run, fixes, import, failed rows, report.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "migrate_data.md"
+  },
+  {
     "skill_id": "migration-sign-off",
     "title": "Migration Sign-off",
     "description": "Use when asked what a data migration brought in, for a migration or sign-off report, whether the business can go live, or for a PDF of it: run the Migration Sign-off report over all of the user's sessions, relay its numbers as they are, and always make its PDF with generate_document.",
