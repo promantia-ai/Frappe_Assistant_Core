@@ -188,7 +188,7 @@ Give the user the `download_url`. The file has the user's own columns (with the 
 
 ### The corrected file
 
-When the user uploads the corrected file, pass its `file_id` (or `file_url`). It must keep the same columns; the two added ones may stay, and are not imported. It becomes the session's file and is **checked like any file**, so nothing goes in unchecked: a row already imported that came back in it fails as **Already in ERPNext**, so it can't be imported twice. Then `start_import` imports it as another Data Import of the same session.
+When the user uploads the corrected file, pass its `file_id` (or `file_url`). It must keep the same columns; the two added ones may stay, and are not imported. It becomes the session's file and is **checked like any file**, so nothing goes in unchecked. A row that is the same as one an earlier file of the session imported counts as **imported** and is skipped, so the user may send the whole file again (or the same Google Sheet) with only the failed rows fixed. A row that was imported and then **changed** is a new row: for records with a key column it fails as **Already in ERPNext**, but for records with none (Address, Contact) it would be imported again, so tell the user to change only the rows that didn't go in, or to use the failed-rows file. Then `start_import` imports it as another Data Import of the same session.
 
 ## Opening stock
 

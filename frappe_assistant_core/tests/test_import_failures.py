@@ -456,18 +456,65 @@ class TestImportFailures(ImportRunCase):
         # Rows 2 and 3 of the corrected file aren't rows 2 and 5 the first file imported.
         self.assertEqual((result["ready"], result["imported"]), (2, 0), result)
 
-    def test_a_corrected_file_that_brings_back_an_imported_row_is_stopped_by_the_check(self):
+    def test_a_corrected_file_that_brings_back_a_changed_imported_row_is_stopped_by_the_check(self):
         session, _checked, _first = self._partly_imported()
         n = self._names()
         _out, _file_doc, rows = self._failed_rows(session)
         rows[1][1] = rows[2][1] = self.group
-        rows.append([n["alpha"], self.group, "Company", "2", ""])  # already imported
+        # Already imported, then changed: not the row imported, so the duplicate check stops it
+        # (one brought back as it was is skipped as imported: see the next test).
+        rows.append([n["alpha"], self.group, "Individual", "2", ""])
         corrected = self._csv("corrected.csv", rows)
 
         result = self._check(session, file_url=corrected.file_url)
 
         self.assertEqual((result["status"], result["failed"]), ("Dry Run Failed", 1), result)
         self.assertEqual(result["groups"][0]["cause"], "Already in ERPNext")
+
+    def test_a_whole_file_sent_again_does_not_bring_in_its_imported_rows_twice(self):
+        # Address has no key column, so "Already in ERPNext" can't stop a row that came back:
+        # the rows an earlier file of the session imported are known by their content instead.
+        t = self.tag
+        mapping = {
+            "Address Title": "address_title",
+            "Address Type": "address_type",
+            "Address Line 1": "address_line1",
+            "City": "city",
+            "Country": "country",
+        }
+        rows = [
+            list(mapping),
+            [f"Head {t}", "Billing", "1 Main Rd", "Pune", "India"],
+            [f"Store {t}", "Shipping", "2 Mall Rd", "", "India"],  # row 3: no city
+            [f"Depot {t}", "Shipping", "3 Port Rd", "Mumbai", "India"],
+        ]
+        session = self._run("start_import_session", {"file_url": self._csv("addresses.csv", rows).file_url})
+        session = session["result"]["session_id"]
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Address"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._check(session)
+        fixes = [{"group": g["id"], "action": "leave_out", "reason": "no city"} for g in checked["groups"]]
+        checked = self._check(session, fixes=fixes)
+        self.assertEqual((checked["status"], checked["ready"]), ("Ready to Import", 2), checked)
+        with self._each_row_commits():
+            self.assertTrue(self._import(session, checked, doctype="Address")["success"])
+        count = lambda: frappe.db.count("Address", {"address_title": ["like", f"% {t}"]})  # noqa: E731
+        self.assertEqual(count(), 2)
+
+        # The user fills the city in their sheet and sends the whole file again (or the same
+        # Google Sheet is fetched again): a new file, whose other two rows are already in.
+        rows[2][3] = "Nashik"
+        result = self._check(session, file_id=self._csv("addresses-again.csv", rows).name)
+
+        self.assertEqual(
+            (result["status"], result["ready"], result["imported"]), ("Ready to Import", 1, 2), result
+        )
+        with self._each_row_commits():
+            response = self._import(session, result, doctype="Address")
+        self.assertTrue(response["success"], response)
+        self.assertEqual(count(), 3)
 
     def test_a_corrected_file_must_keep_the_columns(self):
         session, _checked, _first = self._partly_imported()

@@ -13,9 +13,10 @@ to the user as a file to correct.
 A session's rows already imported are the ones in a success log of a Data Import made from
 its current file. The dry run skips them and the next Data Import blanks them, so trying
 again imports only the rest, from a new file with the fixes made since, and never touches a
-record already in. A corrected file the user uploads is the session's file from then on: its
-rows are new, so none of them counts as imported, and the dry run's duplicate check stops
-one that is.
+record already in. A corrected file the user uploads (or a Google Sheet fetched again) is the
+session's file from then on: a row of it that is the same as one an earlier file imported
+counts as imported too, since a record with no key column (an Address) can't be stopped by
+the dry run's duplicate check.
 
 Every Data Import stays linked to the session, so the report covers every run.
 """
@@ -23,6 +24,7 @@ Every Data Import stays linked to the session, so the report covers every run.
 import csv
 import io
 import json
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 import frappe
@@ -61,12 +63,7 @@ def imports_of_this_file(session) -> List[str]:
     return names
 
 
-def imported_rows(session) -> set:
-    """Rows of the session's current file already imported: in a success log of a Data
-    Import made from it (every row of a record spread over several)."""
-    names = imports_of_this_file(session)
-    if not names:
-        return set()
+def _success_rows(names: List[str]) -> set:
     rows = set()
     for indexes in frappe.get_all(
         "Data Import Log",
@@ -75,6 +72,72 @@ def imported_rows(session) -> set:
     ):
         rows.update(json.loads(indexes or "[]"))
     return rows
+
+
+def imported_rows(session) -> set:
+    """Rows of the session's current file already imported: in a success log of a Data
+    Import made from it (every row of a record spread over several), or brought back from an
+    earlier file of the session (see came_back)."""
+    names = imports_of_this_file(session)
+    return (_success_rows(names) if names else set()) | came_back(session)
+
+
+def _row_key(header: List[str], row: List[str]) -> tuple:
+    """A row as the user's own columns hold it: header and text, whatever their order."""
+    return tuple(
+        sorted(
+            (cstr(name).strip(), cstr(row[i]).strip() if i < len(row) else "")
+            for i, name in enumerate(own_columns(header))
+        )
+    )
+
+
+def came_back(session) -> set:
+    """Rows of the session's current file that a Data Import from an earlier file of the
+    session already brought in: the same text in each of the user's columns, read from that
+    import's own file (value maps applied, as here). A record with no key column, an Address
+    say, can't be stopped as "Already in ERPNext", so without this a whole file sent again
+    would import it twice. Each row imported counts once: two equal rows of the new file aren't
+    both taken for one imported earlier."""
+    earlier = [
+        link.data_import
+        for link in session.data_imports
+        if link.source_file and link.source_file != session.source_file
+    ]
+    seen: Counter = Counter()
+    for name in dict.fromkeys(earlier):
+        success = _success_rows([name])
+        rows = _import_file_rows(name) if success else []
+        for number in success:
+            if 2 <= number <= len(rows):
+                seen[_row_key(rows[0], rows[number - 1])] += 1
+    if not seen:
+        return set()
+    current = import_fixes.apply_value_maps(
+        session, read_sheet_rows(readable_session_file(session), session.sheet or None)
+    )
+    rows = set()
+    for number, row in enumerate(current[1:], start=2):
+        key = _row_key(current[0], row)
+        if seen[key] > 0 and any(text for _name, text in key):
+            seen[key] -= 1
+            rows.add(number)
+    return rows
+
+
+def _import_file_rows(data_import: str) -> List[List[str]]:
+    """The rows of the file a Data Import imported: the session's sheet as FAC cleaned it, with
+    the rows it didn't import blanked, so its row numbers are the success logs'."""
+    file_url = frappe.db.get_value("Data Import", data_import, "import_file")
+    files = frappe.get_all(
+        "File",
+        filters={"file_url": file_url, "attached_to_doctype": "Data Import", "attached_to_name": data_import},
+        pluck="name",
+        limit=1,
+    )
+    if not file_url or not files:
+        return []
+    return read_sheet_rows(frappe.get_doc("File", files[0]), None)
 
 
 # -- explaining what failed -----------------------------------------------------------------
