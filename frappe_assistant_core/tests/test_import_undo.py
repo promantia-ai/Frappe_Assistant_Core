@@ -50,11 +50,15 @@ class UndoCase(ImportRunCase):
         file_doc = self._file("customers.csv", ("\n".join(lines) + "\n").encode())
         session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
         self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+        # The check lists at most 50 missing masters; once those exist, the next check lists the rest.
         checked = self._run("dry_run_import", {"session": session})["result"]
-        documents = [{"doctype": m["doctype"], "data": m["data"]} for m in checked["masters_plan"]]
-        created = self._run("create_document", {"documents": documents, "import_session": session})
-        self.assertTrue(created["success"], created)
-        return session, names
+        while True:
+            documents = [{"doctype": m["doctype"], "data": m["data"]} for m in checked["masters_plan"]]
+            created = self._run("create_document", {"documents": documents, "import_session": session})
+            self.assertTrue(created["success"], created)
+            if not checked.get("masters_plan_total"):
+                return session, names
+            checked = self._run("dry_run_import", {"session": session})["result"]
 
     def _session_with_customers(self):
         session, checked = self._ready_session()
