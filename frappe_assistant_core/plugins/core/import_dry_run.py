@@ -22,6 +22,7 @@ grouped summary.
 
 import copy
 import hashlib
+import importlib
 import json
 import re
 import threading
@@ -894,10 +895,40 @@ def _message_of(e: Exception) -> str:
 _HELD_FUNCTIONS = (
     (frappe, "enqueue"),
     (frappe.utils.background_jobs, "enqueue"),
+    # A Server Script's frappe.enqueue: safe_exec took its own copy of enqueue on import
+    ("frappe.utils.safe_exec", "enqueue"),
     (frappe, "publish_realtime"),
     (frappe.realtime, "publish_realtime"),
 )
+#: Doc-event handlers that reach an outside service while the row is tried, held back with it:
+#: the Google Calendar and Google Contacts sync call Google at once, not at commit, and would change
+#: the user's real events and contacts, and email attendees.
+SENT_AT_ONCE = {
+    "frappe.integrations.doctype.google_calendar.google_calendar": (
+        "insert_event_in_google_calendar",
+        "update_event_in_google_calendar",
+        "delete_event_from_google_calendar",
+    ),
+    "frappe.integrations.doctype.google_contacts.google_contacts": (
+        "insert_contacts_to_google_contacts",
+        "update_contacts_to_google_contacts",
+    ),
+}
 _HOLD_LOCK = threading.Lock()
+
+
+def _held_functions() -> List[Tuple[Any, str]]:
+    """(owner, name) of every function held_back() holds back, of the modules this site has."""
+    held = []
+    for owner, name in _HELD_FUNCTIONS:
+        held.append((importlib.import_module(owner) if isinstance(owner, str) else owner, name))
+    for module, functions in SENT_AT_ONCE.items():
+        try:
+            owner = importlib.import_module(module)
+        except ImportError:
+            continue
+        held += [(owner, name) for name in functions if hasattr(owner, name)]
+    return held
 
 
 def _hold_aware(original):
@@ -916,7 +947,7 @@ def _hold_aware(original):
 def _install_hold_aware() -> None:
     """Put the hold-aware stand-ins in place, once: any other request still gets the real thing."""
     with _HOLD_LOCK:
-        for owner, name in _HELD_FUNCTIONS:
+        for owner, name in _held_functions():
             current = getattr(owner, name)
             if getattr(current, "fac_hold_aware", False) is not True:  # a Mock answers any attribute
                 setattr(owner, name, _hold_aware(current))

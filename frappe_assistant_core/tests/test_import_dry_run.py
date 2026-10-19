@@ -352,6 +352,33 @@ class TestDryRunImport(BaseAssistantTest):
 
     # -- side effects are held back ------------------------------------------------------------------
 
+    def test_a_server_scripts_job_is_held_back(self):
+        # A Server Script's frappe.enqueue is safe_exec's own copy of enqueue
+        from frappe.utils import safe_exec
+
+        with patch.object(safe_exec, "enqueue", autospec=True) as real_enqueue:
+            with import_dry_run.held_back():
+                safe_exec.safe_enqueue("frappe.ping")
+            real_enqueue.assert_not_called()
+
+    def test_the_google_calendar_sync_of_a_row_is_held_back(self):
+        # Frappe's doc events call Google at once when an Event is saved, not at commit
+        from frappe.integrations.doctype.google_calendar import google_calendar
+
+        with patch.object(google_calendar, "insert_event_in_google_calendar", autospec=True) as sync:
+            with import_dry_run.held_back():
+                frappe.db.savepoint("fac_test_google")
+                frappe.get_doc(
+                    {
+                        "doctype": "Event",
+                        "subject": "Held back",
+                        "event_type": "Private",
+                        "starts_on": frappe.utils.now_datetime(),
+                    }
+                ).insert()
+                frappe.db.rollback(save_point="fac_test_google")
+            sync.assert_not_called()
+
     def test_held_back_swallows_commits_jobs_and_events_then_restores_them(self):
         frappe.db.after_commit.add(print)
         with (
