@@ -49,7 +49,11 @@ class DryRunImport(BaseTool):
             "in the chat, ask the user to upload it in File Manager (or attach it in FAC Chat) and "
             "pass its file_id; the user must be allowed to read it. A different file passed as "
             "file_id or file_url puts back the rows left out before. Each group comes with a plain "
-            "explanation and the fixes that fit it: explain it and offer only those fixes. Then "
+            "explanation and the fixes that fit it: explain it and offer only those fixes. For an Update "
+            "Existing Records session the reply also has update: records_changing, fields_changing, "
+            "by_field (how many records change each field) and up to 5 samples with each field's old "
+            "and new value: show the user those as a table before asking to import. Rows that change "
+            "nothing are counted in unchanged and skipped. Then "
             "call again with the user's choices in fixes: they are saved on the session and every "
             "row is checked again. Per group: 'map' a value to an existing one ('to': one of the "
             "group's 'closest' names, or one the user gives; never invent one), or 'leave_out' "
@@ -67,7 +71,15 @@ class DryRunImport(BaseTool):
         )
         self.requires_permission = None  # checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)
-        self.untrusted_fields = ("groups", "masters_plan", "left_out", "problems", "applied", "error")
+        self.untrusted_fields = (
+            "groups",
+            "masters_plan",
+            "left_out",
+            "problems",
+            "applied",
+            "update",
+            "error",
+        )
 
         self.inputSchema = {
             "type": "object",

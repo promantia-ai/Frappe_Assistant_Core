@@ -354,6 +354,11 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
             "{0}: a record with this {1} is already in ERPNext, so importing would duplicate it."
         ),
         dry_run.CAUSE_REJECTED: _("{0} rejected by ERPNext: {2}"),
+        dry_run.CAUSE_NO_MATCH: _("{0}: no record has this {1}, so there is nothing to update. {2}"),
+        dry_run.CAUSE_MANY_MATCHES: _(
+            "{0}: more than one record has this {1}, so FACO can't tell which. {2}"
+        ),
+        dry_run.CAUSE_SAME_RECORD: _("{0}: another row updates the same record, so only the first can. {2}"),
     }
     template = explanations.get(cause, _("{0} would fail. {2}"))
     explanation = template.format(rows, label, group.get("message") or "").strip()
@@ -910,6 +915,27 @@ def last_groups(session) -> Dict[str, Dict[str, Any]]:
 
 def ready_message(summary: Dict[str, Any]) -> str:
     """What FACO says once nothing fails: the file is ready, with the final count."""
+    update = summary.get("update")
+    if update is not None:  # an update (#34005): records that change, and rows that wouldn't
+        if not summary["ready"]:
+            return _("Nothing to update: every matched record already has the file's values.")
+        text = _("The file is ready: {0} will be updated ({1}).").format(
+            _("1 record") if summary["ready"] == 1 else _("{0} records").format(summary["ready"]),
+            _("1 field change")
+            if update["fields_changing"] == 1
+            else _("{0} field changes").format(update["fields_changing"]),
+        )
+        if summary.get("unchanged"):
+            text += " " + (
+                _("1 row already has these values and is skipped.")
+                if summary["unchanged"] == 1
+                else _("{0} rows already have these values and are skipped.").format(summary["unchanged"])
+            )
+        if summary.get("excluded"):
+            text += " " + _("{0} left out; the import report will list them.").format(
+                _rows(summary["excluded"])
+            )
+        return text
     if summary.get("imported") and not summary["ready"]:
         text = _("Nothing is left to import: {0} already imported").format(_rows(summary["imported"]))
         if summary.get("excluded"):

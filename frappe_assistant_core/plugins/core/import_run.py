@@ -36,7 +36,7 @@ from frappe.utils.background_jobs import enqueue, is_job_enqueued
 from frappe.utils.scheduler import is_scheduler_inactive
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes
+from frappe_assistant_core.plugins.core import import_failures, import_fixes, import_update
 from frappe_assistant_core.plugins.core.import_session import (
     import_target_problem,
     read_sheet_rows,
@@ -60,9 +60,9 @@ class ImportProblem(Exception):
 # -- can it run --------------------------------------------------------------------------
 
 
-def cannot_import(doctype: str) -> str:
+def cannot_import(doctype: str, import_type: str = INSERT) -> str:
     """Why the current user can't import into ``doctype`` now, or "" when they can."""
-    problem = import_target_problem(doctype)
+    problem = import_target_problem(doctype, import_type)
     if problem:
         return problem
     if not frappe.has_permission("Data Import", "create"):
@@ -126,7 +126,7 @@ def start(session) -> str:
     frappe.db.savepoint(START_SAVEPOINT)
     file_doc = None
     try:
-        file_doc = _cleaned_file(session, earlier)
+        file_doc, column_map = _cleaned_file(session, earlier)
         # Saving it attaches the file to it, as Frappe does for an Attach field.
         data_import = frappe.get_doc(
             {
@@ -134,9 +134,7 @@ def start(session) -> str:
                 "reference_doctype": session.target_doctype,
                 "import_type": session.import_type or INSERT,
                 "import_file": file_doc.file_url,
-                "template_options": frappe.as_json(
-                    {"column_to_field_map": dry_run.column_to_field_map(session)}
-                ),
+                "template_options": frappe.as_json({"column_to_field_map": column_map}),
                 "mute_emails": 1,
                 "submit_after_import": session.submit_after_import,
             }
@@ -237,13 +235,25 @@ def _remove_from_disk(file_doc) -> None:
 def _cleaned_file(session, earlier: List[str]):
     """The session's sheet as a private CSV: value maps applied, records left out or already
     imported blanked (every row of them, so no child row is left to join another record). It
-    is saved unattached, for the Data Import made from it to take."""
+    is saved unattached, for the Data Import made from it to take. Returns it with the column
+    map that Data Import uses: an update's adds the ID column (#34005)."""
     source = readable_session_file(session)
     rows = import_fixes.apply_value_maps(session, read_sheet_rows(source, session.sheet or None))
+    column_map = dry_run.column_to_field_map(session)
+    if import_update.is_update(session) and import_update.match_fields(session):
+        # The records the check matched, not a new match: the user approved these.
+        records = import_update.checked_records(session)
+        if not records:
+            raise ImportProblem(_("Nothing to update: every matched record already has the file's values."))
+        width = len(rows[0])
+        rows = [rows[0]] + [
+            row if number in records else [""] * width for number, row in enumerate(rows[1:], start=2)
+        ]
+        rows, column_map = import_update.with_ids(session, rows, records)
     excluded = dry_run._excluded_rows(session)
     imported = import_failures.imported_rows(session)
     left_out = set()
-    payloads = dry_run._parse(session, source, rows).get_payloads_for_import()
+    payloads = dry_run._parse(session, source, rows, column_map).get_payloads_for_import()
     for payload in payloads:
         numbers = {row.row_number for row in payload.rows}
         if numbers & (excluded | imported):
@@ -264,7 +274,11 @@ def _cleaned_file(session, earlier: List[str]):
 
     # Data Import refuses the whole file for one value it can't use, so stop here if any row
     # would now fail that way (a master deleted since the check, say).
-    warnings = [w for w in dry_run._parse(session, source, cleaned).get_warnings() if w.get("type") != "info"]
+    warnings = [
+        w
+        for w in dry_run._parse(session, source, cleaned, column_map).get_warnings()
+        if w.get("type") != "info"
+    ]
     if warnings:
         raise ImportProblem(
             _(
@@ -274,7 +288,7 @@ def _cleaned_file(session, earlier: List[str]):
 
     buffer = io.StringIO()
     csv.writer(buffer, lineterminator="\n").writerows([[cstr(value) for value in row] for row in cleaned])
-    return frappe.get_doc(
+    file_doc = frappe.get_doc(
         {
             "doctype": "File",
             "file_name": f"{session.name}-import.csv",
@@ -282,6 +296,7 @@ def _cleaned_file(session, earlier: List[str]):
             "is_private": 1,
         }
     ).insert()
+    return file_doc, column_map
 
 
 def _warning_text(warning: Dict[str, Any]) -> str:

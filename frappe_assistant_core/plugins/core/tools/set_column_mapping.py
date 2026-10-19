@@ -25,6 +25,7 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
+from frappe_assistant_core.plugins.core import import_update
 from frappe_assistant_core.plugins.core.import_mapping import (
     DONT_IMPORT,
     SESSION_DOCTYPE,
@@ -90,6 +91,18 @@ class SetColumnMapping(BaseTool):
                     "type": "string",
                     "description": "The target DocType. Needed the first time; changing it clears the mapping.",
                 },
+                "import_type": {
+                    "type": "string",
+                    "enum": ["Insert New Records", "Update Existing Records"],
+                    "description": "Change the session's import type. Default: keep it.",
+                },
+                "match_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For Update Existing Records: the field(s) that find each row's "
+                    "record, e.g. ['tax_id'] or ['item_code', 'price_list']. Each must be mapped from "
+                    "a column. Not needed when a column is mapped to the ID ('name').",
+                },
             },
             "required": ["session", "mapping"],
         }
@@ -127,8 +140,9 @@ class SetColumnMapping(BaseTool):
                     "error": "This session has no target DocType yet. Pass doctype, e.g. 'Customer'.",
                 }
 
+            import_type = arguments.get("import_type") or doc.import_type or "Insert New Records"
             # Before any work: the user must be able to import into the target.
-            problem = import_target_problem(target)
+            problem = import_target_problem(target, import_type)
             if problem:
                 return {"success": False, "error": problem, "doctype": target}
 
@@ -141,6 +155,13 @@ class SetColumnMapping(BaseTool):
             resolved, problems = resolve_mapping(target, schema, headers, mapping)
             merged = {**existing, **resolved}
             problems += duplicate_targets(merged, headers)
+            match_key = ""
+            if import_type == import_update.UPDATE:
+                match_on, update_problems = import_update.mapping_problems(
+                    target, merged, headers, arguments.get("match_on") or []
+                )
+                problems += update_problems
+                match_key = ",".join(match_on)
             if problems:
                 return {
                     "success": False,
@@ -150,6 +171,8 @@ class SetColumnMapping(BaseTool):
                 }
 
             described = describe_mapping(schema, headers, merged)
+            doc.import_type = import_type
+            doc.match_key = match_key
             save_mapping(doc, target, merged, described["summary"])
             return {
                 "success": True,

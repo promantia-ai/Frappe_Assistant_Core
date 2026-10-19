@@ -15,6 +15,8 @@ What goes in is exactly what was checked: the session's sheet, with the value ma
 | `rows` | integer | **Yes** | Rows to import: the last check's `ready` |
 | `import_type` | string | **Yes** | `Insert New Records` or `Update Existing Records`, as the last check said |
 
+For an update, `rows` is the check's `ready` (records that change). The update changes exactly the records the check matched, never a new match, and the result says "Updated N … records". Rows that change nothing were skipped at the check.
+
 The approval card shows `doctype`, `rows` and `import_type`, so the user sees what goes in. They must match the last check, or nothing is imported.
 
 ## Workflow

@@ -30,7 +30,7 @@ Other parameters:
 |-----------|------|----------|-------------|
 | `sheet` | string | No | For a file on this site: the sheet to use. Default: the first sheet with rows. For `file_name`: the sheet you read. |
 | `target_doctype` | string | No | DocType the rows become, if already known. The user's permission to import into it is checked **before** anything else. |
-| `import_type` | string | No | `Insert New Records` (default) or `Update Existing Records`. |
+| `import_type` | string | No | `Insert New Records` (default) or `Update Existing Records` to change existing records: see set_column_mapping's `match_on`. |
 
 Supported files: `.csv`, `.xlsx`, `.xls`. **Row 1 must hold the column headers.** One file holds one kind of record, e.g. customers.
 

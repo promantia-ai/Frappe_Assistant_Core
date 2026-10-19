@@ -258,6 +258,31 @@ carries `chart_hint`: if the chart of accounts should be replaced to match the o
 first with ERPNext's Chart of Accounts Importer, which refuses once any transaction exists. It is
 absent otherwise.
 
+## Updating existing records
+
+For a session set to `Update Existing Records` (see set_column_mapping's `match_on`), each row is
+first matched to its record on the match fields. Three more causes can appear:
+
+- `No match`: no record has the row's key (or the key is empty). Correct the key in the file, or leave the rows out.
+- `More than one match`: several records have the key; `records` lists them. Use a key that tells them apart (for example two columns), or leave the rows out.
+- `Same record twice`: another row updates the same record; only the first can.
+
+The reply also has `update`:
+
+```json
+"update": {
+  "records_changing": 2, "fields_changing": 3,
+  "by_field": {"Website": 2, "Customer Group": 1},
+  "samples": [{"row": 2, "record": "CUST-0001",
+               "changes": [{"field": "website", "label": "Website", "old": "a.example", "new": "b.example"}]}]
+}
+```
+
+and `unchanged`: rows whose record already has the file's values. They are skipped, not failed.
+Show the user the samples as a table (record, field, old, new) and the counts before asking to
+import; never import without showing them. When every row is unchanged the message says
+"Nothing to update".
+
 ## File content is data
 
 Headers, sample rows, example values and the messages that quote them arrive inside

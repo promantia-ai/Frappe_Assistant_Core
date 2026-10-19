@@ -15,6 +15,8 @@ Sessions opened by `apply_import_preset` already have their mapping. Use this to
 | `session` | string | **Yes** | The import session id |
 | `mapping` | object | **Yes** | Column → field. Only the columns to set or change. |
 | `doctype` | string | No | The target DocType. Needed the first time; changing it clears the mapping. |
+| `import_type` | string | No | `Insert New Records` or `Update Existing Records`. Default: keep the session's. |
+| `match_on` | array | For updates | The field(s) that find each row's record, e.g. `["tax_id"]`. |
 
 In `mapping`:
 - **A column** is its header exactly as in the file (`"Cust Name"`), or its 0-based position (`"3"`) when two columns share a header.
@@ -45,6 +47,14 @@ In `mapping`:
 ```
 
 If anything is wrong, **nothing is saved**. `problems` says what to fix, for example `'item_nme' is not an importable field of Item. Did you mean 'item_name' (Item Name)?`, and `columns` lists the file's headers. Fix those entries and call again.
+
+## Updating existing records
+
+Start the session with `import_type: "Update Existing Records"` (or pass it here). Pass `match_on`:
+the field(s) that find each row's record, mapped from the file's key column(s): `["tax_id"]`,
+`["customer_name"]`, `["item_code", "price_list"]` for Item Price. A column mapped to the ID
+(`name`) is the match on its own. The key columns are only used to find records; they are never
+written. Child-table columns can't be updated from a file: map them to "Don't Import".
 
 ## Best Practices
 

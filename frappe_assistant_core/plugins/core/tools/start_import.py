@@ -91,7 +91,9 @@ class StartImport(BaseTool):
             import_run.check_card(
                 session, arguments.get("doctype"), arguments.get("rows"), arguments.get("import_type")
             )
-            problem = import_run.cannot_import(session.target_doctype)
+            problem = import_run.cannot_import(
+                session.target_doctype, session.import_type or "Insert New Records"
+            )
             if problem:
                 raise import_run.ImportProblem(problem)
             if session.status == "Completed":

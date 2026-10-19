@@ -394,11 +394,11 @@ def row_limit_problem(row_count: int) -> Optional[str]:
 # -- target DocType ----------------------------------------------------------------
 
 
-def import_target_problem(doctype: str) -> Optional[str]:
+def import_target_problem(doctype: str, import_type: str = "Insert New Records") -> Optional[str]:
     """Why the current user cannot import into ``doctype``, or None when they can.
 
     Data Import itself requires the DocType to allow import and the user to hold
-    Import permission on it; inserting each row also needs Create.
+    Import permission on it; inserting each row also needs Create, updating needs Write.
     """
     if not frappe.db.exists("DocType", doctype):
         return _("DocType {0} does not exist.").format(doctype)
@@ -410,7 +410,12 @@ def import_target_problem(doctype: str) -> Optional[str]:
         return _("{0} is a single settings record, not a list, so it can't be imported.").format(doctype)
     if not meta.allow_import:
         return _("{0} can't be imported: Allow Import is turned off for it.").format(doctype)
-    if not frappe.has_permission(doctype, "create"):
+    if import_type == "Update Existing Records":
+        if not frappe.has_permission(doctype, "write"):
+            return _("You don't have permission to change {0} records, so you can't update them.").format(
+                doctype
+            )
+    elif not frappe.has_permission(doctype, "create"):
         return _("You don't have permission to create {0} records, so you can't import them.").format(doctype)
     if not frappe.has_permission(doctype, "import"):
         return _(

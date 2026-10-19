@@ -134,7 +134,7 @@ class StartImportSession(BaseTool):
 
         # Refuse before any work when the user could never import the result.
         if target_doctype:
-            problem = import_target_problem(target_doctype)
+            problem = import_target_problem(target_doctype, import_type)
             if problem:
                 return {"success": False, "error": problem, "target_doctype": target_doctype}
 
