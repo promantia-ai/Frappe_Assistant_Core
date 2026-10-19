@@ -15,6 +15,7 @@ Frappe's own ToDo (anyone may create one; its description goes to global search)
 test_document_tools.
 """
 
+import os
 from unittest.mock import patch
 
 import frappe
@@ -310,6 +311,32 @@ class TestDocumentBatch(BaseAssistantTest):
         self.assertFalse(response["success"], response)
         self.assertIn("Document 2 (ToDo", response["result"]["error"])
         self.assertEqual(frappe.db.get_value("ToDo", first, "description"), f"Keep me {self.tag}")
+
+    def test_a_failed_update_list_puts_a_moved_file_back(self):
+        # Making a File public moves it on disk, and Frappe moves it back after a rollback
+        file_doc = frappe.get_doc(
+            {"doctype": "File", "file_name": f"batch-{self.tag}.txt", "content": b"secret", "is_private": 1}
+        ).insert()
+        (todo,) = self._make_todos("Keep me")
+        try:
+            response = self._run(
+                "update_document",
+                {
+                    "documents": [
+                        {"doctype": "File", "name": file_doc.name, "data": {"is_private": 0}},
+                        {"doctype": "ToDo", "name": todo, "data": {"status": "Not A Status"}},
+                    ]
+                },
+            )
+
+            self.assertFalse(response["success"], response)
+            file_doc.reload()
+            self.assertEqual(file_doc.is_private, 1)
+            self.assertTrue(os.path.exists(file_doc.get_full_path()), file_doc.get_full_path())
+            public = frappe.get_site_path("public", "files", f"batch-{self.tag}.txt")
+            self.assertFalse(os.path.exists(public), "the file is still served publicly")
+        finally:
+            frappe.delete_doc("File", file_doc.name, force=True, ignore_permissions=True)
 
     def test_an_update_list_is_checked_before_anything_is_written(self):
         (first,) = self._make_todos("Keep me")
