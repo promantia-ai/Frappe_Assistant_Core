@@ -56,6 +56,7 @@ FULL_SCAN = 2000  # rank every record when a DocType has at most this many
 WORD_MATCHES = 200  # else only records sharing a word with the value, this many per word
 GROUPS_SHOWN = 30  # the dry run's reply lists this many groups; the results file keeps them all
 MASTERS_SHOWN = 50  # and this many missing masters to create
+PLANNED_SHOWN = 10  # planned masters named in an error about one that was not planned
 
 #: Masters simple enough to create that are still never created during an import. Sites add
 #: more with the ``fac_import_never_create_doctypes`` site config key (a list of DocTypes).
@@ -746,7 +747,7 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
             raise FixProblem(problem)
         name = data[opening_invoices.PARTY_NAME_FIELDS[doctype]]
         if (doctype, name) not in plan:
-            missing = ", ".join(f"{_(d)} '{n}'" for d, n in plan) or _("none")
+            missing = _planned_list(plan)
             raise FixProblem(
                 _("{0} '{1}' isn't one of the masters the last check found missing ({2}).").format(
                     _(doctype), name, missing
@@ -772,7 +773,7 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
         )
     name = cstr(data.get(name_field)).strip()
     if (doctype, name) not in plan:
-        missing = ", ".join(f"{_(d)} '{n}'" for d, n in plan) or _("none")
+        missing = _planned_list(plan)
         raise FixProblem(
             _("{0} '{1}' isn't one of the masters the last check found missing ({2}).").format(
                 _(doctype), name, missing
@@ -787,6 +788,17 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
     if parent:
         planned[parent_field] = parent
     return {"doctype": doctype, "data": planned}
+
+
+def _planned_list(plan) -> str:
+    """The masters the last check planned, for an error: the first PLANNED_SHOWN, then a count."""
+    names = [f"{_(d)} '{n}'" for d, n in plan]
+    if not names:
+        return _("none")
+    listed = ", ".join(names[:PLANNED_SHOWN])
+    if len(names) > PLANNED_SHOWN:
+        listed = _("{0} and {1} more").format(listed, len(names) - PLANNED_SHOWN)
+    return listed
 
 
 def _planned_name(entry: Dict[str, Any]) -> str:
