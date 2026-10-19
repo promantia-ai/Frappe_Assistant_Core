@@ -1710,6 +1710,16 @@ class TestReport(OpeningBalancesCase):
             {"file_debit": 100, "file_credit": 100, "erpnext_debit": 100, "erpnext_credit": 100},
         )
 
+    def test_a_row_imported_stays_imported_when_its_account_is_disabled(self):
+        # An account disabled after go-live still holds its opening balance
+        session, _report = self._imported([f"{self.bank},100,,", f"{self.capital},,100,"])
+        frappe.db.set_value("Account", self.bank, "disabled", 1)
+        self.addCleanup(frappe.db.set_value, "Account", self.bank, "disabled", 0)
+
+        rows = [o for o in opening_balances.outcomes(self._doc(session)) if not o["totals_row"]]
+
+        self.assertEqual([row["status"] for row in rows], ["imported", "imported"], rows)
+
     def test_a_second_entry_makes_an_account_differ(self):
         session, _ = self._imported([f"{self.bank},100,,", f"{self.capital},,100,"])
         self._second_entry(self.bank, 25)
