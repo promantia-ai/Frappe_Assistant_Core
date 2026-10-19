@@ -117,6 +117,43 @@ class TestDryRunImport(BaseAssistantTest):
     def _group(result, cause):
         return next(g for g in result["groups"] if g["cause"] == cause)
 
+    # -- what a check must not leave behind -------------------------------------------
+
+    def test_a_check_adds_nothing_to_global_search(self):
+        # Saving a Customer queues its search entry in Redis, which no rollback undoes.
+        session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])
+        setting = frappe.local.conf.get("disable_global_search")
+
+        with patch("frappe.utils.global_search.sync_value_in_queue", autospec=True) as queued:
+            result = self._check(session)
+
+        self.assertEqual(result["ready"], 1, result)
+        # The check's own results file is kept, so its entry is right; the rows' are not.
+        queued_doctypes = [call.args[0]["doctype"] for call in queued.call_args_list]
+        self.assertNotIn("Customer", queued_doctypes)
+        self.assertEqual(frappe.local.conf.get("disable_global_search"), setting)
+
+    def test_the_rollback_work_a_row_registers_runs_after_its_rollback(self):
+        # A row's save registers work for a rollback, e.g. File.handle_is_private_changed moving
+        # the file back; a rollback to a savepoint doesn't run it, so the check must.
+        ran = []
+        frappe.db.after_rollback.add(lambda: ran.append("before the check"))
+        before = list(frappe.db.after_rollback._functions)
+
+        with import_dry_run.held_back():
+            frappe.db.savepoint("fac_test_held_back")
+            frappe.db.after_rollback.add(lambda: ran.append("the row's"))
+            frappe.db.rollback(save_point="fac_test_held_back")
+
+        self.assertEqual(ran, ["the row's"])
+        self.assertEqual(list(frappe.db.after_rollback._functions), before)
+        frappe.db.after_rollback._functions.clear()
+
+    def test_doctypes_whose_save_reaches_past_the_database_are_not_checked(self):
+        # A File's save can move it on disk; a Website Theme's deletes and writes its CSS files.
+        for doctype in ("File", "Website Theme"):
+            self.assertTrue(import_dry_run.unsafe_reason(doctype), doctype)
+
     # -- registration ------------------------------------------------------------------
 
     def test_tool_is_registered_and_raises_no_approval_card(self):

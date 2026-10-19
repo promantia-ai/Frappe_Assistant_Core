@@ -92,7 +92,7 @@ A file of more than 500 rows is checked in the background. The reply has `"state
 - **File only in the chat:** the rows can't be read on the site. Ask the user to upload the file in File Manager (or attach it in FAC Chat), then call again with its `file_id`.
 - **File not found or not readable:** the user can't read that file (or it doesn't exist). Both get the same message. The session's own file is checked again on every call, so a user who has lost access can't carry on.
 - **No permission** to create or import the target DocType: tell the user and stop.
-- **DocTypes whose side effects can't be held back** (DocType, Custom Field, Payment Request, or any the site lists): the check is refused, with the reason.
+- **DocTypes whose side effects can't be held back** (DocType, Custom Field, Payment Request, File, Website Theme, or any the site lists): the check is refused, with the reason.
 - **Importing:** a session being imported isn't checked until the import ends. After an import (**Partially Completed**, **Failed** or **Completed**), it checks only what is left: see **After an import**.
 
 ## Fixing the groups

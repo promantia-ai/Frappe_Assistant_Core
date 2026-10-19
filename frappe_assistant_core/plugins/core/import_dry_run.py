@@ -62,12 +62,16 @@ RUNNABLE_STATUSES = (
     "Completed",
 )
 
+_UNSET = object()
+
 #: DocTypes whose insert can't be held back or rolled back. Sites add more with the
 #: ``fac_dry_run_unsafe_doctypes`` site config key (a list of DocType names).
 UNSAFE_DOCTYPES = {
     "DocType": "creating it changes the database schema, which can't be rolled back",
     "Custom Field": "creating it changes the database schema, which can't be rolled back",
     "Payment Request": "it can contact the payment gateway as it is created",
+    "File": "saving it can move or write the file on disk, which can't be rolled back",
+    "Website Theme": "saving it deletes and writes the theme's CSS files, which can't be rolled back",
 }
 
 CAUSE_MISSING_LINK = "Missing link"
@@ -613,12 +617,18 @@ def _message_of(e: Exception) -> str:
 
 @contextmanager
 def held_back():
-    """Hold back what a row's insert would send out or commit while it is tried."""
+    """Hold back what a row's insert would send out or commit while it is tried. The caller rolls
+    back to a savepoint inside it; the work the row registered for a rollback (a File moved back,
+    a cache cleared) runs on the way out, as a full rollback would run it."""
     flags = frappe.local.flags
     saved_flags = {name: flags.get(name) for name in ("in_import", "mute_emails")}
     # Data Import sets in_import (which also stops webhooks); emails are always muted.
     flags.in_import = True
     flags.mute_emails = True
+    # A saved document queues its search entry in Redis, which no rollback reaches.
+    conf = frappe.local.conf
+    search_setting = conf.get("disable_global_search", _UNSET)
+    conf["disable_global_search"] = True
 
     callbacks = {
         name: list(getattr(frappe.db, name)._functions)
@@ -644,10 +654,20 @@ def held_back():
         del frappe.db.commit
         for owner, name, original in originals:
             setattr(owner, name, original)
+        rolled_back = list(frappe.db.after_rollback._functions)[len(callbacks["after_rollback"]) :]
         for name, functions in callbacks.items():
             manager = getattr(frappe.db, name)
             manager._functions.clear()
             manager._functions.extend(functions)
+        for callback in rolled_back:
+            try:
+                callback()
+            except Exception:
+                frappe.log_error(title=_("Dry Run Rollback Error"), message=frappe.get_traceback())
+        if search_setting is _UNSET:
+            conf.pop("disable_global_search", None)
+        else:
+            conf["disable_global_search"] = search_setting
         for name, value in saved_flags.items():
             flags[name] = value
 
