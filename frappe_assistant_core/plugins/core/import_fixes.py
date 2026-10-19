@@ -54,6 +54,8 @@ CLOSEST_LIMIT = 5
 MIN_SCORE = 0.5
 FULL_SCAN = 2000  # rank every record when a DocType has at most this many
 WORD_MATCHES = 200  # else only records sharing a word with the value, this many per word
+GROUPS_SHOWN = 30  # the dry run's reply lists this many groups; the results file keeps them all
+MASTERS_SHOWN = 50  # and this many missing masters to create
 
 #: Masters simple enough to create that are still never created during an import. Sites add
 #: more with the ``fac_import_never_create_doctypes`` site config key (a list of DocTypes).
@@ -331,8 +333,7 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
     if cause == opening_balances.CAUSE_NOT_BALANCED:
         # No fixes: the file itself is wrong, so it must be corrected and checked again.
         explanation = _(
-            "{0} The file's debits and credits must be made to balance in the file; "
-            "it is then checked again."
+            "{0} The file's debits and credits must be made to balance in the file; it is then checked again."
         ).format(group.get("message") or _(cause))
         return {"explanation": explanation, "fixes": [], "fix_in_file": True}
 
@@ -925,25 +926,39 @@ def ready_message(summary: Dict[str, Any]) -> str:
 def report(session, summary: Dict[str, Any]) -> Dict[str, Any]:
     """The dry run's reply to the model: the headline, then each group with its examples,
     a plain explanation and the fixes that fit, and the ready message once nothing fails."""
-    examples = dry_run.examples(session, summary["groups"])
+    # A summary at any file size: 5,000 different wrong values would otherwise be 5,000 groups
+    # in the reply. Fixes find every group in the results file, shown or not.
+    shown_groups = summary["groups"][:GROUPS_SHOWN]
+    examples = dry_run.examples(session, shown_groups)
     groups = []
-    for group in summary["groups"]:
+    for group in shown_groups:
         shown = {k: v for k, v in group.items() if k != "example_rows"}
         shown["examples"] = examples.get(group["id"], [])
         shown.update(advise(session, group))
         groups.append(shown)
 
     message = dry_run.headline(summary) + " " + _("Nothing was written.")
+    hidden = len(summary["groups"]) - len(shown_groups)
+    if hidden:
+        message += " " + _(
+            "{0} more kinds of failure aren't listed here; fix these, check again, and the next ones show."
+        ).format(hidden)
     if not summary["failed"]:
         message += " " + ready_message(summary)
+    masters = masters_plan(session, summary["groups"])
     out = {
         "session": session.name,
         "status": session.status,
         "message": message,
         **{k: v for k, v in summary.items() if k != "groups"},
         "groups": groups,
-        "masters_plan": masters_plan(session, summary["groups"]),
+        "groups_total": len(summary["groups"]),
+        "masters_plan": masters[:MASTERS_SHOWN],
     }
+    if hidden:
+        out["groups_not_shown"] = hidden
+    if len(masters) > MASTERS_SHOWN:
+        out["masters_plan_total"] = len(masters)
     if summary.get("excluded"):
         out["left_out"] = left_out_report(session)
     return out

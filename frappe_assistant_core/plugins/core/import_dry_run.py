@@ -41,6 +41,7 @@ from frappe_assistant_core.plugins.core.import_session import (
     read_sheet_rows,
     read_spreadsheet,
     readable_session_file,
+    row_limit_problem,
 )
 
 SESSION_DOCTYPE = "FAC Import Session"
@@ -108,6 +109,9 @@ def special_engine(session):
 
 def check_can_run(session) -> None:
     """Raise DryRunProblem when ``session`` can't be checked yet, saying what to do."""
+    problem = row_limit_problem(row_count(session))  # a corrected file can be larger
+    if problem:
+        raise DryRunProblem(problem)
     engine = special_engine(session)
     if engine:
         return engine.check_can_run(session)
@@ -162,6 +166,10 @@ def link_site_file(session, file_doc) -> None:
                 ", ".join(own_columns(expected)), ", ".join(columns)
             )
         )
+    # Refused before the session changes: it keeps its file, and the rows it leaves out (#34003).
+    problem = row_limit_problem(read.chosen.row_count)
+    if problem:
+        raise FileProblem(problem)
     if expected:
         options = frappe.parse_json(session.template_options or "{}") or {}
         mapping = {
@@ -235,7 +243,7 @@ def run_job(session_name: str, user: str) -> None:
     """Background job: the dry run as the user who asked for it."""
     from frappe_assistant_core.plugins.core.import_fixes import check
 
-    frappe.set_user(user)
+    frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who asked for the check
     try:
         check(session_name, commit_progress=True)  # the run, explained for the model to read later
         frappe.db.commit()
@@ -287,7 +295,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
                 _progress("running", done, total),
                 update_modified=False,
             )
-            frappe.db.commit()
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background check commits its progress
 
     return _store(session_name, file_doc, checker, total)
 

@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import frappe
 from frappe import _
+from frappe.utils import cint
 
 SUPPORTED_EXTENSIONS = ("csv", "xlsx", "xls")
 SAMPLE_SIZE = 10
@@ -147,7 +148,9 @@ def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
     except Exception as e:
         raise FileProblem(_("Could not read the file: {0}").format(_describe_read_error(e)))
     raise FileProblem(
-        _("Sheet '{0}' not found. Sheets in this file: {1}.").format(sheet, ", ".join(map(str, names)))
+        _("Sheet '{0}' not found. Sheets in this file: {1}.").format(
+            sheet, ", ".join(str(name) for name in names)
+        )
     )
 
 
@@ -274,6 +277,48 @@ def _as_text(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
+
+
+# -- how many rows one import may have ----------------------------------------------
+
+DEFAULT_MAX_IMPORT_ROWS = 50000
+
+
+def holding_session(file_name: str) -> Optional[str]:
+    """The import session that holds File ``file_name``, or None (#34003). The import tools read
+    that file, showing the model its headers, samples and summaries only, never all its rows.
+    Frappe keeps identical bytes once, so a copy uploaded again (a new File with the same
+    file_url) is held too."""
+    file_url = frappe.db.get_value("File", file_name, "file_url")
+    copies = frappe.get_all("File", filters={"file_url": file_url}, pluck="name") if file_url else []
+    return frappe.db.get_value(
+        "FAC Import Session",
+        {"source_file": ["in", list({file_name, *copies})], "status": ["!=", "Cancelled"]},
+        "name",
+    )
+
+
+def max_import_rows() -> int:
+    """Assistant Core Settings' Max Rows per Import; 0 or blank is the default, never unlimited."""
+    try:
+        value = frappe.db.get_single_value("Assistant Core Settings", "max_import_rows")
+    except frappe.ValidationError:
+        # the code is newer than the site: `bench migrate` hasn't added the field yet
+        frappe.clear_messages()
+        value = None
+    return cint(value) or DEFAULT_MAX_IMPORT_ROWS
+
+
+def row_limit_problem(row_count: int) -> Optional[str]:
+    """Why a file of ``row_count`` rows can't be imported in one go, or None (#34003)."""
+    limit = max_import_rows()
+    if cint(row_count) <= limit:
+        return None
+    return _(
+        "The file has {0} rows, more than the {1} one import may have. Split it into files of at "
+        "most {1} rows and import them one after another. (The limit is Max Rows per Import in "
+        "Assistant Core Settings.)"
+    ).format(row_count, limit)
 
 
 # -- target DocType ----------------------------------------------------------------

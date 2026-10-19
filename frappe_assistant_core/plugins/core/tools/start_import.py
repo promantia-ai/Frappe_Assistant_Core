@@ -48,6 +48,8 @@ class StartImport(BaseTool):
             "fixes, and the session reports every run."
         )
         self.requires_permission = None  # checked on the session, the DocType and Data Import
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = ("failed_rows", "left_out", "message", "error")
 
         self.inputSchema = {
             "type": "object",

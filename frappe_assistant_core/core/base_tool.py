@@ -124,6 +124,11 @@ class BaseTool(ABC):
         default_config: Default configuration values
     """
 
+    #: Result fields that carry the user's file content (dotted paths, "groups[].examples" for
+    #: a field of each list item). The MCP server wraps them in the untrusted-content fence
+    #: before the model reads them (#34003).
+    untrusted_fields: Tuple[str, ...] = ()
+
     def __init__(self):
         self.name: str = ""
         self.description: str = ""

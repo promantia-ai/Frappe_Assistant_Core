@@ -156,6 +156,20 @@ class ExtractFileContent(BaseTool):
             if not file_doc:
                 return {"success": False, "error": "File not found or access denied"}
 
+            # A file an import session holds is read by the import tools, which show the model
+            # headers, samples and summaries only (#34003); the whole file isn't read into the chat.
+            from frappe_assistant_core.plugins.core.import_session import holding_session
+
+            holding = holding_session(file_doc.name)
+            if holding:
+                return {
+                    "success": False,
+                    "error": _(
+                        "This file is being imported (import session {0}). Ask about it through the "
+                        "import: the session shows its columns, sample rows and what the check found."
+                    ).format(holding),
+                }
+
             # Check file size limits
             if not self._check_file_size(file_doc):
                 return {"success": False, "error": "File size exceeds limit of 50MB"}

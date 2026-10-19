@@ -36,6 +36,8 @@ class SetOpeningStock(BaseTool):
             "dry_run_import. Writes no business data."
         )
         self.requires_permission = None  # checked on the session and Stock Reconciliation
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = ("error",)
         self.inputSchema = {
             "type": "object",
             "properties": {

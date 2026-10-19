@@ -27,6 +27,7 @@ from frappe_assistant_core.plugins.core.import_session import (
     find_site_file,
     import_target_problem,
     read_spreadsheet,
+    row_limit_problem,
 )
 
 
@@ -52,6 +53,8 @@ class StartImportSession(BaseTool):
             "set_column_mapping. Writes no business data."
         )
         self.requires_permission = None  # file access and target permission are checked per call
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = ("file_name", "sheet", "columns", "sheets", "sample_rows", "note", "error")
 
         self.inputSchema = {
             "type": "object",
@@ -130,6 +133,10 @@ class StartImportSession(BaseTool):
         except FileProblem as e:
             return {"success": False, "error": str(e)}
 
+        problem = row_limit_problem(chosen.row_count)
+        if problem:
+            return {"success": False, "error": problem, "row_count": chosen.row_count}
+
         session = self._create_session(file_doc, file_name, sheets, chosen, target_doctype, import_type)
 
         result = {
@@ -171,7 +178,7 @@ class StartImportSession(BaseTool):
                 "status": "File Read",
             }
         )
-        where = _(" from sheet {0}").format(chosen.name) if chosen.name else ""
+        where = " " + _("from sheet {0}").format(chosen.name) if chosen.name else ""
         session.log_step(
             "Read File",
             "Success",

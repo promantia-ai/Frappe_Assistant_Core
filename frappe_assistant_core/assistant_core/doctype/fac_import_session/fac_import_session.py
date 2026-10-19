@@ -41,6 +41,8 @@ class FACImportSession(Document):
                 "step": step,
                 "outcome": outcome,
                 "user": frappe.session.user,
+                # which file the step worked on: a corrected file later replaces source_file
+                "file": self.source_file or self.file_name,
                 "rows_ok": rows_ok,
                 "rows_failed": rows_failed,
                 "message": message,

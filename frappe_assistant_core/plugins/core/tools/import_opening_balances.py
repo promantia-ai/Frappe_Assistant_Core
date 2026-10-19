@@ -37,6 +37,8 @@ class ImportOpeningBalances(BaseTool):
             "and reports what the first made."
         )
         self.requires_permission = None  # checked on the session and Journal Entry
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = ("not_brought_in", "message", "error")
         self.inputSchema = {
             "type": "object",
             "properties": {
