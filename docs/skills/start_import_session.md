@@ -4,17 +4,18 @@
 
 The `start_import_session` tool starts a data import for a spreadsheet the user wants to import. It opens an **import session**: a record on the site that keeps the file's details, the decisions made along the way (mapping, fixes, validation results) and a log of every step. The user can carry on in a later message. **Keep the `session_id`.**
 
-**No copy of the file is saved.** The file stays where the user attached it, and every later step reads it from there. The session is the audit record: it holds only the file's name, sheet, columns and row count, never its rows.
+**No copy of the file is saved.** The file stays where the user attached it, and every later step reads it from there. The one exception is a Google Sheets link: there is no file to point to, so the linked tab is copied once, privately, to the site. The session is the audit record: it holds only the file's name, sheet, columns and row count, never its rows.
 
 Call it when the user asks to **import** a file, not just to look at one.
 
 ## Parameters
 
-Give the file in one of two ways:
+Give the file in one of three ways:
 
 | Parameter | Type | When |
 |-----------|------|------|
 | `file_id` (or `file_url`) | string | The file is **on this site**: uploaded in File Manager, or a FAC Chat attachment. Pass its **File ID** (its name in File Manager, e.g. `8f3a2b1c9d`), or its URL such as `/private/files/customers.xlsx`. The tool reads its sheets itself. The user must be allowed to read the file. |
+| `google_sheets_url` | string | The user **pasted a Google Sheets link**. The tab in the link is read (else the first tab) and saved as a private CSV copy owned by the user; the session works on that copy, so what is checked is what gets imported. The sheet must be shared so **anyone with the link can view it**. |
 | `file_name` + `columns` + `row_count` (+ `sheet`) | string, array, integer | The file is **attached in this chat** (Claude, ChatGPT) and not on the site. Read the file yourself and pass its name, the sheet you used, the column headers and the number of data rows (not counting the header). **Never pass its rows.** |
 
 **When the user names a file** ("import item_master") instead of giving its ID, find the ID with `list_documents` on `File`, filtered by `file_name` (it lists only files the user may read). If several match, show them (name, size, uploaded on) and ask which one. **Never guess.**
@@ -47,7 +48,7 @@ Supported files: `.csv`, `.xlsx`, `.xls`. **Row 1 must hold the column headers.*
 ```
 
 - `sample_rows` (up to 10) come back only for a file on this site, so you can show the user what was read. They are text the way Data Import will read it: dates as `YYYY-MM-DD`, whole numbers without `.0`. They are **not stored** on the session. `row_count` skips blank rows.
-- `note` appears when other sheets of a workbook also have rows. Only one sheet is used per session.
+- `note` appears when other sheets of a workbook also have rows. Only one sheet is used per session. For a Google Sheets link, it says that only one tab was read: to import another tab, the user opens it and copies the link again.
 
 ## Next
 
@@ -64,7 +65,7 @@ Read the session with `get_document`:
 {"doctype": "FAC Import Session", "name": "IMP-2026-00012"}
 ```
 
-Its `status`, `template_options` (mapping), `transformation_rules`, `validation_summary` and `steps` (the log) say where the import stands. `file_source` says where the file is: `Site File` or `Chat Attachment`. In Desk the user finds every session under **FAC Import Session**.
+Its `status`, `template_options` (mapping), `transformation_rules`, `validation_summary` and `steps` (the log) say where the import stands. `file_source` says where the file is: `Site File`, `Chat Attachment` or `Google Sheet` (then `source_url` holds the link). In Desk the user finds every session under **FAC Import Session**.
 
 ## Best Practices
 
@@ -76,7 +77,10 @@ Its `status`, `template_options` (mapping), `transformation_rules`, `validation_
 
 - **Target not allowed** — returns `success: false` with the reason: no Create permission, no Import permission, Allow Import turned off for the DocType, or a child table (import it through its parent).
 - **File not found or not readable** (`file_id`, `file_url`) — a file the user may not read (for example another user's private file) is reported the same way as a missing file. Every later step checks again, so a user who loses access to the file can't carry on.
-- **Both `file_id` and `file_url`** — refused; give one.
+- **Both `file_id` and `file_url`** — refused; give one. A Google Sheets link with a file is refused too.
+- **Google Sheet not shared, deleted, or the wrong tab** — refused with what to do: in Google Sheets click **Share**, under **General access** choose **Anyone with the link** (Viewer), then paste the link again. Pass the message on; don't retry until the user says it's shared.
+- **Not a Google Sheets link** (another site, Google Drive, `http://`) — refused: ask for the link from the browser's address bar while the sheet is open.
+- **Google Sheets didn't answer** — ask the user to try again in a moment.
 - **Missing details** (`file_name`) — `columns` and `row_count` are required.
 - **Unknown sheet or no rows** (file on this site) — refused, listing the sheets that exist.
 - **Who sees a session** — the user who started it, and System Managers.

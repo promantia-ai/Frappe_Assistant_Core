@@ -146,11 +146,12 @@ def unsafe_reason(doctype: str) -> Optional[str]:
     return None
 
 
-def link_site_file(session, file_doc) -> None:
+def link_site_file(session, file_doc, sheet_url: Optional[str] = None) -> None:
     """Give a session whose file stayed in the chat the same file, uploaded to the site; or a
-    corrected one, as the failed-rows file came back (#33994): the same columns, perhaps with
-    the ones that file added after them, which are not imported. ``file_doc`` is a File the
-    user may read (find_site_file)."""
+    corrected one, as the failed-rows file came back (#33994), or a fresh copy of its Google
+    Sheet (#34006): the same columns, perhaps with the ones that file added after them, which
+    are not imported. ``file_doc`` is a File the user may read (find_site_file), or the copy
+    ``sheet_url`` was read into."""
     from frappe_assistant_core.plugins.core.import_failures import own_columns
 
     try:
@@ -183,12 +184,15 @@ def link_site_file(session, file_doc) -> None:
         # A Data Import recorded before source_file was kept is of the file the session had.
         link.source_file = link.source_file or session.source_file
     session.source_file = file_doc.name
-    session.file_source = "Site File"
+    session.file_source = "Google Sheet" if sheet_url else "Site File"
+    session.source_url = sheet_url
     session.sheet = read.chosen.name  # a workbook saved as CSV, say, has no sheet names
     session.sheets = frappe.as_json([s.as_dict() for s in read.sheets])
-    session.log_step(
-        "Link File", "Success", _("Linked {0} from this site for checking.").format(file_doc.file_name)
-    )
+    if sheet_url:
+        linked = _("Copied the Google Sheet again for checking.")
+    else:
+        linked = _("Linked {0} from this site for checking.").format(file_doc.file_name)
+    session.log_step("Link File", "Success", linked)
     session.save()
 
 

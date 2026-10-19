@@ -61,6 +61,7 @@ NOT_TOOLS = {
     "documents",
     "failed_rows_file",
     "fixes",
+    "google_sheets_url",
     "import_session",
     "session_id",
     "status",

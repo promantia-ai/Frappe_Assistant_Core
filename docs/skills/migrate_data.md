@@ -89,6 +89,8 @@ doesn't bring itself.
 `.csv`, `.xlsx` or `.xls`, with the column headers in row 1 and **one kind of record per file**. A
 workbook with several sheets is one session per sheet.
 
+- **A Google Sheets link**: pass it to `start_import_session` as `google_sheets_url`; one tab per
+  session. When the user fixes the sheet, pass the link to `dry_run_import` again.
 - **A `.zip`**: ask the user to unzip it and attach the files.
 - **A Tally XML export**: it can be looked at with `extract_file_content`, but not imported. Ask the
   user to export each list from Tally to Excel instead (ledgers, stock items, outstanding bills,

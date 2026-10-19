@@ -23,7 +23,12 @@ from frappe_assistant_core.core.base_tool import BaseTool, exception_message, pe
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 from frappe_assistant_core.plugins.core import import_failures, import_fixes
 from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
-from frappe_assistant_core.plugins.core.import_session import FileProblem, find_site_file
+from frappe_assistant_core.plugins.core.import_session import (
+    FileProblem,
+    discard_sheet_copy,
+    file_from_google_sheet,
+    find_site_file,
+)
 
 
 class DryRunImport(BaseTool):
@@ -56,7 +61,9 @@ class DryRunImport(BaseTool):
             "start_import then imports just those. failed_rows_file: true checks nothing; it gives "
             "the rows still not imported (failed, or left out) as a CSV with the reason for each, "
             "for the user to correct and upload: show its download_url. The corrected file comes "
-            "back as file_id (or file_url), and is checked like any other."
+            "back as file_id (or file_url), and is checked like any other. When the user fixed "
+            "a Google Sheet the session came from, pass its google_sheets_url again: a fresh copy "
+            "is checked, and the mapping is kept."
         )
         self.requires_permission = None  # checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)
@@ -76,6 +83,11 @@ class DryRunImport(BaseTool):
                     "type": "string",
                     "description": "Instead of file_id: the file's URL on this site, e.g. a FAC Chat "
                     "attachment's.",
+                },
+                "google_sheets_url": {
+                    "type": "string",
+                    "description": "Instead of a file: a Google Sheets link, to check the sheet as it "
+                    "is now, e.g. after the user fixed it. Its columns must match.",
                 },
                 "failed_rows_file": {
                     "type": "boolean",
@@ -113,6 +125,9 @@ class DryRunImport(BaseTool):
         fixes = arguments.get("fixes") or None
         file_id = (arguments.get("file_id") or "").strip()
         file_url = (arguments.get("file_url") or "").strip()
+        sheet_url = (arguments.get("google_sheets_url") or "").strip()
+        if sheet_url and (file_id or file_url):
+            return {"success": False, "error": "Give only the Google Sheets link, or only a file: not both."}
         if fixes is not None and (not isinstance(fixes, list) or not all(isinstance(f, dict) for f in fixes)):
             return {"success": False, "error": "fixes must be a list of {group, action, ...}."}
         try:
@@ -123,7 +138,7 @@ class DryRunImport(BaseTool):
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
         if arguments.get("failed_rows_file"):
-            if fixes or file_id or file_url:
+            if fixes or file_id or file_url or sheet_url:
                 return {
                     "success": False,
                     "error": "failed_rows_file is asked on its own, without fixes or a file.",
@@ -136,6 +151,7 @@ class DryRunImport(BaseTool):
                 frappe.log_error(title=_("Failed Rows File Error"), message=frappe.get_traceback())
                 return {"success": False, "error": str(e), "session": session_name}
 
+        copy = None  # a Google Sheet's fresh copy, deleted unless the session takes it
         try:
             if dry_run.is_running(session):
                 if fixes:
@@ -144,8 +160,11 @@ class DryRunImport(BaseTool):
                     )
                 return self._running(session)
             notice = None
-            # Read access is checked here, before the file is compared or linked.
-            new_file = find_site_file(file_id=file_id, file_url=file_url) if file_id or file_url else None
+            if sheet_url:
+                new_file = copy = file_from_google_sheet(sheet_url)
+            else:
+                # Read access is checked here, before the file is compared or linked.
+                new_file = find_site_file(file_id=file_id, file_url=file_url) if file_id or file_url else None
             # The session's own file passed again (as a client may) is no new file: nothing to link.
             if new_file and not _is_sessions_file(session, new_file):
                 if fixes:
@@ -157,7 +176,8 @@ class DryRunImport(BaseTool):
                     )
                 dry_run.check_status(session)  # a session that can't be checked keeps its file
                 before = session.source_file
-                dry_run.link_site_file(session, new_file)
+                dry_run.link_site_file(session, new_file, sheet_url or None)
+                copy = None  # the session's file now
                 if before and not _same_content(before, session.source_file):
                     notice = import_fixes.forget_left_out(session)
             if fixes and session.status not in import_failures.AFTER_CHECK:
@@ -183,6 +203,8 @@ class DryRunImport(BaseTool):
         except Exception as e:
             frappe.log_error(title=_("Dry Run Import Error"), message=frappe.get_traceback())
             return {"success": False, "error": str(e), "session": session_name}
+        finally:
+            discard_sheet_copy(copy)
 
         result = {"success": True, **reply}
         if applied:
