@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 import erpnext
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt, getdate
+from frappe.utils import cint, cstr, flt, getdate
 
 from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
 from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
@@ -287,6 +287,10 @@ CAUSE_NEEDS_SERIAL = "Serial numbers needed"
 CAUSE_SERIAL_COUNT = "Serial numbers don't match the quantity"
 CAUSE_SAME_ITEM = "Same item and warehouse"
 CAUSE_HAS_STOCK = "Already has stock"
+CAUSE_ROUNDED_RATE = "Value changed by rounding"
+# ERPNext keeps a valuation rate to its field's precision, so a row is posted as qty x the rounded
+# rate. Up to this far from the file's value is rounding; further, the row needs a decision.
+ROUNDING_TOLERANCE = 1
 NEW_CAUSES = (
     CAUSE_TOTALS_ROW,
     CAUSE_NOT_STOCK,
@@ -301,6 +305,7 @@ NEW_CAUSES = (
     CAUSE_SERIAL_COUNT,
     CAUSE_SAME_ITEM,
     CAUSE_HAS_STOCK,
+    CAUSE_ROUNDED_RATE,
 )
 # Failures are one group per cause, so "4 rows can't hold stock" is one decision. These are one
 # group per value, because the fix depends on the value: a name to map, an item to allow.
@@ -518,6 +523,24 @@ def _line_problem(line: Line, stock: Dict[str, Any], allowed_zero: set, imported
             code,
             _("{0} has no valuation rate, so it would be valued at zero.").format(code),
         )
+    if rate:
+        # What ERPNext will post: the totals, the approval card and the document use it.
+        precision = _rate_precision()
+        kept = flt(rate, precision)
+        file_value = amount if amount and not values["valuation_rate"] else qty * rate
+        posted = qty * kept
+        if abs(posted - file_value) > ROUNDING_TOLERANCE:
+            return _problem(
+                CAUSE_ROUNDED_RATE,
+                "valuation_rate",
+                cells.get("amount") or cells.get("valuation_rate", ""),
+                _(
+                    "ERPNext keeps a valuation rate to {0} decimals, so {1} x {2} would be posted as {3}, "
+                    "not the file's {4}. Give the rate with at most {0} decimals, or ask an administrator "
+                    "to raise the Currency Precision."
+                ).format(precision, flt(qty), kept, flt(posted, 2), flt(file_value, 2)),
+            )
+        rate = kept
 
     batch = cells.get("batch_no", "")
     serials = [s for s in re.split(r"[\s,]+", cells.get("serial_no", "")) if s]
@@ -588,6 +611,11 @@ def _check_lines(session, checker: _StockChecker, lines: Optional[List[Line]] = 
         seen[key] = line.row
         ready.append(outcome)
     return ready
+
+
+def _rate_precision() -> int:
+    """The decimals ERPNext keeps of an opening stock row's valuation rate."""
+    return cint(frappe.new_doc("Stock Reconciliation Item").precision("valuation_rate"))
 
 
 def _totals(ready: List[Ready]) -> Dict[str, Any]:

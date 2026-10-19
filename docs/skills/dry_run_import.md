@@ -195,7 +195,9 @@ When the user uploads the corrected file, pass its `file_id` (or `file_url`). It
 For a session set up with `set_opening_stock`, the check also reports: Totals row, Can't hold stock,
 Warehouse of another company, Group warehouse, No UOM conversion, Negative quantity, Zero quantity,
 No valuation rate, Batch needed, Serial numbers needed, Serial numbers don't match the quantity,
-Same item and warehouse, Already has stock. Its reply has `opening_stock`: `total_qty`, `total_value` and
+Same item and warehouse, Already has stock, Value changed by rounding (ERPNext keeps the valuation
+rate to its field's precision; a row it would post more than 1 away from the file's value). The
+totals are what ERPNext will post: qty x the rate as ERPNext keeps it. Its reply has `opening_stock`: `total_qty`, `total_value` and
 per-warehouse totals; pass those to `import_opening_stock`.
 
 The fix `allow_zero_rate` (only for **No valuation rate**) brings that item in at zero value. Offer it only

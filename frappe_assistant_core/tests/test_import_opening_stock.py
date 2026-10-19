@@ -314,6 +314,32 @@ class TestOpeningStockCheck(OpeningStockCase):
         self.assertEqual(result["ready"], 1)
         self.assertEqual(result["opening_stock"]["total_value"], 100)
 
+    def _valued(self, qty, value):
+        session = self._session(
+            [f"{self.item},{self.stores},{qty},{value}"], header="Item,Warehouse,Qty,Value"
+        )
+        self._setup(
+            session,
+            columns={"Item": "item_code", "Warehouse": "warehouse", "Qty": "qty", "Value": "amount"},
+        )
+        return self._check(session)
+
+    def test_the_totals_are_what_erpnext_will_post(self):
+        # ERPNext keeps the valuation rate to its field's precision (2 here): 100 / 3 is posted
+        # as 3 x 33.33.
+        result = self._valued(3, 100)
+
+        self.assertEqual(result["ready"], 1, result)
+        self.assertEqual(result["opening_stock"]["total_value"], 99.99)
+
+    def test_a_value_that_rounding_the_rate_would_change_is_its_own_group(self):
+        # 12,345.67 / 10,000 = 1.234567, kept as 1.23: ERPNext would post 12,300.00.
+        result = self._valued(10000, 12345.67)
+
+        self.assertEqual((result["ready"], result["failed"]), (0, 1), result)
+        group = self._causes(result)[opening_stock.CAUSE_ROUNDED_RATE]
+        self.assertIn("12300", group["message"].replace(",", ""))
+
     def test_a_warehouse_without_the_company_suffix_is_found_by_its_name(self):
         session = self._session([f"{self.item},OS Stores {self.tag},5,10"])
         self._setup(session)
