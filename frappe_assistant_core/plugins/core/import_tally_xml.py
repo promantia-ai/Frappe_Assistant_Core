@@ -16,6 +16,7 @@ The file is streamed with lxml, entities and DTDs off and no network, so an expo
 is read one record at a time and nothing outside the file is ever read.
 """
 
+import inspect
 import io
 import re
 from collections import Counter
@@ -111,7 +112,12 @@ def _content(file_doc) -> bytes:
         raise FileProblem(_("Only a Tally .xml export can be read here."))
     if (file_doc.file_size or 0) > MAX_FILE_SIZE:
         raise FileProblem(_("The file is larger than 50 MB."))
-    content = file_doc.get_content()
+    # The bytes as written: Frappe v16's get_content() decodes a file read from disk with the
+    # first encoding that doesn't fail, and Tally's UTF-16 passes as windows-1250 with its BOM
+    # lost, so lxml found no ENVELOPE. encodings=() keeps them; v15 has no such argument and keeps
+    # bytes that aren't UTF-8 as they are.
+    raw = {"encodings": ()} if "encodings" in inspect.signature(file_doc.get_content).parameters else {}
+    content = file_doc.get_content(**raw)
     return content.encode("utf-8") if isinstance(content, str) else content
 
 

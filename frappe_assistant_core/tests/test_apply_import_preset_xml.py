@@ -6,6 +6,7 @@ import session per target for the parts the user chooses, with the Tally presets
 from unittest.mock import patch
 
 import frappe
+from frappe.core.doctype.file.file import File
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core import import_presets as presets
@@ -84,6 +85,29 @@ class TestListing(TallyXmlToolCase):
         self.assertIn("not checked against a real TallyPrime export", result["warnings"][0])
         self.assertEqual(result["other_records"], {"VOUCHER": 1})
         self.assertIn("3 ledgers", result["message"])
+
+    def test_a_utf16_export_is_read_as_frappe_v16_reads_a_file_from_disk(self):
+        # Frappe v16's File.get_content() decodes a file read from disk with the first encoding
+        # that doesn't fail, and UTF-16 bytes pass as windows-1250 with their BOM lost. This
+        # stand-in does what v16's does (frappe/core/doctype/file/file.py), so v15 runs that path.
+        def v16_get_content(file_doc, encodings=None):
+            file_doc.validate_file_url()
+            with open(file_doc.get_full_path(), "rb") as f:
+                content = f.read()
+            for encoding in (
+                ("utf-8-sig", "utf-8", "windows-1250", "windows-1252") if encodings is None else encodings
+            ):
+                try:
+                    return content.decode(encoding)
+                except UnicodeDecodeError:
+                    continue
+            return content
+
+        doc = self._file()
+        with patch.object(File, "get_content", v16_get_content):
+            result = self._ok({"file_id": doc.name})
+        self.assertEqual(result.get("kind"), "tally_xml", result)
+        self.assertEqual({p["part"]: p["count"] for p in result["parts"]}["ledgers"], 3)
 
     def test_the_count_tables_are_capped(self):
         parents = [ledger(f"L{i}", f"Parent {i:03d}") for i in range(120)]
