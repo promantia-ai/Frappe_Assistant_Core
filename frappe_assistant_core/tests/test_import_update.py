@@ -269,6 +269,26 @@ class TestUpdateCheck(UpdateCase):
         self.assertEqual(sorted(causes["More than one match"]["records"]), sorted(self.customers.values()))
         self.assertEqual((result["ready"], result["failed"]), (0, 3))
 
+    def test_a_row_matching_many_records_names_ten_and_counts_the_rest(self):
+        # A match field thousands share would otherwise put every name in each reply
+        shared = f"TAX-MANY-{self.tag}"
+        for i in range(12):
+            frappe.get_doc(
+                {
+                    "doctype": "Customer",
+                    "customer_name": f"Many {i} {self.tag}",
+                    "customer_group": self.group,
+                    "customer_type": "Company",
+                    "tax_id": shared,
+                }
+            ).insert()
+
+        _session, result = self._check([f"{shared},{self.group},x"])
+
+        [group] = [g for g in result["groups"] if g["cause"] == "More than one match"]
+        self.assertEqual((len(group["records"]), group["record_count"]), (10, 12), group)
+        self.assertIn("and 2 more", group["message"])
+
     def test_a_second_row_for_the_same_record_is_refused(self):
         _session, result = self._check(
             [

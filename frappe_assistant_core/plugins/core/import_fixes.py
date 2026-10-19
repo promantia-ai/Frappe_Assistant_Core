@@ -106,20 +106,31 @@ def left_out_report(session) -> List[Dict[str, Any]]:
     ]
 
 
+MAX_RANGES = 20  # row ranges named in a reply; the failed-rows file has every row
+
+
 def row_ranges(rows: List[int]) -> str:
-    """[2, 3, 4, 9] → "2-4, 9"."""
-    parts, start, previous = [], None, None
+    """[2, 3, 4, 9] → "2-4, 9". Past MAX_RANGES ranges the rest is counted, not listed: 20,000
+    scattered rows would be some 150 KB in every reply."""
+    parts, start, previous, rest = [], None, None, 0
     for row in sorted(set(rows)):
         if start is None:
             start = previous = row
         elif row == previous + 1:
             previous = row
         else:
-            parts.append(_range(start, previous))
+            if len(parts) < MAX_RANGES:
+                parts.append(_range(start, previous))
+            else:
+                rest += previous - start + 1
             start = previous = row
     if start is not None:
-        parts.append(_range(start, previous))
-    return ", ".join(parts)
+        if len(parts) < MAX_RANGES:
+            parts.append(_range(start, previous))
+        else:
+            rest += previous - start + 1
+    text = ", ".join(parts)
+    return _("{0} and {1} more rows").format(text, rest) if rest else text
 
 
 def _rows(count: int) -> str:
