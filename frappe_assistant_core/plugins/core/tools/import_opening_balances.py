@@ -29,7 +29,8 @@ class ImportOpeningBalances(BaseTool):
         self.description = (
             "Bring the checked opening trial balance into ERPNext, once the user approves: one "
             "submitted opening Journal Entry (voucher type Opening Entry) at the cut-off date, all or "
-            "nothing. Receivable, Payable and Stock rows are not in the entry; one balancing line to "
+            "nothing. Receivable and Payable rows are not in the entry, nor Stock rows when the company "
+            "has perpetual inventory on (opening stock posts them then); one balancing line to "
             "the Temporary Opening account keeps it balanced. Only after dry_run_import said the sheet "
             "is ready, and only when the user asks to import. Pass company, cut_off, rows (the check's "
             "'ready'), total_debit and total_credit exactly as the last check reported them: the "

@@ -192,7 +192,7 @@
   {
     "skill_id": "set-opening-balances-usage",
     "title": "How to Use set_opening_balances",
-    "description": "Bringing the old system's closing trial balance in as one opening Journal Entry: the company, cut-off date, Profit and Loss choice, retained-earnings account and columns, and why Receivable, Payable and Stock rows are left to the other opening imports",
+    "description": "Bringing the old system's closing trial balance in as one opening Journal Entry: the company, cut-off date, Profit and Loss choice, retained-earnings account and columns, and why Receivable and Payable rows (and Stock rows, with perpetual inventory on) are left to the other opening imports",
     "skill_type": "Tool Usage",
     "linked_tool": "set_opening_balances",
     "status": "Published",
