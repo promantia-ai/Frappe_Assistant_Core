@@ -74,6 +74,10 @@ UNSAFE_DOCTYPES = {
     "Website Theme": "saving it deletes and writes the theme's CSS files, which can't be rolled back",
 }
 
+#: Records named for a row that matches more than one: the rest are counted (a match field
+#: shared by thousands, a Customer Group say, would put every name in each reply).
+MAX_MATCHES_NAMED = 10
+
 CAUSE_MISSING_LINK = "Missing link"
 CAUSE_BAD_OPTION = "Not an allowed option"
 CAUSE_BAD_DATE = "Wrong date format"
@@ -470,13 +474,22 @@ class _Checker:
             message = _("No {0} has this {1}.").format(_(self.doctype), self.key_label)
             return [((CAUSE_NO_MATCH,), {**info, "cause": CAUSE_NO_MATCH, "message": message})]
         key = tuple(sorted(names))
+        shown = ", ".join(key[:MAX_MATCHES_NAMED])
+        if len(key) > MAX_MATCHES_NAMED:
+            shown = _("{0} and {1} more").format(shown, len(key) - MAX_MATCHES_NAMED)
         message = _("{0} {1} records have this {2}: {3}.").format(
-            len(names), _(self.doctype), self.key_label, ", ".join(key)
+            len(names), _(self.doctype), self.key_label, shown
         )
         return [
             (
                 (CAUSE_MANY_MATCHES, *key),
-                {**info, "cause": CAUSE_MANY_MATCHES, "records": list(key), "message": message},
+                {
+                    **info,
+                    "cause": CAUSE_MANY_MATCHES,
+                    "records": list(key[:MAX_MATCHES_NAMED]),
+                    "record_count": len(key),
+                    "message": message,
+                },
             )
         ]
 

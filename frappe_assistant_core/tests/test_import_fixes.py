@@ -543,3 +543,16 @@ class TestImportFixes(BaseAssistantTest):
         self.assertFalse(response["success"])
         frappe.set_user("Administrator")
         self.assertFalse(self._doc(session).excluded_rows)
+
+
+class TestRowRanges(BaseAssistantTest):
+    def test_short_lists_are_given_in_full(self):
+        self.assertEqual(import_fixes.row_ranges([2, 3, 4, 9]), "2-4, 9")
+
+    def test_a_long_list_of_scattered_rows_is_capped(self):
+        # 20,000 rows left out every other row would otherwise send ~150 KB in every reply
+        rows = list(range(2, 40002, 2))
+        text = import_fixes.row_ranges(rows)
+        self.assertLess(len(text), 300, text)
+        self.assertTrue(text.startswith("2, 4, 6"), text)
+        self.assertTrue(text.endswith("and 19980 more rows"), text)
