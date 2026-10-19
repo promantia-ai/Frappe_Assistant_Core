@@ -4,6 +4,7 @@ target, and each opens an ordinary import session with the mapping applied. Thes
 preset patched in; the shipped presets are tested at the end of this file.
 """
 
+import csv
 import io
 import json
 import os
@@ -15,6 +16,7 @@ from openpyxl.styles import Alignment
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.plugins.core import import_presets as presets
 from frappe_assistant_core.plugins.core.import_session import import_target_problem
 from frappe_assistant_core.plugins.core.tools import apply_import_preset as tool_module
@@ -394,7 +396,14 @@ class TestApply(PresetToolCase):
             result["skipped_targets"],
             [{"target": "Suppliers", "rows": 1, "reason": "cannot save the Supplier mapping"}],
         )
-        self.assertEqual(frappe.db.count("FAC Import Session", {"target_doctype": "Supplier"}), 0)
+        # This test's sessions only: a site used for live tests has Supplier sessions of its own
+        self.assertEqual(
+            frappe.db.count(
+                "FAC Import Session",
+                {"target_doctype": "Supplier", "file_name": ["like", f"ledgers-{self.tag} - %"]},
+            ),
+            0,
+        )
         self.assertEqual(
             frappe.db.count("File", {"file_name": ["like", f"ledgers-{self.tag} - Suppliers%"]}), 0
         )
@@ -1039,6 +1048,42 @@ class TestShippedPresets(PresetToolCase):
         self.assertEqual(session["engine"], "opening_stock")
         self.assertEqual(session["sample_rows"][0][:5], ["Steel Rod 10mm", "10", "Nos", "100", "1000"])
         self.assertEqual(session["columns"]["Warehouse"], "warehouse")
+
+    def test_a_decimal_comma_csv_keeps_its_values_and_its_clean_copy_is_not_typed(self):
+        # A Tally stock summary saved as CSV on a site that writes 1.500,50: comma decimals, quoted
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="\n").writerows(
+            [
+                ["Acme Pvt Ltd"],
+                ["Stock Summary"],
+                ["1-Apr-24 to 31-Mar-25"],
+                ["Particulars", "Quantity", "Rate", "Value"],
+                ["Raw Material", "", "", "3.188,56"],
+                ["  Steel Rod 10mm", "2,125 Kg", "1.500,50/Kg", "3.188,56"],
+                ["Grand Total", "", "", "3.188,56"],
+            ]
+        )
+        file_doc = self._upload(f"stock-{self.tag}.csv", buffer.getvalue().encode("utf-8"))
+        with patch.object(opening_stock, "decimal_comma", return_value=True):
+            reply = self.registry.get_tool("apply_import_preset")._safe_execute(
+                {"file_id": file_doc.name, "values": {"warehouse": "Stores - X"}}
+            )
+            self.assertTrue(reply["success"], reply)
+            self.assertIn("sessions", reply["result"], reply)
+            session = reply["result"]["sessions"][0]
+            self.assertEqual(
+                session["sample_rows"][0][:5], ["Steel Rod 10mm", "2.125", "Kg", "1500.5", "3188.56"]
+            )
+            # The clean copy holds numbers as Python writes them: its '2.125' is not the user's 2.125 thousand
+            doc = frappe.get_doc("FAC Import Session", session["session_id"])
+            clean = frappe.get_doc("File", doc.source_file)
+            self.assertFalse(opening_stock.typed_file(doc, clean))
+            cells = opening_stock.cell_texts(
+                clean, ["2.125"], {0: "qty"}, opening_stock.typed_file(doc, clean)
+            )
+            self.assertEqual(opening_stock.number(cells["qty"]), 2.125)
+            # A corrected CSV the user links later is their own typing again
+            self.assertTrue(opening_stock.typed_file(doc, file_doc))
 
     def test_quickbooks_aging_columns_are_accepted_by_set_opening_invoices(self):
         if not opening_invoices.in_fiscal_year(frappe.utils.nowdate(), self._company()):

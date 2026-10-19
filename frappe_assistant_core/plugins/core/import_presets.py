@@ -72,7 +72,9 @@ _SIDE = re.compile(r"(?<![A-Za-z])(dr|cr)\.?\s*$", re.I)
 _CURRENCY = re.compile(r"^[A-Z]{3}\s+|[₹$€£¥]")
 # A quantity is a number followed by nothing, or by a unit that starts with a letter or "/".
 # Anything else ("1.2.3", "2024-04-01", "10-20") is not a quantity and is kept as written.
-_QUANTITY = re.compile(r"^(\(-\)|-)?\s*([\d,]*\.?\d+)\s*(?=$|[A-Za-z/])(.*)$")
+_QUANTITY = re.compile(r"^(\(-\)|-)?\s*([\d.,]*\d)\s*(?=$|[A-Za-z/])(.*)$")
+# Digits and the separators number() reads; no exponent: "1E+5" is Excel's rounding, not a value.
+_NUMERIC = re.compile(r"[\d.,'\s]*\d")
 _DATE_TOKENS = re.compile(r"yyyy|yy|MMM|MM|M|dd|d")
 _STRPTIME = {"yyyy": "%Y", "yy": "%y", "MMM": "%b", "MM": "%m", "M": "%m", "dd": "%d", "d": "%d"}
 _NUMBERED = re.compile(r"^\s*(\S+)\s+·\s+(.+)$")
@@ -90,7 +92,28 @@ def _plain(value: Decimal) -> str:
     return "0" if text in ("-0", "") else text
 
 
-def _signed(text: str) -> Optional[Decimal]:
+def _typed(value: Any) -> bool:
+    from frappe_assistant_core.plugins.core.import_opening_stock import Typed
+
+    return isinstance(value, Typed)
+
+
+def _decimal(text: str, typed: bool = False) -> Optional[Decimal]:
+    """``text`` read by the opening imports' number(): commas and points as the site's number
+    format says, so '1500,50' where the site writes 1.500,50 is 1500.5, not 150050. None for
+    what it refuses ('12,5' where the site writes 12.5): the cell is then kept for the dry run."""
+    from frappe_assistant_core.plugins.core.import_opening_stock import Typed, number
+
+    if not _NUMERIC.fullmatch(text):
+        return None
+    try:
+        value = number(Typed(text) if typed else text)
+    except ValueError:
+        return None
+    return None if value is None else Decimal(repr(value))
+
+
+def _signed(text: str, typed: bool = False) -> Optional[Decimal]:
     """`₹ 1,23,456.00`, `-$175,804.25`, `(1,250)`, `(-)1,250`, `8,45,000 Dr`: the number, Dr positive."""
     s = text.strip()
     sign = 1
@@ -103,12 +126,11 @@ def _signed(text: str) -> Optional[Decimal]:
         sign, s = -sign, s[3:]
     elif s.startswith("(") and s.endswith(")"):
         sign, s = -sign, s[1:-1]
-    s = s.replace(",", "").replace(" ", "")
+    s = s.strip()
     if s.startswith("-"):
-        sign, s = -sign, s[1:]
-    if not s or not re.fullmatch(r"\d*\.?\d+", s):
-        return None
-    return sign * Decimal(s)
+        sign, s = -sign, s[1:].strip()
+    number = _decimal(s, typed)
+    return None if number is None else sign * number
 
 
 def _date(text: str, formats) -> str:
@@ -123,9 +145,9 @@ def _date(text: str, formats) -> str:
     return text
 
 
-def _parse_one(text: str, kind: str, spec: Dict[str, Any]) -> str:
+def _parse_one(text: str, kind: str, spec: Dict[str, Any], typed: bool = False) -> str:
     if kind in ("amount", "debit", "credit"):
-        number = _signed(text)
+        number = _signed(text, typed)
         if number is None:
             return text
         if spec.get("sign") == "credit_positive" and _SIDE.search(text.strip()):
@@ -137,20 +159,21 @@ def _parse_one(text: str, kind: str, spec: Dict[str, Any]) -> str:
         return _plain(number)
     if kind in ("quantity", "unit"):
         found = _QUANTITY.match(text)
-        if not found:
+        number = _decimal(found.group(2), typed) if found else None
+        if number is None:
             return text
         if kind == "unit":
             return found.group(3).strip().lstrip("/").strip()
-        number = Decimal(found.group(2).replace(",", ""))
         return _plain(-number if found.group(1) else number)
     if kind == "rate":
-        number = _signed(text.split("/", 1)[0])
+        number = _signed(text.split("/", 1)[0], typed)
         return text if number is None else _plain(number)
     if kind == "date":
         return _date(text, spec.get("formats"))
     if kind == "percent":
-        found = re.search(r"\d+(?:\.\d+)?", text)
-        return _plain(Decimal(found.group(0))) if found else text
+        found = re.search(r"\d[\d.,]*", text)
+        number = _decimal(found.group(0).rstrip(".,"), typed) if found else None
+        return text if number is None else _plain(number)
     sep = spec.get("sep", ":")
     if kind == "last_segment":
         return text.split(sep)[-1].strip()
@@ -171,12 +194,13 @@ def _parse_one(text: str, kind: str, spec: Dict[str, Any]) -> str:
 def parse(value: str, spec: Dict[str, Any]) -> str:
     """One cell, read the way a preset column says. A value no parser understands is kept as it
     was, so the dry run reports it; it never becomes 0."""
+    typed = _typed(value)  # a CSV's text: '1.500' is the user's own format, not Python's 1.5
     text = (value or "").strip()
     kinds = spec.get("parse") or []
     for kind in [kinds] if isinstance(kinds, str) else kinds:
         if not text:
             break
-        text = _parse_one(text, kind, spec)
+        text = _parse_one(text, kind, spec, typed)
     if not text and "default" in spec:
         return str(spec["default"])
     return text
@@ -496,7 +520,9 @@ def _sheet_rows(file_doc) -> Iterator[Tuple[Optional[str], Iterator[List[str]]]]
     consumed, and the next one only after it. A CSV is one sheet named None."""
     content = _content(file_doc)
     if _extension(file_doc) == "csv":
-        yield None, _csv_rows(content)
+        from frappe_assistant_core.plugins.core.import_opening_stock import Typed
+
+        yield None, ([Typed(cell) for cell in row] for row in _csv_rows(content))
         return
     for name, rows in _iter_sheets(content, _extension(file_doc)):
         yield name, ([_as_text(v) for v in row] for row in rows)

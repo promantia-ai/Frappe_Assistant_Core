@@ -464,6 +464,8 @@ class ApplyImportPreset(BaseTool):
     def _open_session(
         self, file_doc, sheet, match, cleaned, rows, not_on_site, already, cleaned_file, name
     ) -> Dict[str, Any]:
+        from frappe_assistant_core.plugins.core.import_opening_stock import PRESET_FILE
+
         target = rows.target
         session = frappe.get_doc(
             {
@@ -480,6 +482,8 @@ class ApplyImportPreset(BaseTool):
                 "target_doctype": target.get("doctype"),
                 "import_type": "Insert New Records",
                 "status": "File Read",
+                # Its numbers are already read: not the user's typing (opening_stock.typed_file)
+                "template_options": frappe.as_json({PRESET_FILE: cleaned_file.name}),
             }
         )
         where = _(", sheet {0}").format(sheet.name) if sheet.name else ""

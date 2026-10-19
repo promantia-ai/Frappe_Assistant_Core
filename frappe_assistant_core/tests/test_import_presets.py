@@ -15,6 +15,7 @@ from unittest.mock import patch
 import frappe
 from openpyxl import Workbook
 
+from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.plugins.core import import_presets as presets
 from frappe_assistant_core.plugins.core.import_presets import Sheet
 from frappe_assistant_core.plugins.core.import_session import FileProblem
@@ -50,6 +51,35 @@ class TestParse(BaseAssistantTest):
         }
         for value, expected in cases.items():
             self.assertEqual(self.p(value, "amount"), expected, value)
+
+    def test_numbers_are_read_by_the_sites_number_format(self):
+        # An export saved where decimals follow a comma: the comma isn't dropped as a thousands mark
+        with patch.object(opening_stock, "decimal_comma", return_value=True):
+            cases = {
+                "1500,50": "1500.5",
+                "1.500,00": "1500",
+                "12.345,67": "12345.67",
+                "-175.804,25": "-175804.25",
+                "8.45.000 Dr": "845000",
+                "1.250,00 Cr": "-1250",
+            }
+            for value, expected in cases.items():
+                self.assertEqual(self.p(value, "amount"), expected, value)
+            self.assertEqual(self.p("2,125 Kg", "quantity"), "2.125")
+            self.assertEqual(self.p("2,125 Kg", "unit"), "Kg")
+            self.assertEqual(self.p("1.500,50/Kg", "rate"), "1500.5")
+            self.assertEqual(self.p("18,5%", "percent"), "18.5")
+        with patch.object(opening_stock, "decimal_comma", return_value=False):
+            # Neither thousands nor this site's decimals: kept, so the dry run reports it
+            for kind in ("amount", "quantity", "rate", "percent"):
+                self.assertEqual(self.p("12,5", kind), "12,5", kind)
+            self.assertEqual(self.p("1E+5", "amount"), "1E+5")
+
+    def test_a_csv_cell_is_read_as_typed(self):
+        # '1.500' typed in a CSV where the site writes 1.500,00 is fifteen hundred, not 1.5
+        with patch.object(opening_stock, "decimal_comma", return_value=True):
+            self.assertEqual(self.p(opening_stock.Typed("1.500"), "amount"), "1.500")
+            self.assertEqual(self.p("1.500", "amount"), "1.5")  # a workbook's number, as Python writes it
 
     def test_amount_blank_stays_blank_and_text_stays_text(self):
         self.assertEqual(self.p("", "amount"), "")

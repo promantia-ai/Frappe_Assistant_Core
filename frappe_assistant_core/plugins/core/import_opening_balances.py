@@ -318,9 +318,9 @@ def read_lines(session) -> List[opening_stock.Line]:
         if str(position).isdigit() and target in fields
     }
     positions.update({int(p): f for f, p in (settings(session).get("columns") or {}).items()})
-    lines = []
+    lines, typed = [], opening_stock.typed_file(session, file_doc)
     for index, row in enumerate(rows[1:], start=2):
-        cells = opening_stock.cell_texts(file_doc, row, positions)
+        cells = opening_stock.cell_texts(file_doc, row, positions, typed)
         if any(cells.values()):
             lines.append(opening_stock.Line(index, cells))
     return lines

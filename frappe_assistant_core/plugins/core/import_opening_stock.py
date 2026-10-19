@@ -195,9 +195,20 @@ class Typed(str):
     own format, where '1.500' on a site that writes 1.500,00 is fifteen hundred."""
 
 
-def cell_texts(file_doc, row: List[str], positions: Dict[int, str]) -> Dict[str, str]:
-    """Field -> the row's text in its column, marked Typed when the file is a CSV."""
-    typed = (file_doc.get_extension()[1] or "").lstrip(".").lower() == "csv"
+PRESET_FILE = "preset_file"  # template_options: the CSV apply_import_preset wrote for the session
+
+
+def typed_file(session, file_doc) -> bool:
+    """Whether the file's cells are the user's typing: a CSV, but not the one apply_import_preset
+    wrote, whose numbers it already read and wrote as Python does ('2.125')."""
+    if (file_doc.get_extension()[1] or "").lstrip(".").lower() != "csv":
+        return False
+    options = frappe.parse_json(session.template_options or "{}") or {}
+    return options.get(PRESET_FILE) != file_doc.name
+
+
+def cell_texts(file_doc, row: List[str], positions: Dict[int, str], typed: bool) -> Dict[str, str]:
+    """Field -> the row's text in its column, marked Typed when ``typed`` (see typed_file)."""
     cells = {f: cstr(row[p]).strip() if p < len(row) else "" for p, f in positions.items()}
     return {f: Typed(v) if typed else v for f, v in cells.items()}
 
@@ -281,9 +292,9 @@ def read_lines(session) -> List[Line]:
         if str(position).isdigit() and target.startswith("items.")
     }
     positions.update({int(p): f for f, p in (settings(session).get("columns") or {}).items()})
-    lines = []
+    lines, typed = [], typed_file(session, file_doc)
     for index, row in enumerate(rows[1:], start=2):
-        cells = cell_texts(file_doc, row, positions)
+        cells = cell_texts(file_doc, row, positions, typed)
         if any(cells.values()):
             lines.append(Line(index, cells))
     return lines
