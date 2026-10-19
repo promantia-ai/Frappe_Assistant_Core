@@ -22,6 +22,7 @@ grouped summary.
 
 import copy
 import hashlib
+import importlib
 import json
 import re
 from contextlib import contextmanager
@@ -669,6 +670,20 @@ def _message_of(e: Exception) -> str:
     return _TEMPORARY_NAME.sub("", text).strip()
 
 
+#: Doc-event handlers that reach an outside service while the row is tried, held back with it.
+SENT_AT_ONCE = {
+    "frappe.integrations.doctype.google_calendar.google_calendar": (
+        "insert_event_in_google_calendar",
+        "update_event_in_google_calendar",
+        "delete_event_from_google_calendar",
+    ),
+    "frappe.integrations.doctype.google_contacts.google_contacts": (
+        "insert_contacts_to_google_contacts",
+        "update_contacts_to_google_contacts",
+    ),
+}
+
+
 @contextmanager
 def held_back():
     """Hold back what a row's insert would send out or commit while it is tried. The caller rolls
@@ -695,9 +710,19 @@ def held_back():
     patched = [
         (frappe, "enqueue"),
         (frappe.utils.background_jobs, "enqueue"),
+        # A Server Script's frappe.enqueue: safe_exec took its own copy of enqueue on import
+        (importlib.import_module("frappe.utils.safe_exec"), "enqueue"),
         (frappe, "publish_realtime"),
         (frappe.realtime, "publish_realtime"),
     ]
+    # Doc events that call an outside service at once, not at commit: the Google Calendar and
+    # Google Contacts sync would change the user's real events and contacts, and email attendees.
+    for module, functions in SENT_AT_ONCE.items():
+        try:
+            owner = importlib.import_module(module)
+        except ImportError:
+            continue
+        patched += [(owner, name) for name in functions if hasattr(owner, name)]
     originals = [(owner, name, getattr(owner, name)) for owner, name in patched]
     for owner, name in patched:
         setattr(owner, name, swallow)
