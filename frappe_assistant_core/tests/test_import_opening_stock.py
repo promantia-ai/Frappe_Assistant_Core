@@ -340,6 +340,37 @@ class TestOpeningStockCheck(OpeningStockCase):
         group = self._causes(result)[opening_stock.CAUSE_ROUNDED_RATE]
         self.assertIn("12300", group["message"].replace(",", ""))
 
+    def _rate_and_value(self, qty, rate, value):
+        # The Tally preset maps both: its Rate is shown rounded, its Value is qty x the exact rate
+        session = self._session(
+            [f"{self.item},{self.stores},{qty},{rate},{value}"], header="Item,Warehouse,Qty,Rate,Value"
+        )
+        self._setup(
+            session,
+            columns={
+                "Item": "item_code",
+                "Warehouse": "warehouse",
+                "Qty": "qty",
+                "Rate": "valuation_rate",
+                "Value": "amount",
+            },
+        )
+        return self._check(session)
+
+    def test_with_a_rate_and_a_value_the_value_is_what_must_be_posted(self):
+        # 10,000 x 12.35 is 1,23,500, but the file's Value is 1,23,456: the books must say 1,23,456
+        result = self._rate_and_value(10000, 12.35, 123456)
+
+        self.assertEqual((result["ready"], result["failed"]), (0, 1), result)
+        group = self._causes(result)[opening_stock.CAUSE_ROUNDED_RATE]
+        self.assertIn("123456", group["message"].replace(",", ""))
+
+    def test_a_value_the_rate_posts_is_taken(self):
+        result = self._rate_and_value(4, 25, 100)
+
+        self.assertEqual(result["ready"], 1, result)
+        self.assertEqual(result["opening_stock"]["total_value"], 100)
+
     def test_a_warehouse_without_the_company_suffix_is_found_by_its_name(self):
         session = self._session([f"{self.item},OS Stores {self.tag},5,10"])
         self._setup(session)
@@ -1027,6 +1058,18 @@ class TestSignoffReviewFixes(OpeningStockCase):
             report = opening_stock.report(self._doc(session))
 
         self.assertEqual(report["warehouses"][self.stores]["erpnext_value"], 50)
+
+    def test_a_row_imported_stays_imported_when_its_item_or_warehouse_is_retired(self):
+        # After go-live an item or warehouse is disabled, as ERPNext allows with stock in it:
+        # its opening stock is still in the books, so sign-off must not call the row failed.
+        session, _report = self._imported([f"{self.item},{self.stores},5,10"])
+        for doctype, name in (("Item", self.item), ("Warehouse", self.stores)):
+            frappe.db.set_value(doctype, name, "disabled", 1)
+            self.addCleanup(frappe.db.set_value, doctype, name, "disabled", 0)
+
+            [row] = [o for o in opening_stock.outcomes(self._doc(session)) if not o["totals_row"]]
+
+            self.assertEqual(row["status"], "imported", (doctype, row))
 
     # -- numbers as the file writes them ------------------------------------------------------
 

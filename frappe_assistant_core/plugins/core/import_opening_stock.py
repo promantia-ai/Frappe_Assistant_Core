@@ -496,19 +496,22 @@ def _line_problem(line: Line, stock: Dict[str, Any], allowed_zero: set, imported
         return _problem(
             dry_run.CAUSE_MISSING_LINK, "item_code", code, _("Item '{0}' doesn't exist.").format(code)
         )
+    given = cells.get("warehouse", "")
+    warehouse = _warehouse(given, stock["company"])
+    if not warehouse:
+        return _problem(
+            dry_run.CAUSE_MISSING_LINK, "warehouse", given, _("Warehouse '{0}' doesn't exist.").format(given)
+        )
+    if (item.name, warehouse.name) in imported:
+        # In an earlier document: its stock is in, so it isn't checked again, and an item or
+        # warehouse disabled since (as ERPNext allows with stock in it) doesn't undo that.
+        return IMPORTED
     if item.disabled or item.has_variants or not item.is_stock_item or item.is_fixed_asset:
         return _problem(
             CAUSE_NOT_STOCK,
             "item_code",
             code,
             _("The item is disabled, a template, a fixed asset or not a stock item."),
-        )
-
-    given = cells.get("warehouse", "")
-    warehouse = _warehouse(given, stock["company"])
-    if not warehouse:
-        return _problem(
-            dry_run.CAUSE_MISSING_LINK, "warehouse", given, _("Warehouse '{0}' doesn't exist.").format(given)
         )
     if warehouse.company != stock["company"]:
         return _problem(
@@ -525,8 +528,6 @@ def _line_problem(line: Line, stock: Dict[str, Any], allowed_zero: set, imported
             _("{0} is a group or disabled, so it can't hold stock.").format(warehouse.name),
         )
 
-    if (item.name, warehouse.name) in imported:
-        return IMPORTED  # in an earlier document: its stock is in, so it isn't checked again
     qty, rate, amount = values["qty"] or 0, values["valuation_rate"], values["amount"]
     uom = cells.get("uom", "")
     if uom and uom != item.stock_uom:
@@ -552,11 +553,14 @@ def _line_problem(line: Line, stock: Dict[str, Any], allowed_zero: set, imported
             code,
             _("{0} has no valuation rate, so it would be valued at zero.").format(code),
         )
+    if rate and amount:
+        # The Value is what the books hold: a Rate beside it is often rounded for show (Tally's).
+        rate = amount / qty
     if rate:
         # What ERPNext will post: the totals, the approval card and the document use it.
         precision = _rate_precision()
         kept = flt(rate, precision)
-        file_value = amount if amount and not values["valuation_rate"] else qty * rate
+        file_value = amount or qty * rate
         posted = qty * kept
         if abs(posted - file_value) > ROUNDING_TOLERANCE:
             return _problem(
