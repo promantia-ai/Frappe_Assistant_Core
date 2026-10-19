@@ -112,6 +112,10 @@ def window(session) -> dict:
 
 def refusal(session) -> str:
     """Why the session can't be undone now, or "" when it can."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    if dry_run.is_running(session):
+        return dry_run.check_running()
     if session.status == "Importing":
         return _("This session is still importing. Wait for the import to finish, then try again.")
     if session.status == "Undoing":

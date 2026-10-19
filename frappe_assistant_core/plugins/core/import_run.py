@@ -107,6 +107,9 @@ def _int(value) -> Optional[int]:
 def start(session) -> str:
     """Import a session that passed the dry run: the cleaned file, a Data Import, started. A
     session imported before gets only its rows not imported yet, in a new Data Import."""
+    if dry_run.is_running(session):
+        # The check stores its result when it ends, over the status this import would set.
+        raise ImportProblem(dry_run.check_running())
     if session.status in TRY_AGAIN:
         raise ImportProblem(
             _(

@@ -29,7 +29,7 @@ from frappe.core.doctype.data_import.importer import Importer
 from rq.timeouts import JobTimeoutException
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_failures, import_run
+from frappe_assistant_core.plugins.core import import_dry_run, import_failures, import_fixes, import_run
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
 MAPPING = {
@@ -705,3 +705,74 @@ class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
 
         self.assertTrue(reply["success"], reply)
         self.assertEqual(self._doc(session).status, "Mapped")
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestWhileACheckRuns(ImportRunCase):
+    """A file of more than 500 rows is checked in a background job, which stores its result on
+    the session when it ends. Until then the mapping, the import and an undo wait."""
+
+    def _checking(self, session):
+        # Production: dry_run_import queues the check of a large file and marks the session so.
+        frappe.db.set_value(
+            "FAC Import Session", session, "progress", import_dry_run._progress("queued", 0, 600)
+        )
+
+    def test_mapping_importing_and_undoing_wait_for_the_check(self):
+        session, checked = self._ready_session()
+        self._checking(session)
+        for tool, arguments in (
+            ("set_column_mapping", {"session": session, "mapping": {"Customer Type": "customer_type"}}),
+            ("start_import", self._card(session, checked)),
+            ("undo_import", {"session": session, "mode": "all", "records": 0, "blocked": 0}),
+        ):
+            reply = self._run(tool, arguments)
+            self.assertFalse(reply["success"], (tool, reply))
+            self.assertIn("is being checked", json.dumps(reply), tool)
+        preview = self._run("preview_import_undo", {"session": session})["result"]
+        self.assertFalse(preview["can_undo"], preview)
+        self.assertIn("is being checked", preview["refused"])
+        doc = self._doc(session)
+        self.assertEqual((doc.status, len(doc.data_imports)), ("Ready to Import", 0))
+
+    def test_a_change_saved_while_the_check_runs_is_not_taken_as_checked(self):
+        session, _checked = self._ready_session()
+        real_check = import_dry_run._Checker.check
+
+        def check_while_remapped(checker, *args, **kwargs):
+            # Another request remaps a column while this check is running
+            doc = self._doc(session)
+            options = frappe.parse_json(doc.template_options)
+            options["column_to_field_map"]["2"] = "Don't Import"
+            frappe.db.set_value("FAC Import Session", session, "template_options", frappe.as_json(options))
+            return real_check(checker, *args, **kwargs)
+
+        with patch.object(import_dry_run._Checker, "check", autospec=True, side_effect=check_while_remapped):
+            import_dry_run.run(session)
+
+        self.assertFalse(import_fixes.checked_as_is(self._doc(session)))
+        self.assertFalse(self._import(session, {"ready": 3})["success"])
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestRemapAfterAnImport(ImportRunCase):
+    def test_rows_imported_as_one_doctype_keep_the_session_to_it(self):
+        session, checked = self._ready_session()
+        with self._each_row_commits():
+            self.assertTrue(self._import(session, checked)["success"])
+
+        # "These are suppliers": the rows already in are Customers, and are known as imported by
+        # their row numbers, so another DocType would skip them. That takes a new session.
+        for change in (
+            {"doctype": "Supplier", "mapping": {"Customer Name": "supplier_name"}},
+            {
+                "import_type": "Update Existing Records",
+                "mapping": {"Customer Type": "customer_type"},
+                "match_on": ["customer_name"],
+            },
+        ):
+            reply = self._run("set_column_mapping", {"session": session, **change})
+            self.assertFalse(reply["success"], (change, reply))
+            self.assertIn("start a new import session", reply["error"])
+        doc = self._doc(session)
+        self.assertEqual((doc.target_doctype, doc.import_type, doc.status), ("Customer", INSERT, "Completed"))

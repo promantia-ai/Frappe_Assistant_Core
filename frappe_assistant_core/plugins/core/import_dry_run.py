@@ -223,6 +223,13 @@ def is_running(session) -> bool:
     return age < STALE_AFTER_SECONDS
 
 
+def check_running() -> str:
+    return _(
+        "This file is being checked in the background. Wait for the check to finish (call "
+        "dry_run_import to see where it is), then try again."
+    )
+
+
 def column_to_field_map(session) -> Dict[str, str]:
     options = frappe.parse_json(session.template_options or "{}") or {}
     return dict(options.get("column_to_field_map") or {})
@@ -286,10 +293,13 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
 
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    file_doc = readable_session_file(session)
+    # What is checked is the session as it is now: a change saved while the check runs (a remap
+    # in another request) must not be stamped as checked when the result is stored.
+    _checking()[session_name] = fingerprint(session, file_doc)
     engine = special_engine(session)
     if engine:
         return engine.run(session_name, commit_progress=commit_progress)
-    file_doc = readable_session_file(session)
     from frappe_assistant_core.plugins.core import import_update
 
     rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
@@ -688,6 +698,13 @@ def held_back():
 # -- storing the result ----------------------------------------------------------------
 
 
+def _checking() -> Dict[str, str]:
+    """Session -> the fingerprint of what this request's check started from."""
+    if not hasattr(frappe.local, "fac_dry_run_checking"):
+        frappe.local.fac_dry_run_checking = {}
+    return frappe.local.fac_dry_run_checking
+
+
 def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) -> Dict[str, Any]:
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
     counts = {"ready": 0, "failed": 0, "excluded": 0, "imported": 0, "unchanged": 0}
@@ -717,7 +734,7 @@ def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) 
         {"session": session.name, "summary": summary, "groups": groups, "rows": checker.rows},
     )
     session.validation_summary = frappe.as_json(summary)
-    session.validated_fingerprint = fingerprint(session, file_doc)
+    session.validated_fingerprint = _checking().pop(session_name, None) or fingerprint(session, file_doc)
     session.status = "Dry Run Failed" if counts["failed"] else "Ready to Import"
     if counts["imported"] and not counts["ready"] and not counts["failed"]:
         session.status = "Completed"  # the rest is left out or already so: nothing left to do

@@ -124,7 +124,7 @@ class SetColumnMapping(BaseTool):
             # Mapping sets the session back to Mapped, for a check of the rows not imported yet: never
             # while its import runs (a second import would take rows the first hasn't reached yet),
             # nor once it was cancelled or undone.
-            refused = _mapping_refused(doc.status)
+            refused = _mapping_refused(doc.status) or _check_running(doc)
             if refused:
                 return {"success": False, "error": refused, "session": session_name}
 
@@ -137,6 +137,9 @@ class SetColumnMapping(BaseTool):
                 }
 
             import_type = arguments.get("import_type") or doc.import_type or "Insert New Records"
+            refused = _imported_as(doc, target, import_type)
+            if refused:
+                return {"success": False, "error": refused, "session": session_name}
             # Before any work: the user must be able to import into the target.
             problem = import_target_problem(target, import_type)
             if problem:
@@ -187,6 +190,25 @@ class SetColumnMapping(BaseTool):
 
 # Make sure class name matches file name for discovery
 set_column_mapping = SetColumnMapping
+
+
+def _imported_as(doc, target: str, import_type: str):
+    """Rows a Data Import of the session brought in are known as imported by their row
+    numbers, whatever the DocType: another target or import type would skip them for good."""
+    current = doc.import_type or "Insert New Records"
+    if not doc.data_imports or (target, import_type) == (doc.target_doctype, current):
+        return None
+    return _(
+        "This session already imported rows as {0} ({1}), so it stays {0}. To import the file as "
+        "{2} ({3}), start a new import session."
+    ).format(_(doc.target_doctype), _(current), _(target), _(import_type))
+
+
+def _check_running(doc):
+    """A background check stores its result when it ends: a remap now would be stamped as checked."""
+    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+
+    return dry_run.check_running() if dry_run.is_running(doc) else None
 
 
 def _mapping_refused(status: str):
