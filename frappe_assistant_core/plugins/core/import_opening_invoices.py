@@ -277,7 +277,8 @@ def read_lines(session) -> List[opening_stock.Line]:
 
     invoices = settings(session)
     party_field = PARTY_FIELDS[invoices["party_type"]]
-    rows = apply_value_maps(session, read_sheet_rows(readable_session_file(session), session.sheet or None))
+    file_doc = readable_session_file(session)
+    rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
     positions = {
         int(position): "party" if target == party_field else target
         for position, target in column_to_field_map(session).items()
@@ -286,7 +287,7 @@ def read_lines(session) -> List[opening_stock.Line]:
     positions.update({int(p): f for f, p in (invoices.get("columns") or {}).items()})
     lines = []
     for index, row in enumerate(rows[1:], start=2):
-        cells = {f: cstr(row[p]).strip() if p < len(row) else "" for p, f in positions.items()}
+        cells = opening_stock.cell_texts(file_doc, row, positions)
         if any(cells.values()):
             lines.append(opening_stock.Line(index, cells))
     return lines

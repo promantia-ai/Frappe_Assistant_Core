@@ -1049,6 +1049,35 @@ class TestSignoffReviewFixes(OpeningStockCase):
             self.assertEqual(opening_stock.number("1,234"), 1.234)
         self.assertEqual(opening_stock.number("1234.5"), 1234.5)  # a workbook's number, either way
 
+    def test_a_lone_point_before_three_digits_typed_in_a_csv_is_not_guessed(self):
+        from unittest.mock import patch
+
+        typed = opening_stock.Typed
+        with patch.object(opening_stock, "decimal_comma", return_value=True):
+            for text in ("1.500", "12.345", "-1.000"):  # a thousand and five hundred, or 1.5?
+                with self.subTest(text), self.assertRaises(ValueError):
+                    opening_stock.number(typed(text))
+            self.assertEqual(opening_stock.number(typed("1.5")), 1.5)
+            self.assertEqual(opening_stock.number(typed("1.234.567")), 1234567)
+            self.assertEqual(opening_stock.number(typed("1.234,56")), 1234.56)
+            # A workbook's number reaches us as Python writes it, so its point is the decimal one.
+            self.assertEqual(opening_stock.number("2.125"), 2.125)
+        with patch.object(opening_stock, "decimal_comma", return_value=False):
+            self.assertEqual(opening_stock.number(typed("1.500")), 1.5)
+
+    def test_a_csv_amount_on_a_decimal_comma_site_is_not_read_a_thousand_times_too_small(self):
+        from unittest.mock import patch
+
+        session = self._session([f"{self.item},{self.stores},1.500,10"])
+        self._setup(session)
+
+        with patch.object(opening_stock, "decimal_comma", return_value=True):
+            response = self._run("dry_run_import", {"session": session})
+
+        self.assertTrue(response["success"], response)
+        result = response["result"]
+        self.assertEqual((result["ready"], result["failed"]), (0, 1), result)
+
     def test_the_decimal_point_comes_from_system_settings(self):
         from unittest.mock import patch
 

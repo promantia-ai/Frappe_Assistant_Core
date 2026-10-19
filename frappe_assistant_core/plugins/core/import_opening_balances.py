@@ -309,7 +309,8 @@ def read_lines(session) -> List[opening_stock.Line]:
     from frappe_assistant_core.plugins.core.import_dry_run import column_to_field_map
     from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
 
-    rows = apply_value_maps(session, read_sheet_rows(readable_session_file(session), session.sheet or None))
+    file_doc = readable_session_file(session)
+    rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
     fields = {target: field for field, target in MAPPED.items()}
     positions = {
         int(position): fields[target]
@@ -319,7 +320,7 @@ def read_lines(session) -> List[opening_stock.Line]:
     positions.update({int(p): f for f, p in (settings(session).get("columns") or {}).items()})
     lines = []
     for index, row in enumerate(rows[1:], start=2):
-        cells = {f: cstr(row[p]).strip() if p < len(row) else "" for p, f in positions.items()}
+        cells = opening_stock.cell_texts(file_doc, row, positions)
         if any(cells.values()):
             lines.append(opening_stock.Line(index, cells))
     return lines

@@ -189,6 +189,19 @@ class Line:
     cells: Dict[str, str] = dataclass_field(default_factory=dict)
 
 
+class Typed(str):
+    """A cell's text as the user typed it, in a CSV. A workbook's number reaches the engine as
+    Python writes it ('2.125'), so its point is always the decimal one; typed text is the user's
+    own format, where '1.500' on a site that writes 1.500,00 is fifteen hundred."""
+
+
+def cell_texts(file_doc, row: List[str], positions: Dict[int, str]) -> Dict[str, str]:
+    """Field -> the row's text in its column, marked Typed when the file is a CSV."""
+    typed = (file_doc.get_extension()[1] or "").lstrip(".").lower() == "csv"
+    cells = {f: cstr(row[p]).strip() if p < len(row) else "" for p, f in positions.items()}
+    return {f: Typed(v) if typed else v for f, v in cells.items()}
+
+
 def decimal_comma() -> bool:
     """Whether the site writes decimals after a comma (System Settings' number format, as
     "#.###,##"). A format with one separator only groups: its decimals take the other one."""
@@ -215,6 +228,7 @@ def number(text) -> Optional[float]:
     decimal point where the site writes decimals after a comma or the thousands are grouped by
     spaces, and commas grouping by threes are thousands. Anything else raises ValueError rather
     than being read as another number: '12,5' on a site that writes 12.5 isn't taken for 125."""
+    typed = isinstance(text, Typed)
     text = cstr(text).strip()
     spaced = bool(re.search(r"\d[ \u00a0']\d{3}", text))  # thousands grouped by spaces: '1 234,5'
     text = text.replace(" ", "").replace("\u00a0", "").replace("'", "")
@@ -240,6 +254,8 @@ def number(text) -> Optional[float]:
         if not _grouped(text, "."):
             raise ValueError(text)
         text = text.replace(".", "")
+    elif typed and decimal_comma() and _grouped(text, "."):
+        raise ValueError(text)  # '1.500' typed where the site writes 1.500,00: not taken for 1.5
     value = float(text)
     if not math.isfinite(value):  # float() reads 'nan' and 'inf'
         raise ValueError(text)
@@ -257,7 +273,8 @@ def read_lines(session) -> List[Line]:
     from frappe_assistant_core.plugins.core.import_dry_run import column_to_field_map
     from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
 
-    rows = apply_value_maps(session, read_sheet_rows(readable_session_file(session), session.sheet or None))
+    file_doc = readable_session_file(session)
+    rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
     positions = {
         int(position): target.split(".", 1)[1]
         for position, target in column_to_field_map(session).items()
@@ -266,7 +283,7 @@ def read_lines(session) -> List[Line]:
     positions.update({int(p): f for f, p in (settings(session).get("columns") or {}).items()})
     lines = []
     for index, row in enumerate(rows[1:], start=2):
-        cells = {f: cstr(row[p]).strip() if p < len(row) else "" for p, f in positions.items()}
+        cells = cell_texts(file_doc, row, positions)
         if any(cells.values()):
             lines.append(Line(index, cells))
     return lines
