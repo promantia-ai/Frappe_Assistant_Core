@@ -30,6 +30,10 @@ from pypika import Case
 from pypika import functions as fn
 from pypika.terms import Tuple as Row
 
+# Accounts Frozen Till: on each Company in Frappe v16, in Accounts Settings in v15.
+COMPANY_FROZEN_FIELD = "accounts_frozen_till_date"
+SETTINGS_FROZEN_FIELD = "acc_frozen_upto"
+
 INSERT = "Insert New Records"
 UNDO_DAYS = 30  # default of the site config key fac_import_undo_days
 UNDO_GRACE_MINUTES = 10  # ERPNext may submit large opening documents in the background, later
@@ -521,27 +525,45 @@ def _changed_blockers(records: List[Record], session) -> List[Blocker]:
 # -- closed books --------------------------------------------------------------------------
 
 
-def _frozen_till() -> Optional[date]:
-    """Accounts Settings' Accounts Frozen Till Date, if set."""
-    if not frappe.db.exists("DocType", "Accounts Settings"):
-        return None
-    value = frappe.db.get_single_value("Accounts Settings", "acc_frozen_upto")
-    return getdate(value) if value else None
+def _frozen_till(companies: Iterable[str]) -> Dict[Optional[str], date]:
+    """Accounts Frozen Till, per company. Frappe v16 keeps it on each Company; v15 has one date
+    in Accounts Settings for every company, returned under ``None``. Read only where the field
+    exists, so neither version asks for a field it doesn't have."""
+    companies = sorted({c for c in companies if c})
+    frozen: Dict[Optional[str], date] = {}
+    if companies and frappe.get_meta("Company").has_field(COMPANY_FROZEN_FIELD):
+        for row in frappe.get_all(
+            "Company", filters={"name": ["in", companies]}, fields=["name", COMPANY_FROZEN_FIELD]
+        ):
+            if row.get(COMPANY_FROZEN_FIELD):
+                frozen[row.name] = getdate(row.get(COMPANY_FROZEN_FIELD))
+    if frappe.db.exists("DocType", "Accounts Settings") and frappe.get_meta("Accounts Settings").has_field(
+        SETTINGS_FROZEN_FIELD
+    ):
+        value = frappe.db.get_single_value("Accounts Settings", SETTINGS_FROZEN_FIELD)
+        if value:
+            frozen[None] = getdate(value)
+    return frozen
 
 
 def _closed_till(companies: Iterable[str]) -> Dict[str, date]:
     """Per company, the end of its last period closed by a submitted Period Closing Voucher:
-    ERPNext refuses entries on or before that date."""
+    ERPNext refuses entries on or before that date. The latest is taken here, not with max() in
+    the query, which Frappe v16 refuses."""
     companies = sorted({c for c in companies if c})
     if not companies or not frappe.db.exists("DocType", "Period Closing Voucher"):
         return {}
-    rows = frappe.get_all(
+    closed: Dict[str, date] = {}
+    for row in frappe.get_all(
         "Period Closing Voucher",
         filters={"docstatus": 1, "company": ["in", companies]},
-        fields=["company", "max(period_end_date) as period_end_date"],
-        group_by="company",
-    )
-    return {r.company: getdate(r.period_end_date) for r in rows if r.period_end_date}
+        fields=["company", "period_end_date"],
+        limit_page_length=0,
+    ):
+        if row.period_end_date:
+            end = getdate(row.period_end_date)
+            closed[row.company] = max(end, closed.get(row.company, end))
+    return closed
 
 
 def _closed_books_blockers(records: List[Record]) -> List[Blocker]:
@@ -568,17 +590,18 @@ def _closed_books_blockers(records: List[Record]) -> List[Blocker]:
                     dated[(doctype, row.name)] = row
     if not dated:
         return []
-    frozen = _frozen_till()
-    closed = _closed_till(row.get("company") for row in dated.values())
+    companies = [row.get("company") for row in dated.values()]
+    frozen, closed = _frozen_till(companies), _closed_till(companies)
     blockers = []
     for record in records:
         row = dated.get(_key(record))
         if not row:
             continue
         posted, company = getdate(row.posting_date), row.get("company")
-        if frozen and posted <= frozen:
+        frozen_till = frozen.get(company) or frozen.get(None)
+        if frozen_till and posted <= frozen_till:
             detail = _("Its posting date {0} is on or before Accounts Frozen Till ({1}).").format(
-                posted, frozen
+                posted, frozen_till
             )
         elif company in closed and posted <= closed[company]:
             detail = _(

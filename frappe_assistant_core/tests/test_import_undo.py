@@ -317,7 +317,7 @@ class BlockerCase(UndoCase):
 
     @contextmanager
     def _books_open(self):
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={}
         ):
             yield
@@ -569,9 +569,9 @@ class TestBlockers(BlockerCase):
         session, _names = self._session_with_groups()
         entry = self._journal_entry(session, "2024-03-31")
 
-        with patch.object(import_undo, "_frozen_till", return_value=getdate("2024-03-31")):
+        with patch.object(import_undo, "_frozen_till", return_value={None: getdate("2024-03-31")}):
             on_the_day = self._blocked(self._plan(session))
-        with patch.object(import_undo, "_frozen_till", return_value=getdate("2024-03-30")):
+        with patch.object(import_undo, "_frozen_till", return_value={None: getdate("2024-03-30")}):
             the_day_before = self._blocked(self._plan(session))
 
         blocker = on_the_day[("Journal Entry", entry)]
@@ -579,11 +579,57 @@ class TestBlockers(BlockerCase):
         self.assertIn("2024-03-31", blocker.detail)
         self.assertNotIn(("Journal Entry", entry), the_day_before)
 
+    def test_accounts_frozen_till_is_read_per_company_where_the_company_holds_it(self):
+        # Frappe v16 keeps the date on each Company (accounts_frozen_till_date) and no longer has
+        # Accounts Settings' acc_frozen_upto. A Company date field stands in for it on v15.
+        frappe.db.set_value("Company", self.company, "date_of_incorporation", "2024-03-31")
+        with patch.object(import_undo, "COMPANY_FROZEN_FIELD", "date_of_incorporation"), patch.object(
+            import_undo, "SETTINGS_FROZEN_FIELD", "no_such_field"
+        ):
+            frozen = import_undo._frozen_till([self.company])
+
+        self.assertEqual(frozen, {self.company: getdate("2024-03-31")})
+
+    def test_accounts_frozen_till_falls_back_to_accounts_settings_for_every_company(self):
+        # v15: one date in Accounts Settings, for all companies.
+        frappe.db.set_single_value("Accounts Settings", "acc_frozen_upto", "2024-03-31")
+        with patch.object(import_undo, "COMPANY_FROZEN_FIELD", "no_such_field"):
+            frozen = import_undo._frozen_till([self.company])
+
+        self.assertEqual(frozen[None], getdate("2024-03-31"))
+
+    def test_no_frozen_date_field_is_no_frozen_date(self):
+        with patch.object(import_undo, "COMPANY_FROZEN_FIELD", "no_such_field"), patch.object(
+            import_undo, "SETTINGS_FROZEN_FIELD", "no_such_field"
+        ):
+            self.assertEqual(import_undo._frozen_till([self.company]), {})
+
+    def test_the_closed_period_is_found_without_asking_get_all_for_a_sql_function(self):
+        from frappe_assistant_core.tests.test_import_opening_stock import refuse_sql_functions
+
+        # Submitted Period Closing Vouchers, written straight to the table (see the class note).
+        for end in ("2023-03-31", "2024-03-31"):
+            self._insert_raw(
+                {
+                    "doctype": "Period Closing Voucher",
+                    "name": f"UNDO-PCV-{end}-{self.tag}",
+                    "company": self.company,
+                    "period_start_date": end[:4] + "-01-01",
+                    "period_end_date": end,
+                    "docstatus": 1,
+                }
+            )
+
+        with patch("frappe.get_all", refuse_sql_functions(frappe.get_all)):
+            closed = import_undo._closed_till([self.company])
+
+        self.assertEqual(closed[self.company], getdate("2024-03-31"))
+
     def test_a_posting_date_in_a_period_closing_voucher_is_closed_books(self):
         session, _names = self._session_with_groups()
         entry = self._journal_entry(session, "2024-03-31")
 
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={self.company: getdate("2024-12-31")}
         ):
             blocked = self._blocked(self._plan(session))
@@ -617,7 +663,7 @@ class TestBlockers(BlockerCase):
         recon = self._reconciliation(session, docstatus=0)
         self._ledger("later", "Stock Entry", f"UNDO-SE-{self.tag}", 1)
 
-        with patch.object(import_undo, "_frozen_till", return_value=getdate(nowdate())), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={None: getdate(nowdate())}), patch.object(
             import_undo, "_closed_till", return_value={self.company: getdate(nowdate())}
         ):
             blocked = self._blocked(self._plan(session))
@@ -651,7 +697,7 @@ class TestBlockers(BlockerCase):
                 return False
             return real(doctype, ptype, *args, **kwargs)
 
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={}
         ), patch.object(import_undo.frappe, "has_permission", side_effect=no_cancel):
             blocked = self._blocked(self._plan(session))
@@ -1511,7 +1557,9 @@ class TestRunSubmittedEntry(OpeningBalancesCase):
         return session, entry
 
     def _books_open(self):
-        return patch.multiple(import_undo, _frozen_till=lambda: None, _closed_till=lambda companies: {})
+        return patch.multiple(
+            import_undo, _frozen_till=lambda companies: {}, _closed_till=lambda companies: {}
+        )
 
     def test_a_voucher_cancelled_before_the_undo_keeps_its_ledger_and_is_kept(self):
         session, entry = self._imported()
@@ -1548,7 +1596,7 @@ class TestRunSubmittedEntry(OpeningBalancesCase):
             cancelled.append((doc.name, frappe.db.get_value("Journal Entry", doc.name, "docstatus")))
 
         with patch.object(import_undo, "_cancel", side_effect=spy), patch.object(
-            import_undo, "_frozen_till", return_value=None
+            import_undo, "_frozen_till", return_value={}
         ), patch.object(import_undo, "_closed_till", return_value={}):
             import_undo.start(self._doc(session), "all")
 
@@ -1621,7 +1669,7 @@ class TestRunSubmittedInvoice(OpeningInvoicesCase):
         ]
         self.assertEqual(len(invoices), 2)
 
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={}
         ):
             import_undo.start(self._doc(session), "all")
@@ -1646,7 +1694,7 @@ class TestRunSubmittedInvoice(OpeningInvoicesCase):
         before = ledger_counts("Sales Invoice", refused)
         outstanding = frappe.db.get_value("Sales Invoice", refused, "outstanding_amount")
 
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={}
         ), patch.object(import_undo.frappe, "delete_doc", side_effect=refusing(refused)):
             import_undo.start(self._doc(session), "all")
@@ -1680,7 +1728,7 @@ class TestRunSubmittedInvoice(OpeningInvoicesCase):
         payment.insert()
         payment.submit()
 
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={}
         ):
             plan = import_undo.build_plan(self._doc(session))
@@ -1702,7 +1750,7 @@ class TestRunSubmittedStock(OpeningStockCase):
         recon = reply["result"]["documents"][0]
         self.assertEqual(self._qty(self.item, self.stores), 5)
 
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={}
         ):
             import_undo.start(self._doc(session), "all")
@@ -1761,7 +1809,7 @@ class TestRunSubmittedStock(OpeningStockCase):
         session, recon, batch, item = self._batched()
         bundles = list(self._bundles(recon))
 
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={}
         ):
             self.assertEqual(import_undo.build_plan(self._doc(session)).blocked, [])
@@ -1781,7 +1829,7 @@ class TestRunSubmittedStock(OpeningStockCase):
         session, recon, batch, item = self._batched()
         before = self._bundles(recon)
 
-        with patch.object(import_undo, "_frozen_till", return_value=None), patch.object(
+        with patch.object(import_undo, "_frozen_till", return_value={}), patch.object(
             import_undo, "_closed_till", return_value={}
         ), patch.object(import_undo.frappe, "delete_doc", side_effect=refusing(recon)):
             import_undo.start(self._doc(session), "all")
