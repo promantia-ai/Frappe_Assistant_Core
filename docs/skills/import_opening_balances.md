@@ -15,7 +15,7 @@ Pass exactly what the last check reported, so the approval card shows it: `sessi
 
 ## What goes in the entry
 
-- Each ready row that is not Receivable, Payable or Stock becomes a line as the file has it. A row
+- Each ready row that is not covered (below) becomes a line as the file has it. A row
   with a zero amount produces no line.
 - Receivable, Payable and Stock rows ("covered") are left out of the entry: the opening invoices
   and opening stock imports bring those in, and posting them here as well would count them twice.
@@ -69,7 +69,8 @@ isn't zero, the report says how much is unaccounted for.
 
 - That the entry matches the file account by account (folded Profit and Loss accounts excepted),
   or which accounts differ.
-- That Receivable, Payable and Stock rows are not in it and why, and the Temporary Opening balance.
+- That the covered rows (Receivable and Payable, and Stock with perpetual inventory on) are not in it
+  and why, and the Temporary Opening balance.
 - The rows left out and their amounts.
 - Foreign-currency accounts aren't brought in here.
 - Replacing the chart of accounts is possible only before any transaction, with ERPNext's Chart of

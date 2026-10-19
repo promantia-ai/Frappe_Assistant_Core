@@ -44,4 +44,4 @@ it made stay in; check the sheet again with `dry_run_import` to import the rest.
 ## Things to tell the user
 
 - Opening stock **sets** the balance. Items that already had stock in that warehouse were refused by the check.
-- The Temporary Opening account is cleared later by the opening balances (trial balance) import.
+- With perpetual inventory on, the stock value is posted against the Temporary Opening account, which the opening balances (trial balance) import clears later. With it off, opening stock posts no ledger entry: the Stock accounts' balances come in with the trial balance.
