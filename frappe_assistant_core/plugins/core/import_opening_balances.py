@@ -1243,11 +1243,23 @@ def outcomes(session) -> List[Dict[str, Any]]:
     name, submitted = _entry_status(balances)
     stopped = opening_stock._last_import_failure(session) if not submitted else None
     unbalanced = not name and not is_balanced(session, lines)
+    in_entry = (
+        set((balances.get("created") or {}).get(name, {}).get("expected") or {}) if submitted else set()
+    )
+    abbr = frappe.get_cached_value("Company", balances["company"], "abbr") if in_entry else None
     out = []
     for line in lines:
         entry = marked.get(line.row) or {"status": "ready"}
         status, reason = entry["status"], ""
-        if status == "failed":
+        if status == "failed" and in_entry:
+            # Its account is in the submitted entry: an account disabled since (say) doesn't
+            # take its balance out of the books.
+            account = find_account(balances["company"], abbr, line.cells.get("account", ""))
+            if account and account.name in in_entry:
+                status = "imported"
+        if status == "imported":
+            pass
+        elif status == "failed":
             reason = "; ".join(messages.get(g, "") for g in entry.get("groups") or [])
         elif status == "excluded":
             reason = left.get(line.row) or _("Left out by the user")
