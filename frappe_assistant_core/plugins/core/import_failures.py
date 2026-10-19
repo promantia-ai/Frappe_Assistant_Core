@@ -87,7 +87,7 @@ def _row_key(header: List[str], row: List[str]) -> tuple:
     return tuple(
         sorted(
             (cstr(name).strip(), cstr(row[i]).strip() if i < len(row) else "")
-            for i, name in enumerate(own_columns(header))
+            for i, name in enumerate(own_columns(dry_run.unique_headers(header)))
         )
     )
 

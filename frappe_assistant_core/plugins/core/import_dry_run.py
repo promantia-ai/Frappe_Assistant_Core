@@ -341,7 +341,25 @@ def only_mapped(column_map: Dict[str, str], width: int) -> Dict[str, str]:
     return out
 
 
+def unique_headers(header: List[Any]) -> List[str]:
+    """The heading row with a repeated heading made unique ("Name", "Name (2)"): Data Import
+    skips a column whose heading it has seen, even one mapped by its position. Positions, and
+    so the mapping, are unchanged."""
+    seen, out = set(), []
+    for title in header:
+        text = cstr(title).strip()
+        unique, n = text, 1
+        while unique in seen:
+            n += 1
+            unique = f"{text} ({n})"
+        seen.add(unique)
+        out.append(unique if unique != text else title)
+    return out
+
+
 def _parse(session, file_doc, rows, column_map=None) -> ImportFile:
+    if rows:
+        rows = [unique_headers(rows[0]), *rows[1:]]
     options = frappe._dict(frappe.parse_json(session.template_options or "{}") or {})
     if column_map is not None:
         options.column_to_field_map = column_map

@@ -776,3 +776,27 @@ class TestRemapAfterAnImport(ImportRunCase):
             self.assertIn("start a new import session", reply["error"])
         doc = self._doc(session)
         self.assertEqual((doc.target_doctype, doc.import_type, doc.status), ("Customer", INSERT, "Completed"))
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestRepeatedHeadings(ImportRunCase):
+    def test_a_column_mapped_by_position_under_a_repeated_heading_is_imported(self):
+        # Exports often repeat a heading ("Name" for the customer and for the contact). Frappe's
+        # importer skips a column whose heading it has seen, even when it is mapped.
+        name = f"Rep {self.tag}"
+        content = f"Name,Group,Type,Name\n{name},{self.group},Company,Call before noon\n".encode()
+        session = self._run("start_import_session", {"file_url": self._file("rep.csv", content).file_url})
+        session = session["result"]["session_id"]
+        mapping = {"0": "customer_name", "1": "customer_group", "2": "customer_type", "3": "customer_details"}
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+
+        with self._each_row_commits():
+            self.assertTrue(self._import(session, checked)["success"])
+
+        details = frappe.db.get_value("Customer", {"customer_name": name}, "customer_details")
+        self.assertEqual(details, "Call before noon")

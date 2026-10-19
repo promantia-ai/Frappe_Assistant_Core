@@ -272,7 +272,7 @@ def _cleaned_file(session, earlier: List[str]):
             else _("Every row of this file is left out, so there is nothing to import.")
         )
     width = len(rows[0])
-    cleaned = [rows[0]] + [
+    cleaned = [dry_run.unique_headers(rows[0])] + [
         [""] * width if number in left_out else row for number, row in enumerate(rows[1:], start=2)
     ]
 
