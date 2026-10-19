@@ -13,7 +13,7 @@ check says the file is ready.
 
 | # | Step | Tool | Done when |
 |---|---|---|---|
-| 1 | **Session**: open one for the file | `start_import_session` | You have the `session_id`, sheet, columns and row count |
+| 1 | **Session**: open one for the file | `apply_import_preset` first; `start_import_session` when it answers `matched: false` | You have the `session_id`, sheet, columns and row count |
 | 2 | **Mapping**: file columns to ERPNext fields | `get_import_schema`, then `set_column_mapping` | The user agreed the mapping table |
 | 3 | **Cleaning**: value fixes the user picks (map a value, leave rows out) | `dry_run_import` once to find the groups, then again with `fixes` | Every group has a decision |
 | 4 | **Dry run**: check every row, nothing written | `dry_run_import` | `status` is `Ready to Import` |
@@ -21,6 +21,11 @@ check says the file is ready.
 | 6 | **Import**: with one approval, only when the user asks | `start_import` | The session has left Importing |
 | 7 | **Failed rows**: explain, try again, or give them as a file | `dry_run_import`, then `start_import`; or `dry_run_import` with `failed_rows_file` | Every row is imported or left out with a reason |
 | 8 | **Report**: what the migration brought in | `get_skill("migration-sign-off")` | The user has the report and its PDF |
+
+**Step 1 starts with `apply_import_preset`** for any spreadsheet or Tally XML file. It recognises
+exports from Tally, Zoho Books, Busy, Marg and QuickBooks, cleans them (title rows, totals,
+`8,45,000 Dr` amounts) and opens the sessions with the mapping already made, so step 2 is only
+checking that mapping with the user. Anything it doesn't recognise goes to `start_import_session`.
 
 Steps 3 to 5 repeat until nothing fails: explain each group in its own words, offer only its
 `fixes`, apply the user's choices in one call, and give the new count.
@@ -92,10 +97,25 @@ workbook with several sheets is one session per sheet.
 - **A Google Sheets link**: pass it to `start_import_session` as `google_sheets_url`; one tab per
   session. When the user fixes the sheet, pass the link to `dry_run_import` again.
 - **A `.zip`**: ask the user to unzip it and attach the files.
-- **A Tally XML export**: it can be looked at with `extract_file_content`, but not imported. Ask the
-  user to export each list from Tally to Excel instead (ledgers, stock items, outstanding bills,
-  trial balance), one list per file.
+- **A Tally XML export** (`.xml`): `apply_import_preset` reads it and opens a session per target
+  (Customers, Suppliers, Accounts from a ledger list).
 - **A file larger than Max Rows per Import**: refused with the limit. Ask the user to split it.
+
+## Updating records that already exist
+
+When the user wants to change records already in ERPNext from a file ("update my customers' credit
+days", "fix the item groups"), it is the same workflow with the session started as **Update
+Existing Records**. In step 2, `set_column_mapping` also takes the field(s) that find each row's
+record (its match key, for example the Tax ID). The dry run then shows what will change: show those
+samples (record, field, old value, new value) and the counts before asking to import. Never update
+records one by one with `update_document` instead.
+
+## Taking an import back
+
+When the user wants to undo an import, call `preview_import_undo` first and show what would be
+deleted and what blocks it. Only after the user confirms, call `undo_import` with the preview's
+figures. Deleted records can't be restored, so say so first. Never delete imported records one by
+one with `delete_document`. An update import can't be undone: the old values weren't kept.
 
 ## Off-topic questions during a migration
 
