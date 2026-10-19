@@ -250,6 +250,7 @@ def _cleaned_file(session, earlier: List[str]):
             row if number in records else [""] * width for number, row in enumerate(rows[1:], start=2)
         ]
         rows, column_map = import_update.with_ids(session, rows, records)
+    column_map = dry_run.only_mapped(column_map, len(rows[0]) if rows else 0)
     excluded = dry_run._excluded_rows(session)
     imported = import_failures.imported_rows(session)
     left_out = set()

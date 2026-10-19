@@ -656,3 +656,52 @@ class TestImportRun(ImportRunCase):
         self.assertFalse(response["success"])
         frappe.set_user("Administrator")
         self.assertEqual(self._imported(), set())
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
+    """Review fixes: a column the user left unmapped is not imported (#33993), and the mapping
+    can't change under an import that runs or was undone (#33989)."""
+
+    def test_a_column_left_unmapped_is_not_imported(self):
+        territory = f"Unmapped {self.tag}"
+        frappe.get_doc(
+            {"doctype": "Territory", "territory_name": territory, "parent_territory": "All Territories"}
+        ).insert()
+        name = f"Alpha {self.tag}"
+        lines = [",".join([*MAPPING, "Territory"]), f"{name},{self.group},Company,{territory}"]
+        file_doc = self._file("customers.csv", ("\n".join(lines) + "\n").encode())
+        session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
+        self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+
+        imported = self._import(session, checked)
+
+        self.assertTrue(imported["success"], imported)
+        self.assertNotEqual(frappe.db.get_value("Customer", {"customer_name": name}, "territory"), territory)
+
+    def test_the_mapping_is_kept_while_an_import_runs_or_once_it_was_undone(self):
+        session, _checked = self._ready_session()
+        for status in ("Importing", "Cancelled", "Undoing", "Undone", "Partially Undone"):
+            with self.subTest(status):
+                # start_import leaves the session Importing while its Data Import is queued or
+                # running; the undo tools set the undo statuses.
+                frappe.db.set_value("FAC Import Session", session, "status", status)
+
+                reply = self._run(
+                    "set_column_mapping", {"session": session, "mapping": {"Customer Type": "customer_type"}}
+                )
+
+                self.assertFalse(reply["success"], reply)
+                self.assertEqual(self._doc(session).status, status)
+
+    def test_a_session_that_can_be_checked_again_can_be_remapped(self):
+        session, _checked = self._ready_session()
+
+        reply = self._run(
+            "set_column_mapping", {"session": session, "mapping": {"Customer Type": "customer_type"}}
+        )
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(self._doc(session).status, "Mapped")

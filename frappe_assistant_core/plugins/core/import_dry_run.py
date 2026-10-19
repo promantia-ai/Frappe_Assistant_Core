@@ -320,11 +320,24 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     return _store(session_name, file_doc, checker, total)
 
 
+def only_mapped(column_map: Dict[str, str], width: int) -> Dict[str, str]:
+    """``column_map`` with every one of ``width`` columns it doesn't map set to Don't Import.
+    Data Import maps a column it isn't told about by its header, so a column the user left
+    unmapped would otherwise be checked and imported anyway."""
+    out = dict(column_map)
+    for position in range(width):
+        if not out.get(str(position)):
+            out[str(position)] = "Don't Import"
+    return out
+
+
 def _parse(session, file_doc, rows, column_map=None) -> ImportFile:
     options = frappe._dict(frappe.parse_json(session.template_options or "{}") or {})
     if column_map is not None:
         options.column_to_field_map = column_map
-    options.column_to_field_map = frappe._dict(options.get("column_to_field_map") or {})
+    options.column_to_field_map = frappe._dict(
+        only_mapped(options.get("column_to_field_map") or {}, len(rows[0]) if rows else 0)
+    )
     try:
         return _SessionRows(session.target_doctype, file_doc.file_url, rows, options, session.import_type)
     except frappe.ValidationError as e:

@@ -121,16 +121,12 @@ class SetColumnMapping(BaseTool):
             except frappe.PermissionError as e:
                 return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
-            # Mapping would set the session back to Mapped: never for an import being undone or undone.
-            if doc.status in ("Undoing", "Undone"):
-                being = _("is being undone") if doc.status == "Undoing" else _("was undone")
-                return {
-                    "success": False,
-                    "error": _(
-                        "This import session is {0}: the import {1}. Start a new import session."
-                    ).format(doc.status, being),
-                    "session": session_name,
-                }
+            # Mapping sets the session back to Mapped, for a check of the rows not imported yet: never
+            # while its import runs (a second import would take rows the first hasn't reached yet),
+            # nor once it was cancelled or undone.
+            refused = _mapping_refused(doc.status)
+            if refused:
+                return {"success": False, "error": refused, "session": session_name}
 
             current_target = doc.target_doctype or None
             target = arguments.get("doctype") or current_target
@@ -191,3 +187,24 @@ class SetColumnMapping(BaseTool):
 
 # Make sure class name matches file name for discovery
 set_column_mapping = SetColumnMapping
+
+
+def _mapping_refused(status: str):
+    """Why a session with ``status`` can't be remapped, or None."""
+    from frappe_assistant_core.plugins.core.import_dry_run import RUNNABLE_STATUSES
+
+    if status in ("File Read", *RUNNABLE_STATUSES):
+        return None
+    if status == "Importing":
+        return _(
+            "This session's import is still running. Wait for it to finish, or continue it with "
+            "start_import, before changing the mapping."
+        )
+    if status in ("Undoing", "Undone"):
+        being = _("is being undone") if status == "Undoing" else _("was undone")
+        return _("This import session is {0}: the import {1}. Start a new import session.").format(
+            status, being
+        )
+    return _("This import session is {0}, so its mapping can't change. Start a new import session.").format(
+        status
+    )
