@@ -17,10 +17,13 @@ row counts. No row of the file is saved.
 
 import datetime
 import io
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import frappe
+import requests
 from frappe import _
 from frappe.utils import cint
 
@@ -87,6 +90,73 @@ def find_site_file(file_id: str = "", file_url: str = ""):
     if file_id:
         return get_readable_file_by_id(file_id)
     return get_readable_file(file_url)
+
+
+def file_from_google_sheet(url: str):
+    """A private .csv copy, owned by the user, of the Google Sheets tab ``url`` links to (#34006).
+
+    Data Import's own reader downloads it: the tab in the link, else the first. The session works
+    on the copy like on any file of this site, so what the dry run checks is what gets imported,
+    whatever is changed in the sheet meanwhile.
+    """
+    from frappe.utils.csvutils import get_csv_content_from_google_sheets, validate_google_sheets_url
+
+    url = (url or "").strip()
+    try:
+        validate_google_sheets_url(url)
+    except frappe.ValidationError:
+        frappe.clear_messages()  # Frappe's pop-up says the same, less helpfully
+        raise FileProblem(
+            _(
+                "This isn't a Google Sheets link. Open the sheet in Google Sheets and copy the link "
+                "from the browser's address bar."
+            )
+        )
+    try:
+        content = get_csv_content_from_google_sheets(url)
+    except (requests.ConnectionError, requests.Timeout):
+        raise FileProblem(_cant_reach_google())
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code >= 500:
+            raise FileProblem(_cant_reach_google())
+        raise FileProblem(_cant_open_sheet())  # a deleted or mistyped sheet: 404
+    except (requests.RequestException, frappe.ValidationError):
+        # Frappe's "not publicly accessible" or "must end with gid", without the way out
+        frappe.clear_messages()
+        raise FileProblem(_cant_open_sheet())
+    if len(content) > MAX_FILE_SIZE:
+        raise FileProblem(_("The sheet is larger than 50 MB."))
+
+    sheet_id = re.sub(r"[^A-Za-z0-9_-]", "", urlparse(url).path.split("/d/", 1)[-1].split("/", 1)[0])
+    return frappe.get_doc(
+        {
+            "doctype": "File",
+            "file_name": f"google-sheet-{sheet_id[:8] or 'copy'}.csv",
+            "content": content,
+            "is_private": 1,
+        }
+    ).insert()
+
+
+def discard_sheet_copy(file_doc) -> None:
+    """Delete a Google Sheet's copy no session uses. The disk file stays while another File
+    shares its content."""
+    if file_doc:
+        # made by this same call, for this user
+        frappe.delete_doc("File", file_doc.name, ignore_permissions=True)
+
+
+def _cant_open_sheet() -> str:
+    return _(
+        "I can't open this Google Sheet. Share it so anyone with the link can view it: in Google "
+        "Sheets click Share, under General access choose Anyone with the link (Viewer), then paste "
+        "the link again. If it is shared, open the tab to import and copy the link from the "
+        "browser's address bar."
+    )
+
+
+def _cant_reach_google() -> str:
+    return _("Google Sheets didn't answer. Please try again in a moment.")
 
 
 def readable_session_file(session):

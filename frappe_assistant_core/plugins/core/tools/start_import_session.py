@@ -12,7 +12,8 @@ Start Import Session Tool for Core Plugin.
 Opens a FAC Import Session for a spreadsheet the user wants to import, so the
 migration can be worked through over several messages without starting again.
 The session records the file's details and every step; the file itself stays
-where the user attached it.
+where the user attached it. A Google Sheets link has no file to stay with, so
+the linked tab is copied privately to the site (#34006).
 """
 
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,8 @@ from frappe_assistant_core.core.base_tool import BaseTool
 from frappe_assistant_core.plugins.core.import_session import (
     FileProblem,
     SheetSummary,
+    discard_sheet_copy,
+    file_from_google_sheet,
     find_site_file,
     import_target_problem,
     read_spreadsheet,
@@ -47,8 +50,10 @@ class StartImportSession(BaseTool):
             "file_name); if several match, show them and ask which one, never guess. For a file "
             "attached in this chat that is not on the site, read it yourself and pass file_name, "
             "sheet, columns and row_count; never pass its rows. The session stores no row of the "
-            "file. Keep the returned session_id; read the session later with get_document (doctype "
-            "'FAC Import Session'). Next: work out the target DocType from the columns and tell the "
+            "file. For a Google Sheets link the user pastes, pass google_sheets_url: the sheet must "
+            "be shared so anyone with the link can view it, and a private copy of the linked tab "
+            "is saved on this site for the session. Keep the returned session_id; read the "
+            "session later with get_document (doctype 'FAC Import Session'). Next: work out the target DocType from the columns and tell the "
             "user why, call get_import_schema for its fields, then save the mapping with "
             "set_column_mapping. Writes no business data."
         )
@@ -70,6 +75,12 @@ class StartImportSession(BaseTool):
                 "file_name": {
                     "type": "string",
                     "description": "Name of a file attached in this chat that is not on the site.",
+                },
+                "google_sheets_url": {
+                    "type": "string",
+                    "description": "A Google Sheets link the user pasted, e.g. "
+                    "'https://docs.google.com/spreadsheets/d/1AbC.../edit#gid=0'. The tab in the "
+                    "link is read (else the first tab).",
                 },
                 "sheet": {
                     "type": "string",
@@ -102,16 +113,23 @@ class StartImportSession(BaseTool):
         file_id = (arguments.get("file_id") or "").strip()
         file_url = (arguments.get("file_url") or "").strip()
         file_name = (arguments.get("file_name") or "").strip()
+        sheet_url = (arguments.get("google_sheets_url") or "").strip()
         target_doctype = arguments.get("target_doctype") or None
         import_type = arguments.get("import_type") or "Insert New Records"
 
-        if not file_id and not file_url and not file_name:
+        if not file_id and not file_url and not file_name and not sheet_url:
             return {
                 "success": False,
                 "error": _(
-                    "Give file_id or file_url for a file on this site, or file_name with the "
-                    "columns and row_count of a file attached in the chat."
+                    "Give file_id or file_url for a file on this site, google_sheets_url for a "
+                    "Google Sheets link, or file_name with the columns and row_count of a file "
+                    "attached in the chat."
                 ),
+            }
+        if sheet_url and (file_id or file_url or file_name):
+            return {
+                "success": False,
+                "error": _("Give only the Google Sheets link, or only a file: not both."),
             }
 
         # Refuse before any work when the user could never import the result.
@@ -120,24 +138,33 @@ class StartImportSession(BaseTool):
             if problem:
                 return {"success": False, "error": problem, "target_doctype": target_doctype}
 
+        copy = None  # a Google Sheet's copy, deleted when no session opens on it
         try:
-            if file_id or file_url:
+            if sheet_url:
+                file_doc = copy = file_from_google_sheet(sheet_url)
+            elif file_id or file_url:
                 file_doc = find_site_file(file_id=file_id, file_url=file_url)
+            else:
+                file_doc = None
+            if file_doc:
                 read = read_spreadsheet(file_doc, arguments.get("sheet") or None)
                 sheets, chosen = read.sheets, read.chosen
                 file_name = file_doc.file_name
             else:
-                file_doc = None
                 chosen = _summary_from_chat(arguments)
                 sheets = [chosen]
         except FileProblem as e:
+            discard_sheet_copy(copy)
             return {"success": False, "error": str(e)}
 
         problem = row_limit_problem(chosen.row_count)
         if problem:
+            discard_sheet_copy(copy)
             return {"success": False, "error": problem, "row_count": chosen.row_count}
 
-        session = self._create_session(file_doc, file_name, sheets, chosen, target_doctype, import_type)
+        session = self._create_session(
+            file_doc, file_name, sheets, chosen, target_doctype, import_type, sheet_url or None
+        )
 
         result = {
             "success": True,
@@ -159,9 +186,18 @@ class StartImportSession(BaseTool):
                 "Only sheet '{0}' is used. These sheets also have rows and were not used: {1}. "
                 "Start another session with sheet set to use one of them."
             ).format(chosen.name, ", ".join(ignored))
+        if sheet_url:
+            result["note"] = _(
+                "Only one tab of the Google Sheet was read: the one open when the link was copied, "
+                "else the first. To import another tab, open it and copy the link again."
+            )
         return result
 
-    def _create_session(self, file_doc, file_name, sheets, chosen, target_doctype, import_type):
+    def _create_session(self, file_doc, file_name, sheets, chosen, target_doctype, import_type, sheet_url):
+        if sheet_url:
+            source = "Google Sheet"
+        else:
+            source = "Site File" if file_doc else "Chat Attachment"
         session = frappe.get_doc(
             {
                 "doctype": "FAC Import Session",
@@ -170,7 +206,8 @@ class StartImportSession(BaseTool):
                 "chat_session_id": getattr(frappe.local, "ar_session_id", None),
                 "file_name": file_name,
                 "source_file": file_doc.name if file_doc else None,
-                "file_source": "Site File" if file_doc else "Chat Attachment",
+                "file_source": source,
+                "source_url": sheet_url,
                 "sheet": chosen.name,
                 "sheets": frappe.as_json([s.as_dict() for s in sheets]),
                 "target_doctype": target_doctype,

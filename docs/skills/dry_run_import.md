@@ -14,6 +14,7 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 |-----------|------|----------|-------------|
 | `session` | string | **Yes** | The import session id |
 | `file_id` (or `file_url`) | string | No | When the session's file is just in the chat (Claude, ChatGPT): the same file on this site, uploaded in File Manager or attached in FAC Chat. Pass its **File ID** (its name in File Manager), or its URL; not both. The user must be allowed to read it. Or the user's **corrected file** of failed rows (see **After an import**). Its columns must match the session's. The mapping is kept. A **different** file puts back the rows left out before (`notice` says so). Never send it with `fixes`. |
+| `google_sheets_url` | string | No | For a session that came from a Google Sheet: the link again, when the user says they **fixed the sheet**. A fresh copy is checked; its columns must match, and the mapping is kept. Not with `file_id`, `file_url` or `fixes`. If the sheet didn't change, the session keeps its copy. |
 | `fixes` | array | No | The user's fixes for the last check's groups: `{group, action, to?, reason?}`. See **Fixing the groups**. |
 | `failed_rows_file` | boolean | No | `true` to get the rows still not imported (failed, or left out), with the reason for each, as a CSV to download. Nothing is checked. Send it on its own. |
 
@@ -147,7 +148,7 @@ The fixes are all or nothing. If any is wrong, none is saved and `problems` says
 - **`to` doesn't exist** or isn't an allowed option: the error lists the closest names or the choices.
 - **`create` sent in `fixes`**: refused. Use `create_document` instead.
 - **A group id that isn't in the latest check**: its rows already pass. Use the ids from the latest result.
-- **`fixes` with a new `file_id` or `file_url`**: refused. Check the new file first, then fix its groups.
+- **`fixes` with a new `file_id`, `file_url` or `google_sheets_url`**: refused. Check the new file first, then fix its groups.
 - **No check yet**, or the mapping changed since: call without `fixes` first.
 
 To change a mapping, map the same value again: the new choice replaces the earlier one.
