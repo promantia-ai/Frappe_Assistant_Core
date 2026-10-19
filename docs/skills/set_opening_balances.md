@@ -7,7 +7,9 @@ Journal Entry (voucher type Opening Entry, "Is Opening" Yes) dated the cut-off. 
 business data.
 
 Accounts of type Receivable, Payable or Stock are not put in the entry: the opening invoices and
-the opening stock imports bring those in. They still count in the file's balance check. Because
+the opening stock imports bring those in. Stock accounts only when the company has perpetual
+inventory on: without it, opening stock posts no ledger entry, so Stock rows go in this entry like
+any other. They still count in the file's balance check. Because
 they are left out, the entry has one balancing line to the company's Temporary Opening account
 (the account of type Temporary) for their net. When opening invoices, opening stock and these
 balances are all imported, Temporary Opening nets to zero, unless rows were left out: their net

@@ -19,6 +19,8 @@ Pass exactly what the last check reported, so the approval card shows it: `sessi
   with a zero amount produces no line.
 - Receivable, Payable and Stock rows ("covered") are left out of the entry: the opening invoices
   and opening stock imports bring those in, and posting them here as well would count them twice.
+  Stock rows are covered only when the company has perpetual inventory on; without it, opening
+  stock posts no ledger entry, so they are lines of this entry.
 - One balancing line to the Temporary Opening account carries the net of the left-out rows. It
   exists only when the other lines don't net to zero.
 - With `profit_and_loss = "retained_earnings"`, the Profit and Loss accounts are folded into one

@@ -47,6 +47,17 @@ PL_MODES = ("stop", "retained_earnings")
 COVERED_TYPES = ("Receivable", "Payable", "Stock")  # left to the opening invoices / stock imports
 
 
+def covered_types(company: str) -> tuple:
+    """The account types the other opening imports bring in, so left out of the entry. Stock only
+    with perpetual inventory: without it, opening stock posts no ledger entry, so the stock
+    account's balance comes in with this entry (ERPNext then accepts a stock account in it)."""
+    import erpnext
+
+    if erpnext.is_perpetual_inventory_enabled(company):
+        return COVERED_TYPES
+    return tuple(t for t in COVERED_TYPES if t != "Stock")
+
+
 class OpeningBalancesProblem(Exception):
     """Opening balances can't be set up, checked or created. The message is shown to the user."""
 
@@ -539,7 +550,7 @@ def _line_problem(line: opening_stock.Line, balances: Dict[str, Any], find, seen
         name,
         flt(debit, _precision()),
         flt(credit, _precision()),
-        account.account_type in COVERED_TYPES,
+        account.account_type in covered_types(balances["company"]),
         account.report_type or "",
         account.account_type or "",
     )
@@ -1102,7 +1113,7 @@ def report(session) -> Dict[str, Any]:
     for account in sorted(expected):
         file_sums, sums = expected[account], found.get(account, {})
         file_net, erpnext_net = net(file_sums), net(sums)
-        if types.get(account) in COVERED_TYPES:
+        if types.get(account) in covered_types(company):
             covered.append(
                 {
                     "account": account,

@@ -713,6 +713,28 @@ class TestCheck(OpeningBalancesCase):
         self.assertNotIn(self.debtors, accounts)
         self.assertNotIn(self.stock, accounts)
 
+    def test_stock_rows_go_in_the_entry_when_perpetual_inventory_is_off(self):
+        # Opening stock then posts no ledger entry, so only this entry can bring the stock
+        # account's balance in; left out, it would stay on Temporary Opening for good.
+        def set_perpetual(value):  # the Company is cached in Redis, which no rollback reaches
+            frappe.db.set_value("Company", self.company, "enable_perpetual_inventory", value)
+            frappe.clear_document_cache("Company", self.company)
+            frappe.local.enable_perpetual_inventory = {}
+
+        before = frappe.db.get_value("Company", self.company, "enable_perpetual_inventory")
+        self.addCleanup(set_perpetual, before)
+        set_perpetual(0)
+
+        session, result = self._ready(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.stock},20,,", f"{self.capital},,170,"]
+        )
+
+        self.assertEqual((result["ready"], result["failed"]), (4, 0), result)
+        self.assertEqual(result["opening_balances"]["covered"], 1)
+        accounts = [line["account"] for line in self._lines_of(session)]
+        self.assertIn(self.stock, accounts)
+        self.assertNotIn(self.debtors, accounts)
+
     def test_balancing_line_for_receivable_and_stock(self):
         session, result = self._ready(
             [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.stock},20,,", f"{self.capital},,170,"]
