@@ -449,6 +449,46 @@ class TestBlockers(BlockerCase):
 
         self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Item {item}"))
 
+    def _item_with_a_price(self, session):
+        """An Item the import made with a Standard Selling Rate: ERPNext's after_insert adds its
+        Item Price in the same insert, as the same user."""
+        item = (
+            frappe.get_doc(
+                {
+                    "doctype": "Item",
+                    "item_code": f"Priced Item {self.tag}",
+                    "item_group": frappe.db.get_value("Item Group", {"is_group": 0}),
+                    "stock_uom": frappe.db.get_value("UOM", {}) or "Nos",
+                    "standard_rate": 100,
+                }
+            )
+            .insert()
+            .name
+        )
+        self._add(session, "Item", item)
+        self.assertTrue(frappe.db.exists("Item Price", {"item_code": item}), "ERPNext added no price")
+        return item
+
+    def test_the_item_price_erpnext_made_with_the_item_does_not_block_it(self):
+        # Item.on_trash deletes the item's prices itself, so Frappe's own delete allows it
+        session = self._blank_session()
+        item = self._item_with_a_price(session)
+
+        self.assertNotIn(("Item", item), self._blocked(self._plan(session)))
+
+    def test_a_price_another_user_added_to_the_item_blocks_it(self):
+        session = self._blank_session()
+        item = self._item_with_a_price(session)
+        price_list = frappe.get_all("Price List", filters={"buying": 1}, pluck="name", limit=1)[0]
+        price = frappe.get_doc(
+            {"doctype": "Item Price", "item_code": item, "price_list": price_list, "price_list_rate": 80}
+        ).insert()
+        frappe.db.set_value("Item Price", price.name, "owner", "Guest", update_modified=False)
+
+        blocker = self._blocked(self._plan(session))[("Item", item)]
+
+        self.assertEqual((blocker.reason, blocker.blocked_by), ("linked", f"Item Price {price.name}"))
+
     def test_a_dynamic_link_blocks_it(self):
         session = self._session_with_customers()
         gamma = self._names()["gamma"]

@@ -321,6 +321,41 @@ def _contacts_inside(in_set: Set[Key], session) -> Set[Key]:
     return candidates - outside
 
 
+def _made_with_the_import(row, session) -> bool:
+    """Whether a record was made with the session's import: by its user, after it started, at
+    most UNDO_GRACE_MINUTES after it finished, and not edited since by another user or later."""
+    user = session.user or session.owner
+    latest = finished_at(session) + timedelta(minutes=UNDO_GRACE_MINUTES)
+    return not (
+        row.owner != user
+        or (row.modified_by and row.modified_by != user)
+        or get_datetime(row.creation) < get_datetime(session.creation)
+        or get_datetime(row.creation) > latest
+        or get_datetime(row.modified) > latest
+    )
+
+
+def _item_prices_inside(in_set: Set[Key], session) -> Set[Key]:
+    """Item Prices ERPNext made with an Item of the set (Item.after_insert adds one for a
+    Standard Selling Rate) and that the import made: Item.on_trash deletes an item's prices
+    itself, so they don't block. A price added by someone else, or later, still does, or the
+    undo would delete it silently."""
+    items = _groups(in_set).get("Item")
+    if session is None or not items or not frappe.db.exists("DocType", "Item Price"):
+        return set()
+    inside: Set[Key] = set()
+    for chunk in _chunks(items):
+        for row in frappe.get_all(
+            "Item Price",
+            filters={"item_code": ["in", chunk]},
+            fields=["name", "owner", "creation", "modified", "modified_by"],
+            limit_page_length=0,
+        ):
+            if _made_with_the_import(row, session):
+                inside.add(("Item Price", row.name))
+    return inside
+
+
 BUNDLE = "Serial and Batch Bundle"
 BUNDLE_ENTRY = "Serial and Batch Entry"
 
@@ -370,7 +405,13 @@ def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List
 
     in_set = {_key(r) for r in records}
     skip = set(frappe.get_hooks("ignore_links_on_delete") or [])
-    never = _groups(in_set | set(ignore) | _contacts_inside(in_set, session) | _own_bundles(in_set))
+    never = _groups(
+        in_set
+        | set(ignore)
+        | _contacts_inside(in_set, session)
+        | _item_prices_inside(in_set, session)
+        | _own_bundles(in_set)
+    )
     vouchers = _groups(in_set)
     first: Dict[Key, Key] = {}
     count: Dict[Key, int] = defaultdict(int)
