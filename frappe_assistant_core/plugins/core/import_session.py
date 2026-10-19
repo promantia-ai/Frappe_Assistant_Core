@@ -18,6 +18,7 @@ row counts. No row of the file is saved.
 import datetime
 import io
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -30,6 +31,9 @@ from frappe.utils import cint
 SUPPORTED_EXTENSIONS = ("csv", "xlsx", "xls")
 SAMPLE_SIZE = 10
 MAX_FILE_SIZE = 50 * 1024 * 1024  # same ceiling as chat uploads
+# A Google Sheet's download: seconds to connect and between two pieces, and in all.
+DOWNLOAD_TIMEOUT = (10, 30)
+DOWNLOAD_SECONDS = 120
 
 
 @dataclass
@@ -95,11 +99,11 @@ def find_site_file(file_id: str = "", file_url: str = ""):
 def file_from_google_sheet(url: str):
     """A private .csv copy, owned by the user, of the Google Sheets tab ``url`` links to (#34006).
 
-    Data Import's own reader downloads it: the tab in the link, else the first. The session works
-    on the copy like on any file of this site, so what the dry run checks is what gets imported,
-    whatever is changed in the sheet meanwhile.
+    The tab in the link is downloaded, else the first. The session works on the copy like on any
+    file of this site, so what the dry run checks is what gets imported, whatever is changed in
+    the sheet meanwhile.
     """
-    from frappe.utils.csvutils import get_csv_content_from_google_sheets, validate_google_sheets_url
+    from frappe.utils.csvutils import validate_google_sheets_url
 
     url = (url or "").strip()
     try:
@@ -113,19 +117,15 @@ def file_from_google_sheet(url: str):
             )
         )
     try:
-        content = get_csv_content_from_google_sheets(url)
+        content = _download_sheet(url)
     except (requests.ConnectionError, requests.Timeout):
         raise FileProblem(_cant_reach_google())
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code >= 500:
             raise FileProblem(_cant_reach_google())
-        raise FileProblem(_cant_open_sheet())  # a deleted or mistyped sheet: 404
-    except (requests.RequestException, frappe.ValidationError):
-        # Frappe's "not publicly accessible" or "must end with gid", without the way out
-        frappe.clear_messages()
+        raise FileProblem(_cant_open_sheet())  # a deleted or mistyped sheet (404), a wrong tab (400)
+    except requests.RequestException:
         raise FileProblem(_cant_open_sheet())
-    if len(content) > MAX_FILE_SIZE:
-        raise FileProblem(_("The sheet is larger than 50 MB."))
 
     sheet_id = re.sub(r"[^A-Za-z0-9_-]", "", urlparse(url).path.split("/d/", 1)[-1].split("/", 1)[0])
     return frappe.get_doc(
@@ -136,6 +136,34 @@ def file_from_google_sheet(url: str):
             "is_private": 1,
         }
     ).insert()
+
+
+def _download_sheet(url: str) -> bytes:
+    """The CSV export of the tab ``url`` links to, the way Frappe's
+    get_csv_content_from_google_sheets builds its link, but streamed: refused once it passes
+    MAX_FILE_SIZE or DOWNLOAD_SECONDS, so a huge or trickling sheet can't hold a worker."""
+    gid = url.rsplit("gid=", 1)[1] if "gid=" in url else 0
+    export = url.rsplit("/edit", 1)[0] + f"/export?format=csv&gid={gid}"
+    deadline = time.monotonic() + DOWNLOAD_SECONDS
+
+    with requests.get(
+        export, headers={"Accept": "text/csv"}, stream=True, timeout=DOWNLOAD_TIMEOUT
+    ) as response:
+        response.raise_for_status()
+        if cint(response.headers.get("Content-Length")) > MAX_FILE_SIZE:
+            raise FileProblem(_("The sheet is larger than 50 MB."))
+        content = bytearray()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            content += chunk
+            if len(content) > MAX_FILE_SIZE:
+                raise FileProblem(_("The sheet is larger than 50 MB."))
+            if time.monotonic() > deadline:
+                raise FileProblem(_cant_reach_google())
+
+    # A sheet that isn't shared answers 200 with Google's sign-in page.
+    if bytes(content).strip().endswith(b"</html>"):
+        raise FileProblem(_cant_open_sheet())
+    return bytes(content)
 
 
 def discard_sheet_copy(file_doc) -> None:

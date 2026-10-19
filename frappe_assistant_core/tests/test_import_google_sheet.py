@@ -9,10 +9,10 @@
 """
 Importing from a Google Sheets link (#34006).
 
-Frappe's Data Import reader downloads the sheet; FAC keeps a private copy of it, so the
-session works on a file on the site like any other and what the dry run checked is what
+FAC downloads the tab's CSV export, bounded in size and time, and keeps a private copy of it,
+so the session works on a file on the site like any other and what the dry run checked is what
 gets imported. Google is never reached here: ``requests.get`` returns real Response objects
-built the way Google answers, so Frappe's own checks of the reply run as they do live.
+built the way Google answers, so the checks of the reply run as they do live.
 """
 
 import unittest
@@ -22,6 +22,7 @@ import frappe
 import requests
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
+from frappe_assistant_core.plugins.core import import_session
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
 LINK = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMn/edit#gid=0"
@@ -38,6 +39,7 @@ def _reply(status: int, content: bytes, content_type: str = "text/csv") -> reque
     response = requests.Response()
     response.status_code = status
     response._content = content
+    response._content_consumed = True  # read as it streams in, the body comes in pieces
     response.encoding = "utf-8"
     response.headers["Content-Type"] = content_type
     response.url = EXPORT
@@ -45,8 +47,22 @@ def _reply(status: int, content: bytes, content_type: str = "text/csv") -> reque
 
 
 def _google(*replies):
-    """Patch the download Frappe's reader makes: each call gets the next reply (or raises it)."""
-    return patch("frappe.utils.csvutils.requests.get", autospec=True, side_effect=list(replies))
+    """Patch the sheet's download: each call gets the next reply (or raises it)."""
+    return patch("requests.get", autospec=True, side_effect=list(replies))
+
+
+def _endless(reply, chunk=b"Customer,Retail,India\n" * 50):
+    """Make ``reply`` a body that never ends, as a huge or trickling sheet would. Returns the
+    list of chunks read, to show where reading stopped."""
+    read = []
+
+    def chunks(chunk_size=1, decode_unicode=False):
+        while True:
+            read.append(chunk)
+            yield chunk
+
+    reply.iter_content = chunks
+    return read
 
 
 class TestStartFromGoogleSheet(BaseAssistantTest):
@@ -109,6 +125,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
     # -- criterion 2: a sheet that can't be read is explained, never a silent failure ------
 
     def test_a_sheet_that_cant_be_read_explains_how_to_share_it(self):
+        frappe.clear_messages()  # setUp's user creation leaves its own messages
         replies = {
             "not shared: Google's sign-in page": _reply(200, SIGN_IN_PAGE, "text/html"),
             "deleted or mistyped": _reply(404, SIGN_IN_PAGE, "text/html"),
@@ -134,6 +151,44 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
                 self._start_fails("try again", google_sheets_url=LINK)
 
             self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+
+    # -- the download is bounded: a huge or slow sheet can't hold the server up -----------
+
+    def test_the_sheet_is_streamed_with_a_time_limit(self):
+        with _google(_reply(200, CSV_CONTENT)) as get:
+            self.assertTrue(self._run({"google_sheets_url": LINK})["success"])
+
+        self.assertIs(get.call_args.kwargs.get("stream"), True)
+        self.assertTrue(get.call_args.kwargs.get("timeout"))
+
+    def test_a_sheet_that_says_it_is_too_large_is_not_read(self):
+        reply = _reply(200, b"")
+        reply.headers["Content-Length"] = str(import_session.MAX_FILE_SIZE + 1)
+        read = _endless(reply)
+        with _google(reply):
+            self._start_fails("larger than", google_sheets_url=LINK)
+
+        self.assertEqual(read, [])
+        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+
+    def test_reading_stops_once_the_sheet_passes_the_size_limit(self):
+        reply = _reply(200, b"")
+        read = _endless(reply)
+        with patch.object(import_session, "MAX_FILE_SIZE", 10_000), _google(reply):
+            self._start_fails("larger than", google_sheets_url=LINK)
+
+        self.assertLess(sum(len(chunk) for chunk in read), 10_000 + len(read[0]) + 1)
+        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+
+    def test_a_sheet_that_takes_too_long_is_given_up(self):
+        reply = _reply(200, b"")
+        read = _endless(reply)
+        # A deadline already past: the first piece read finds the time is up.
+        with patch.object(import_session, "DOWNLOAD_SECONDS", -1), _google(reply):
+            self._start_fails("try again", google_sheets_url=LINK)
+
+        self.assertEqual(len(read), 1)
+        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
 
     def test_a_link_that_isnt_a_google_sheet_is_refused_without_downloading(self):
         for link in (

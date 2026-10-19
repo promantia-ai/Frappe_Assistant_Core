@@ -84,7 +84,8 @@ Its `status`, `template_options` (mapping), `transformation_rules`, `validation_
 - **Both `file_id` and `file_url`** — refused; give one. A Google Sheets link with a file is refused too.
 - **Google Sheet not shared, deleted, or the wrong tab** — refused with what to do: in Google Sheets click **Share**, under **General access** choose **Anyone with the link** (Viewer), then paste the link again. Pass the message on; don't retry until the user says it's shared.
 - **Not a Google Sheets link** (another site, Google Drive, `http://`) — refused: ask for the link from the browser's address bar while the sheet is open.
-- **Google Sheets didn't answer** — ask the user to try again in a moment.
+- **Google Sheets didn't answer** — ask the user to try again in a moment. The same message comes when the download takes more than 2 minutes.
+- **Google Sheet larger than 50 MB** — refused. Ask the user to split it into smaller sheets, one link each.
 - **Missing details** (`file_name`) — `columns` and `row_count` are required.
 - **Unknown sheet or no rows** (file on this site) — refused, listing the sheets that exist.
 - **Who sees a session** — the user who started it, and System Managers.
