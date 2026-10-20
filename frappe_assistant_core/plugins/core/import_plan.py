@@ -80,8 +80,12 @@ def join(plan_with: str) -> str:
         raise PlanProblem(_("Import session {0} not found, or it isn't yours.").format(plan_with))
     if is_plan(other):
         return other.name
-    if other.parent_session:
-        return other.parent_session
+    # Read again under a row lock: an AI client opens several files at the same moment, each
+    # "with" this one, and each would make its own plan. The lock makes the others wait until the
+    # first has made the plan and linked it here, then they read that link and join it.
+    parent = frappe.db.get_value(SESSION_DOCTYPE, other.name, "parent_session", for_update=True)
+    if parent:
+        return parent
     plan = frappe.get_doc(
         {
             "doctype": SESSION_DOCTYPE,

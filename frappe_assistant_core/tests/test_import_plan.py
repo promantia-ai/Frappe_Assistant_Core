@@ -14,6 +14,7 @@ The dependencies come from each file's mapped Link fields, not a written list.
 """
 
 import unittest
+from unittest.mock import patch
 
 import frappe
 
@@ -91,6 +92,27 @@ class TestPlan(PlanSteps, run_tests.ImportRunCase):
         self.assertEqual(
             (doc.file_source, doc.source_file, doc.user), ("Migration Plan", None, "Administrator")
         )
+
+    def test_files_opened_at_the_same_moment_share_one_plan(self):
+        # An AI client opens several files in parallel, each "with" the first. The second call
+        # loaded the first session before the first call linked it to the plan it made: it must
+        # find that plan (reading the link under a row lock), not make another.
+        items, _ = self._items(f"Raw {self.tag}")
+        stale = frappe.get_doc("FAC Import Session", items)  # read before the other request's link
+        _groups, first = self._item_groups(plan_with=items)
+
+        with patch("frappe_assistant_core.plugins.core.import_mapping.load_session", return_value=stale):
+            plan = import_plan.join(items)
+
+        self.assertEqual(plan, first["plan_session"])
+        self.assertEqual(
+            frappe.db.count(
+                "FAC Import Session",
+                {"file_source": "Migration Plan", "owner": "Administrator", "name": plan},
+            ),
+            1,
+        )
+        self.assertEqual(frappe.db.count("FAC Import Session", {"parent_session": items}), 0)
 
     def test_a_session_of_another_user_cant_be_planned_with(self):
         items, _ = self._items(f"Raw {self.tag}")
