@@ -144,7 +144,7 @@ def _session_files(session) -> List[tuple]:
     """(file, its Data Imports) for each file the session imported from, oldest first, then its
     current file. A Data Import with no file noted is of the current one."""
     files: Dict[str, List[str]] = {}
-    for link in session.data_imports:
+    for link in import_failures.own_links(session):
         if link.source_file and link.source_file != session.source_file:
             files.setdefault(link.source_file, [])
             if link.data_import not in files[link.source_file]:

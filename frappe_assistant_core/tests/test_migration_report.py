@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import frappe
 
-from frappe_assistant_core.plugins.core import import_signoff
+from frappe_assistant_core.plugins.core import import_failures, import_signoff
 
 # Modules, not their classes: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_failures as failures_tests
@@ -125,6 +125,23 @@ class TestDataImportSession(run_tests.ImportRunCase):
         self.assertEqual(
             summary["rows"], {"source": 4, "imported": 4, "excluded": 0, "failed": 0, "not_imported": 0}
         )
+
+    def test_a_linked_data_import_of_someone_else_is_not_followed(self):
+        # A session's child rows can be written over the REST API, so a link there can name another
+        # user's Data Import: its rows and failure messages must not reach this user's report.
+        session, _checked, _result = self._partly_imported()
+        doc = self._doc(session)
+        self.assertEqual(import_failures.imported_rows(doc), {2, 5})
+        user = self.make_throwaway_user("signoff", roles=("Sales User",))  # can't read Data Imports
+        doc.user = doc.owner = user  # a session of theirs that links the Administrator's import
+
+        frappe.set_user(user)
+
+        self.assertEqual(import_failures.imported_rows(doc), set())
+        self.assertEqual(import_failures._import_file_rows(doc.data_imports[0].data_import), [])
+        self.assertEqual(import_failures.runs(doc), [])
+        with self.assertRaises(run_tests.import_run.ImportProblem):  # never started again for them
+            run_tests.import_run.resume(doc)
 
     def test_before_the_import_the_checked_rows_are_not_imported_yet(self):
         session, _checked = self._ready_session()

@@ -53,10 +53,29 @@ class FailuresProblem(Exception):
 # -- what is already in -------------------------------------------------------------------
 
 
+def own_import(session, data_import: str, ptype: str = "read") -> bool:
+    """Whether a Data Import linked on the session is the session's to use: made by its user, or
+    one the current user has ``ptype`` on anyway ("write" to start it again). A session's child
+    rows can be written over the REST API, so a link to another user's import must not bring in
+    its rows, its file or its failure messages, nor be started. The session's user is the one
+    field that can't be set to someone else: it gives access to the session (its has_permission)."""
+    owner = frappe.db.get_value("Data Import", data_import, "owner")
+    if not owner:
+        return False
+    if owner == session.user:
+        return True
+    return frappe.has_permission("Data Import", ptype, doc=frappe.get_doc("Data Import", data_import))
+
+
+def own_links(session) -> list:
+    """The session's Data Import rows that own_import allows, in order."""
+    return [link for link in session.data_imports if own_import(session, link.data_import)]
+
+
 def imports_of_this_file(session) -> List[str]:
     """The session's Data Imports made from its current file, each once, oldest first."""
     names = []
-    for link in session.data_imports:
+    for link in own_links(session):
         # A link from before source_file was kept is from the file the session had then.
         if (link.source_file or session.source_file) == session.source_file and link.data_import not in names:
             names.append(link.data_import)
@@ -101,7 +120,7 @@ def came_back(session) -> set:
     both taken for one imported earlier."""
     earlier = [
         link.data_import
-        for link in session.data_imports
+        for link in own_links(session)
         if link.source_file and link.source_file != session.source_file
     ]
     seen: Counter = Counter()
@@ -137,7 +156,10 @@ def _import_file_rows(data_import: str) -> List[List[str]]:
     )
     if not file_url or not files:
         return []
-    return read_sheet_rows(frappe.get_doc("File", files[0]), None)
+    file_doc = frappe.get_doc("File", files[0])
+    if not frappe.has_permission("File", "read", doc=file_doc):
+        return []
+    return read_sheet_rows(file_doc, None)
 
 
 # -- explaining what failed -----------------------------------------------------------------
@@ -207,7 +229,7 @@ def next_steps() -> str:
 def runs(session) -> List[Dict[str, Any]]:
     """Every Data Import of the session once, oldest first, with its counts from its log."""
     names, purposes = [], {}
-    for link in session.data_imports:
+    for link in own_links(session):
         if link.data_import not in purposes:
             names.append(link.data_import)
             purposes[link.data_import] = link.purpose

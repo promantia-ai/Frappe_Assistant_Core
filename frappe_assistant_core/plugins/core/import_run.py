@@ -160,6 +160,9 @@ def resume(session) -> Tuple[str, str]:
     if not session.data_imports:
         raise ImportProblem(_("This session has no import to continue."))
     name = session.data_imports[-1].data_import
+    if not import_failures.own_import(session, name, "write"):
+        # A link written over the REST API: never start another user's Data Import.
+        raise ImportProblem(_("This session has no import to continue."))
     if is_job_enqueued(_job_id(name)):
         return name, "running"
     di = frappe.get_doc("Data Import", name)
