@@ -277,14 +277,16 @@ def _needs(session, engine, doctype) -> List[str]:
     if engine:
         row = ENGINE_ROWS[engine]
         mapped = set(_settings(session, engine).get("columns") or {})
+        # The engines keep their mapped columns in either place: opening stock as "items.item_code",
+        # opening invoices the party as "customer" or "supplier" in the session's own column map.
         mapped |= {
-            target.split(".", 1)[1]
+            cstr(target).split(".", 1)[-1]
             for target in dry_run.column_to_field_map(session).values()
-            if "." in cstr(target)
+            if target and target != "Don't Import"
         }
+        party = _settings(session, engine).get("party_type")
         for field in mapped:
-            if engine == "opening_invoices" and field == "party":
-                party = _settings(session, engine).get("party_type")
+            if engine == "opening_invoices" and field in ("party", "customer", "supplier"):
                 if party:
                     fields.append((None, party))
                 continue

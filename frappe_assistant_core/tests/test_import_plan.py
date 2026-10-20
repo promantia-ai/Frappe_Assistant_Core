@@ -20,6 +20,7 @@ import frappe
 
 from frappe_assistant_core.plugins.core import import_plan, import_signoff
 from frappe_assistant_core.tests import test_import_run as run_tests
+from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
 from frappe_assistant_core.tests.test_import_opening_stock import OpeningStockCase
 
 ITEM_GROUPS = {"Item Group Name": "item_group_name", "Parent Item Group": "parent_item_group"}
@@ -306,3 +307,24 @@ class TestPlanWithOpeningStock(PlanSteps, OpeningStockCase):
         opening = result["steps"][1]
         self.assertEqual(opening["after"], [1])
         self.assertEqual(opening["kind"], "opening")
+
+
+class TestPlanWithOpeningInvoices(PlanSteps, OpeningInvoicesCase):
+    def test_opening_invoices_wait_for_the_customers_they_are_owed_by(self):
+        # Opening invoices keep the party column in the session's own column map
+        receivables = self._session([f"{self.customer},INV-1,{self.date},{self.date},100"])
+        self.assertTrue(self._setup(receivables)["success"])
+        _customers, joined = self._open(
+            "customers.csv",
+            list(run_tests.MAPPING),
+            [[f"New {self.tag}", "Commercial", "Company"]],
+            run_tests.MAPPING,
+            "Customer",
+            plan_with=receivables,
+        )
+
+        result = self._plan(joined["plan_session"])
+
+        self.assertEqual([s["imports"] for s in result["steps"]], ["Customer", "Opening Sales Invoice"])
+        self.assertEqual(result["steps"][1]["after"], [1])
+        self.assertIn("Customer", result["steps"][1]["reason"])
