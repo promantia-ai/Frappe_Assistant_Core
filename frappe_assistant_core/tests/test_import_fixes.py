@@ -112,6 +112,31 @@ class TestImportFixes(BaseAssistantTest):
     def _doc(self, session):
         return frappe.get_doc("FAC Import Session", session)
 
+    def test_fixes_wait_for_a_check_of_the_file_the_session_has_now(self):
+        # A corrected file is linked and its check, queued for a large file, fails: the session
+        # keeps the last check's groups, of the file before. Their row numbers aren't this file's.
+        session, result = self._session()
+        group = self._group(result, "Not an allowed option")
+        lines = [
+            "Customer Name,Customer Group,Customer Type,Notes",
+            f"Zeta {self.tag},{self.existing_group},Company,",
+        ]
+        corrected = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "again.csv",
+                "content": ("\n".join(lines) + "\n").encode(),
+                "is_private": 1,
+            }
+        ).insert()
+        doc = self._doc(session)
+        import_dry_run.link_site_file(doc, corrected)  # what dry_run_import does before queueing it
+
+        response = self._fix_fails(session, {"group": group["id"], "action": "leave_out", "reason": "x"})
+
+        self.assertIn("Check it first", response["error"])
+        self.assertIsNone(self._doc(session).excluded_rows)
+
     # -- registration ------------------------------------------------------------------
 
     def test_fixes_are_an_input_of_the_dry_run_and_raise_no_approval_card(self):

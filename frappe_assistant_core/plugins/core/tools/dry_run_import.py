@@ -196,6 +196,15 @@ class DryRunImport(BaseTool):
                 raise dry_run.DryRunProblem(
                     _("Check the file first, without fixes; fixes apply to the groups it finds.")
                 )
+            if fixes and not import_fixes.checked_as_is(session):
+                # The groups are the last check's: of another file (its check stopped), or of
+                # another mapping. Their rows aren't the session's rows now.
+                raise dry_run.DryRunProblem(
+                    _(
+                        "The file changed since its last check. Check it first, without fixes: "
+                        "fixes apply to the groups that check finds."
+                    )
+                )
             dry_run.check_can_run(session)
 
             applied = None
