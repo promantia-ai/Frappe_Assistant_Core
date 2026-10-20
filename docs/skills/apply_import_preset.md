@@ -108,3 +108,4 @@ to export the masters from Tally, as XML or Excel.
 | `values` | No | Answers to `needs`, by name |
 | `targets` | No | Open only these targets |
 | `parts` | No | Tally XML only: the parts to import, `ledgers` and/or `stock_items`. Leave it out to list the parts first. |
+| `plan_with` | No | When the user migrates several files: the session_id of another file of the same migration (or its plan). The sessions opened join that plan. Sessions opened from one file share a plan (`plan_session`) on their own. |

@@ -65,6 +65,27 @@ NOT_TOOLS = {
     "import_session",
     "session_id",
     "status",
+    # a migration plan's arguments and reply (#33995)
+    "after",
+    "detail",
+    "done",
+    "file",
+    "imports",
+    "in_step",
+    "kind",
+    "missing",
+    "next",
+    "not_in_files",
+    "parent_session",
+    "pending",
+    "plan_session",
+    "plan_with",
+    "reason",
+    "running",
+    "session",
+    "state",
+    "steps",
+    "undone",
 }
 
 

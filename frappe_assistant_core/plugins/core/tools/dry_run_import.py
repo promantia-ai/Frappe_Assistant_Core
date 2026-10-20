@@ -21,7 +21,7 @@ from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes
+from frappe_assistant_core.plugins.core import import_failures, import_fixes, import_plan
 from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
 from frappe_assistant_core.plugins.core.import_session import (
     FileProblem,
@@ -72,6 +72,9 @@ class DryRunImport(BaseTool):
         self.requires_permission = None  # checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)
         self.untrusted_fields = (
+            "steps",
+            "next",
+            "message",
             "groups",
             "masters_plan",
             "left_out",
@@ -148,6 +151,12 @@ class DryRunImport(BaseTool):
             return {"success": False, "error": f"Import session '{session_name}' not found."}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
+
+        if import_plan.is_plan(session):
+            # A plan has no file: its "check" is the order of its files and where each stands.
+            if fixes or file_id or file_url or sheet_url or arguments.get("failed_rows_file"):
+                return {"success": False, "error": import_plan.refused(session), "session": session_name}
+            return {"success": True, **import_plan.build(session)}
 
         if arguments.get("failed_rows_file"):
             if fixes or file_id or file_url or sheet_url:

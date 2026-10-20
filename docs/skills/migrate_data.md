@@ -65,6 +65,34 @@ If a file needs records from a later file (for example, Customers whose group is
 Group file), import the other file first. Use step 5 only for a few missing masters the file
 doesn't bring itself.
 
+## Planning several files
+
+When the user has **two or more files**, make them one migration plan, and let the plan decide the
+order: never work it out yourself.
+
+1. Open the first file's session as usual. For every other file, pass `plan_with` (the session_id
+   of a file already opened) to `start_import_session` or `apply_import_preset`. The reply gives the
+   `plan_session`. Several sessions a preset opens from one file share a plan on their own.
+2. Map each file (`set_column_mapping`): the plan reads what each file links to from its mapping.
+3. Call `dry_run_import` with `session` = the **plan_session**. It writes nothing and returns the
+   `steps` in the order to import, each with:
+   - `imports`, `kind` (accounts, master, transaction, opening, trial balance), `file`;
+   - `after`: the steps it waits for, and `reason`: why it goes there (said by the engine: quote it);
+   - `state` (`pending`, `running`, `done`, `needs attention`, `undone`) and `detail`;
+   - `missing`: after a file's own check, the records it links to that aren't in ERPNext, with
+     `in_step` (the step whose file brings them) and `not_in_files` (no file brings them: create
+     them, or ask for their file).
+
+   And `next`: the step to work on now and what to do. Show the steps as a table, with the reason.
+   If you keep a task plan (the Task Rail), make its tasks these steps, in this order.
+4. Work through `next` one file at a time, each file through the eight steps above. After each
+   file, read the plan again and say what's next.
+5. **When the user comes back** ("where are we?"), find their plan (`get_document` on a session of
+   theirs: its `parent_session`) and read it the same way: it shows what is done, running and
+   pending from the sessions as they are now.
+
+A plan has no file of its own: map, check and import each file's session, never the plan.
+
 ## What goes wrong without this skill
 
 - **Steps out of order.** Importing before the dry run, or starting a new session for failed rows.

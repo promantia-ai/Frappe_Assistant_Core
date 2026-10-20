@@ -18,6 +18,11 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 | `fixes` | array | No | The user's fixes for the last check's groups: `{group, action, to?, reason?}`. See **Fixing the groups**. |
 | `failed_rows_file` | boolean | No | `true` to get the rows still not imported (failed, or left out), with the reason for each, as a CSV to download. Nothing is checked. Send it on its own. |
 
+When `session` is a **migration plan** (the `plan_session` of several files), nothing is checked or
+written: the reply is the plan, its files in the order to import them with why, what each still
+needs and where each stands, and `next`. See the migrate-data skill, **Planning several files**.
+Fixes and files are refused for a plan: they go to each file's own session.
+
 ## Response Format
 
 ```json

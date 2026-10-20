@@ -22,6 +22,7 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
+from frappe_assistant_core.plugins.core import import_plan
 from frappe_assistant_core.plugins.core.import_session import (
     FileProblem,
     SheetSummary,
@@ -106,6 +107,12 @@ class StartImportSession(BaseTool):
                     "enum": ["Insert New Records", "Update Existing Records"],
                     "description": "Default: Insert New Records.",
                 },
+                "plan_with": {
+                    "type": "string",
+                    "description": "When the user is migrating several files: the session_id of another "
+                    "file of the same migration (or its plan_session). This file joins that migration's "
+                    "plan; read the plan with dry_run_import on the returned plan_session.",
+                },
             },
         }
 
@@ -162,8 +169,16 @@ class StartImportSession(BaseTool):
             discard_sheet_copy(copy)
             return {"success": False, "error": problem, "row_count": chosen.row_count}
 
+        plan = None
+        if arguments.get("plan_with"):
+            try:
+                plan = import_plan.join(arguments["plan_with"])
+            except import_plan.PlanProblem as e:
+                discard_sheet_copy(copy)
+                return {"success": False, "error": str(e)}
+
         session = self._create_session(
-            file_doc, file_name, sheets, chosen, target_doctype, import_type, sheet_url or None
+            file_doc, file_name, sheets, chosen, target_doctype, import_type, sheet_url or None, plan
         )
 
         result = {
@@ -177,6 +192,8 @@ class StartImportSession(BaseTool):
             "target_doctype": target_doctype,
             "status": session.status,
         }
+        if plan:
+            result["plan_session"] = plan
         if file_doc:
             # Read from the site file for the assistant to show; never stored.
             result["sample_rows"] = chosen.sample_rows
@@ -193,7 +210,9 @@ class StartImportSession(BaseTool):
             )
         return result
 
-    def _create_session(self, file_doc, file_name, sheets, chosen, target_doctype, import_type, sheet_url):
+    def _create_session(
+        self, file_doc, file_name, sheets, chosen, target_doctype, import_type, sheet_url, plan=None
+    ):
         if sheet_url:
             source = "Google Sheet"
         else:
@@ -213,6 +232,7 @@ class StartImportSession(BaseTool):
                 "target_doctype": target_doctype,
                 "import_type": import_type,
                 "status": "File Read",
+                "parent_session": plan,
             }
         )
         where = " " + _("from sheet {0}").format(chosen.name) if chosen.name else ""

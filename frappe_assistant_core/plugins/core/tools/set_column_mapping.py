@@ -25,7 +25,7 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_update
+from frappe_assistant_core.plugins.core import import_plan, import_update
 from frappe_assistant_core.plugins.core.import_mapping import (
     DONT_IMPORT,
     SESSION_DOCTYPE,
@@ -124,7 +124,7 @@ class SetColumnMapping(BaseTool):
             # Mapping sets the session back to Mapped, for a check of the rows not imported yet: never
             # while its import runs (a second import would take rows the first hasn't reached yet),
             # nor once it was cancelled or undone.
-            refused = _mapping_refused(doc.status) or _check_running(doc)
+            refused = import_plan.refused(doc) or _mapping_refused(doc.status) or _check_running(doc)
             if refused:
                 return {"success": False, "error": refused, "session": session_name}
 

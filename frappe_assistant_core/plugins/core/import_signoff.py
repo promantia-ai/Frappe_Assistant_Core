@@ -339,7 +339,8 @@ def sessions_of(
     """The sessions to report on, oldest first, that the user may read: the ones named, else
     ``user``'s (the current user's by default), started between the dates when given. Cancelled
     ones are left out."""
-    filters: List[Any] = [["status", "!=", "Cancelled"]]
+    # A migration plan (#33995) has no file: its files' sessions are reported, not it.
+    filters: List[Any] = [["status", "!=", "Cancelled"], ["file_source", "!=", "Migration Plan"]]
     if names:
         filters.append(["name", "in", list(names)])
     else:

@@ -75,8 +75,11 @@ class StartImport(BaseTool):
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
+        from frappe_assistant_core.plugins.core import import_plan
         from frappe_assistant_core.plugins.core.import_dry_run import special_engine
 
+        if import_plan.is_plan(session):
+            return {"success": False, "error": import_plan.refused(session), "session": session_name}
         engine = special_engine(session)
         if engine:
             return {

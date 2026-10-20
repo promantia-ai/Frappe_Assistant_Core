@@ -23,8 +23,10 @@ from typing import Any, Dict, List
 
 import frappe
 from frappe import _
+from frappe.utils import cstr
 
 from frappe_assistant_core.core.base_tool import BaseTool
+from frappe_assistant_core.plugins.core import import_plan
 from frappe_assistant_core.plugins.core import import_presets as presets
 from frappe_assistant_core.plugins.core import import_tally_xml as tally_xml
 from frappe_assistant_core.plugins.core.import_mapping import (
@@ -33,6 +35,7 @@ from frappe_assistant_core.plugins.core.import_mapping import (
     build_import_schema,
     describe_mapping,
     duplicate_targets,
+    load_session,
     resolve_mapping,
     save_mapping,
 )
@@ -105,6 +108,12 @@ class ApplyImportPreset(BaseTool):
         self.inputSchema = {
             "type": "object",
             "properties": {
+                "plan_with": {
+                    "type": "string",
+                    "description": "When the user is migrating several files: the session_id of another "
+                    "file of the same migration (or its plan_session). The sessions opened join that "
+                    "plan. Several sessions opened from one file share a plan on their own.",
+                },
                 "file_id": {
                     "type": "string",
                     "description": "ID of a file on this site (its name in File Manager).",
@@ -137,6 +146,29 @@ class ApplyImportPreset(BaseTool):
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        plan_with = cstr(arguments.get("plan_with")).strip()
+        if plan_with:
+            try:
+                load_session(plan_with)  # refused before any work: nothing is opened for a wrong one
+            except (frappe.DoesNotExistError, frappe.PermissionError):
+                frappe.clear_last_message()
+                return {
+                    "success": False,
+                    "error": _("Import session {0} not found, or it isn't yours.").format(plan_with),
+                }
+        result = self._apply(arguments)
+        opened = [s["session_id"] for s in result.get("sessions") or []]
+        for part in result.get("results") or []:
+            opened += [s["session_id"] for s in part.get("sessions") or []]
+        if opened and (plan_with or len(opened) > 1):
+            # One file's several targets (customers, suppliers, accounts) need an order too (#33995)
+            plan = import_plan.join(plan_with or opened[0])
+            for name in opened:
+                frappe.db.set_value(SESSION_DOCTYPE, name, "parent_session", plan, update_modified=False)
+            result["plan_session"] = plan
+        return result
+
+    def _apply(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         file_id = (arguments.get("file_id") or "").strip()
         file_url = (arguments.get("file_url") or "").strip()
         if not file_id and not file_url:

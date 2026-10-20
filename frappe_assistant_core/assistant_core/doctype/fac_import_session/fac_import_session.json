@@ -80,7 +80,7 @@
    "fieldtype": "Select",
    "in_standard_filter": 1,
    "label": "File Source",
-   "options": "Site File\nChat Attachment\nGoogle Sheet",
+   "options": "Site File\nChat Attachment\nGoogle Sheet\nMigration Plan",
    "read_only": 1
   },
   {
