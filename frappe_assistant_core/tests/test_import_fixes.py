@@ -556,3 +556,30 @@ class TestRowRanges(BaseAssistantTest):
         self.assertLess(len(text), 300, text)
         self.assertTrue(text.startswith("2, 4, 6"), text)
         self.assertTrue(text.endswith("and 19980 more rows"), text)
+
+
+class TestSwitchedOffRecords(BaseAssistantTest):
+    def test_a_record_switched_off_by_its_enabled_field_is_never_offered_or_taken(self):
+        # UOM and Currency are switched off by "enabled", not "disabled"
+        tag = frappe.generate_hash(length=6)
+        off = frappe.get_doc({"doctype": "UOM", "uom_name": f"Kilogram {tag}", "enabled": 0}).insert().name
+        on = frappe.get_doc({"doctype": "UOM", "uom_name": f"Kilogramme {tag}"}).insert().name
+        group = {
+            "cause": import_dry_run.CAUSE_MISSING_LINK,
+            "link_doctype": "UOM",
+            "label": "UOM",
+            "parent": "Item",
+            "field": "stock_uom",
+            "value": f"Kilogrm {tag}",
+        }
+
+        closest = import_fixes.closest_names("UOM", f"Kilogrm {tag}")
+        with self.assertRaises(import_fixes.FixProblem) as refused:
+            import_fixes._map(frappe._dict(template_options="{}"), group, {"to": off}, [])
+
+        self.assertIn(on, closest)
+        self.assertNotIn(off, closest)
+        self.assertIn("switched off", str(refused.exception))
+        self.assertEqual(
+            import_fixes._map(frappe._dict(template_options="{}"), group, {"to": on}, [])[0]["to"], on
+        )

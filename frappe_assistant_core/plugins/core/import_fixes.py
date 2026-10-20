@@ -212,9 +212,7 @@ def closest_names(doctype: str, value: str, limit: int = CLOSEST_LIMIT) -> List[
     if not frappe.has_permission(doctype, "read"):
         return []
     meta = frappe.get_meta(doctype)
-    filters = {}
-    if meta.has_field("disabled"):
-        filters["disabled"] = 0
+    filters = _switched_on(meta)
     if meta.is_tree and meta.has_field("is_group"):
         filters["is_group"] = 0
 
@@ -230,6 +228,16 @@ def closest_names(doctype: str, value: str, limit: int = CLOSEST_LIMIT) -> List[
                 limit_page_length=WORD_MATCHES,
             )
     return rank(value, names, limit)
+
+
+def _switched_on(meta) -> Dict[str, int]:
+    """Filters for the records not switched off: by "disabled", or by "enabled" (UOM, Currency)."""
+    filters = {}
+    if meta.has_field("disabled"):
+        filters["disabled"] = 0
+    if meta.has_field("enabled"):
+        filters["enabled"] = 1
+    return filters
 
 
 def rank(value: str, candidates: List[str], limit: int = CLOSEST_LIMIT) -> List[str]:
@@ -530,6 +538,12 @@ def _map(session, group, fix, maps):
             )
         if doctype == "Account" and opening_balances.is_opening_balances(session):
             _check_account(session, to)
+        if not frappe.db.exists(doctype, {"name": to, **_switched_on(frappe.get_meta(doctype))}):
+            closest = closest_names(doctype, to)
+            raise FixProblem(
+                _("{0} '{1}' is switched off, so the rows can't use it.").format(_(doctype), to)
+                + (" " + _("Closest: {0}.").format(", ".join(closest)) if closest else "")
+            )
     elif to not in _select_options(session, group):
         raise FixProblem(
             _("'{0}' isn't one of the choices for {1}: {2}.").format(
