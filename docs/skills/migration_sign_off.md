@@ -33,7 +33,9 @@ Start with the report's `report_summary` cards (rows in the files, imported, lef
 failed, not imported, ready to sign off). Then each `section` of the rows:
 
 - **Records**: per DocType, the rows in the files, imported, left out, failed and not imported. They
-  always add up to the rows in the files.
+  always add up to the rows in the files. Rows the user sent back corrected (the failed-rows file,
+  a whole file sent again, a Google Sheet fetched again) are counted as rows of the first file:
+  a row is counted once, and stays imported whichever file brought it in.
 - **Why Not Imported**: for each reason, how many rows and which ones (row numbers in the file).
 - **Opening Balances**: stock value, receivables and payables per company: in the files, the part not
   imported, the files' amount for the rows imported, in ERPNext, and the difference. A receivable or

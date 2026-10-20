@@ -27,7 +27,9 @@ from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 from frappe_assistant_core.plugins.core import import_failures, import_fixes
 from frappe_assistant_core.plugins.core.import_session import (
     FileProblem,
+    get_readable_file_by_id,
     read_sheet_rows,
+    read_spreadsheet,
     readable_session_file,
 )
 
@@ -93,24 +95,98 @@ def adds_up(rows: Dict[str, int]) -> bool:
 
 
 def data_import_outcomes(session) -> List[Dict[str, Any]]:
-    """Every non-blank row of a Data Import session's file and where it stands: in a success log
-    of a Data Import made from it, left out by the user, refused by the last Data Import or the
-    last check (with why), or not imported yet."""
-    rows = read_sheet_rows(readable_session_file(session), session.sheet or None)
-    imported = import_failures.imported_rows(session)
-    left = {entry["row"]: entry["reason"] for entry in import_fixes.left_out(session)}
+    """Every non-blank row of a Data Import session's files and where it stands, numbered as in
+    its first file: in a success log of a Data Import, left out, refused by the last Data Import
+    or the last check (with why), or not imported yet.
 
+    A session imports from more than one file when the user sends rows back corrected (#33994):
+    a failed-rows file holds some rows, each with its row number in the file before it
+    (import_failures.ROW_COLUMN); a whole file sent again, or a Google Sheet fetched again, keeps
+    its rows in their places. Each later file's rows are laid over the row they stand for, and a
+    row imported from any file stays imported; a row a later file leaves out keeps where it stood.
+    Reading only the current file, the report forgot every row the earlier files brought in."""
+    files = _session_files(session)
+    merged: Dict[Any, Dict[str, Any]] = {}
+    to_first: Optional[Dict[int, Any]] = None  # row of the file before -> row of the first file
+    for file_name, names in files:
+        if file_name == session.source_file:
+            rows, outcomes = _current_file_outcomes(session)
+        else:
+            rows, outcomes = _earlier_file_outcomes(file_name, names)
+        if not rows:
+            continue
+        back = _row_column(rows[0])
+        place: Dict[int, Any] = {}
+        for outcome in outcomes:
+            number = outcome["row"]
+            if to_first is None:
+                first = number
+            else:
+                before = (
+                    _int(rows[number - 1][back])
+                    if back is not None and back < len(rows[number - 1])
+                    else number
+                )
+                first = to_first.get(before, ("later", file_name, number))
+            place[number] = first
+            if merged.get(first, {}).get("status") != "imported":
+                merged[first] = {**outcome, "row": first}
+        to_first = place  # the next file's row numbers are this file's
+    numbered = sorted(key for key in merged if isinstance(key, int))
+    extra = [key for key in merged if not isinstance(key, int)]
+    last = numbered[-1] if numbered else 1
+    for offset, key in enumerate(extra, start=1):  # a row no earlier file had
+        merged[key]["row"] = last + offset
+    return [merged[key] for key in numbered + extra]
+
+
+def _session_files(session) -> List[tuple]:
+    """(file, its Data Imports) for each file the session imported from, oldest first, then its
+    current file. A Data Import with no file noted is of the current one."""
+    files: Dict[str, List[str]] = {}
+    for link in session.data_imports:
+        if link.source_file and link.source_file != session.source_file:
+            files.setdefault(link.source_file, [])
+            if link.data_import not in files[link.source_file]:
+                files[link.source_file].append(link.data_import)
+    return [*files.items(), (session.source_file, import_failures.imports_of_this_file(session))]
+
+
+def _row_column(header: List[Any]) -> Optional[int]:
+    for i, name in enumerate(header):
+        if cstr(name).strip() == import_failures.ROW_COLUMN:
+            return i
+    return None
+
+
+def _int(value) -> Optional[int]:
+    try:
+        return int(cstr(value).strip())
+    except ValueError:
+        return None
+
+
+def _refused_by(data_import: Optional[str]) -> Dict[int, str]:
     refused: Dict[int, str] = {}
-    names = import_failures.imports_of_this_file(session)
-    if names:
+    if data_import:
         for log in frappe.get_all(
             "Data Import Log",
-            filters={"data_import": names[-1], "success": 0},
+            filters={"data_import": data_import, "success": 0},
             fields=["row_indexes", "messages"],
             order_by="log_index",
         ):
             for row in frappe.parse_json(log.row_indexes or "[]") or []:
                 refused[int(row)] = import_failures.log_reason(log.messages)
+    return refused
+
+
+def _current_file_outcomes(session):
+    """The session's current file: its rows, and where each non-blank one stands."""
+    rows = read_sheet_rows(readable_session_file(session), session.sheet or None)
+    imported = import_failures.imported_rows(session)
+    left = {entry["row"]: entry["reason"] for entry in import_fixes.left_out(session)}
+    names = import_failures.imports_of_this_file(session)
+    refused = _refused_by(names[-1] if names else None)
     for row, reason in _check_failures(session).items():
         refused.setdefault(row, reason)
 
@@ -128,7 +204,50 @@ def data_import_outcomes(session) -> List[Dict[str, Any]]:
             out.append({"row": number, "status": "failed", "reason": refused[number]})
         else:
             out.append({"row": number, "status": "not_imported", "reason": _(NOT_IMPORTED)})
-    return out
+    return rows, out
+
+
+def _earlier_file_outcomes(file_name: str, names: List[str]):
+    """A file the session imported from before its current one: its rows, and where each
+    non-blank one stood when the next file came. Its Data Import's own file blanks the rows left
+    out (and those imported before), so a row blank there that no import brought in was left
+    out. The file is read again for its rows; when it is gone, that imported file stands in."""
+    imported_file = import_failures._import_file_rows(names[-1]) if names else []
+    rows = _earlier_rows(file_name, imported_file) or imported_file
+    success = import_failures._success_rows(names) if names else set()
+    refused = _refused_by(names[-1] if names else None)
+    out = []
+    for number, values in enumerate(rows[1:], start=2):
+        if not any(cstr(v).strip() for v in values):
+            continue
+        sent = imported_file[number - 1] if number - 1 < len(imported_file) else []
+        if number in success:
+            out.append({"row": number, "status": "imported"})
+        elif number in refused:
+            out.append({"row": number, "status": "failed", "reason": refused[number]})
+        elif not any(cstr(v).strip() for v in sent):
+            out.append({"row": number, "status": "excluded", "reason": _("Left out by the user")})
+        else:
+            out.append({"row": number, "status": "not_imported", "reason": _(NOT_IMPORTED)})
+    return rows, out
+
+
+def _earlier_rows(file_name: str, imported_file: List[List[str]]) -> List[List[str]]:
+    """The rows of an earlier file of the session: the sheet whose headings are the ones its
+    Data Import took. [] when the file is gone, isn't the user's to read, or has no such sheet."""
+    if not imported_file:
+        return []
+    want = import_failures.own_columns(dry_run.unique_headers(imported_file[0]))
+    try:
+        file_doc = get_readable_file_by_id(file_name)
+        sheets = [sheet.name for sheet in read_spreadsheet(file_doc).sheets]
+        for sheet in sheets:
+            rows = read_sheet_rows(file_doc, sheet)
+            if rows and import_failures.own_columns(dry_run.unique_headers(rows[0])) == want:
+                return rows
+    except FileProblem:
+        pass
+    return []
 
 
 def _check_failures(session) -> Dict[int, str]:
