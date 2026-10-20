@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 import frappe
 import requests
 from frappe import _
+from frappe.core.api.file import get_max_file_size
 from frappe.utils import cint
 
 SUPPORTED_EXTENSIONS = ("csv", "xlsx", "xls")
@@ -142,21 +143,28 @@ def _download_sheet(url: str) -> bytes:
     """The CSV export of the tab ``url`` links to, the way Frappe's
     get_csv_content_from_google_sheets builds its link, but streamed: refused once it passes
     MAX_FILE_SIZE or DOWNLOAD_SECONDS, so a huge or trickling sheet can't hold a worker."""
-    gid = url.rsplit("gid=", 1)[1] if "gid=" in url else 0
-    export = url.rsplit("/edit", 1)[0] + f"/export?format=csv&gid={gid}"
+    # The tab's number only: a "link to this range" adds "&range=…" after it
+    gid = re.search(r"gid=(\d+)", url)
+    export = url.split("/edit", 1)[0] + f"/export?format=csv&gid={gid.group(1) if gid else 0}"
     deadline = time.monotonic() + DOWNLOAD_SECONDS
+    # Frappe's File refuses what passes System Settings' Max File Size (25 MB by default)
+    limit = min(MAX_FILE_SIZE, get_max_file_size())
+    too_large = _("The sheet is larger than {0} MB, the largest file this site takes.").format(
+        round(limit / (1024 * 1024), 1)
+    )
 
     with requests.get(
         export, headers={"Accept": "text/csv"}, stream=True, timeout=DOWNLOAD_TIMEOUT
     ) as response:
         response.raise_for_status()
-        if cint(response.headers.get("Content-Length")) > MAX_FILE_SIZE:
-            raise FileProblem(_("The sheet is larger than 50 MB."))
+        if cint(response.headers.get("Content-Length")) > limit:
+            raise FileProblem(too_large)
         content = bytearray()
-        for chunk in response.iter_content(chunk_size=64 * 1024):
+        # As the pieces arrive: a large piece trickling in would put off the time limit
+        for chunk in response.iter_content(chunk_size=None):
             content += chunk
-            if len(content) > MAX_FILE_SIZE:
-                raise FileProblem(_("The sheet is larger than 50 MB."))
+            if len(content) > limit:
+                raise FileProblem(too_large)
             if time.monotonic() > deadline:
                 raise FileProblem(_cant_reach_google())
 
