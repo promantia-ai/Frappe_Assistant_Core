@@ -180,6 +180,36 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
         self.assertLess(sum(len(chunk) for chunk in read), 10_000 + len(read[0]) + 1)
         self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
 
+    def test_reading_stops_at_the_sites_own_file_size_limit(self):
+        # Frappe's File refuses anything over System Settings' Max File Size (25 MB by default):
+        # past it, the sheet is refused while it is read, with the size the site takes.
+        reply = _reply(200, b"")
+        read = _endless(reply)
+        with patch.object(import_session, "get_max_file_size", return_value=10_000), _google(reply):
+            error = self._start_fails("larger than", google_sheets_url=LINK)
+
+        self.assertLess(sum(len(chunk) for chunk in read), 10_000 + len(read[0]) + 1)
+        self.assertNotIn("50 MB", str(error))
+
+    def test_the_sheet_is_read_as_it_arrives(self):
+        # Pieces as the network gives them: a 64 KB piece trickling in would hold the read
+        # (and put off the time limit) until the whole piece came.
+        reply = _reply(200, CSV_CONTENT)
+        asked = []
+        real = reply.iter_content
+        reply.iter_content = lambda chunk_size=1, decode_unicode=False: asked.append(chunk_size) or real(1024)
+        with _google(reply):
+            self.assertTrue(self._run({"google_sheets_url": LINK})["success"])
+
+        self.assertEqual(asked, [None])
+
+    def test_only_the_tab_of_a_range_link_is_read(self):
+        # "Get link to this range" adds &range=… after the gid: the whole tab is read, not the range
+        with _google(_reply(200, CSV_CONTENT)) as get:
+            self.assertTrue(self._run({"google_sheets_url": LINK + "&range=A1:C3"})["success"])
+
+        self.assertEqual(get.call_args.args[0], EXPORT)
+
     def test_a_sheet_that_takes_too_long_is_given_up(self):
         reply = _reply(200, b"")
         read = _endless(reply)
