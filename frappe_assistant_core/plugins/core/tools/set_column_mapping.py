@@ -170,7 +170,7 @@ class SetColumnMapping(BaseTool):
                     "columns": headers,
                 }
 
-            described = describe_mapping(schema, headers, merged)
+            described = describe_mapping(schema, headers, merged, update=import_type == import_update.UPDATE)
             doc.import_type = import_type
             doc.match_key = match_key
             save_mapping(doc, target, merged, described["summary"])

@@ -65,6 +65,15 @@ class UpdateCase(run_tests.ImportRunCase):
 
 
 class TestUpdateMapping(UpdateCase):
+    def test_an_update_is_not_asked_for_required_fields_it_leaves_alone(self):
+        # An update changes only the fields mapped: Customer Name, required to create a customer,
+        # isn't needed to change a website
+        _session, mapped = self._session([f"TAX-A-{self.tag},{self.group},https://new.example"])
+
+        self.assertTrue(mapped["success"], mapped)
+        self.assertEqual(mapped["result"]["missing_required"], [])
+        self.assertNotIn("required", mapped["result"]["summary"])
+
     def test_the_mapping_saves_the_match_fields(self):
         session, mapped = self._session([f"TAX-A-{self.tag},{self.group},https://new.example"])
 

@@ -65,7 +65,7 @@ While the session's import is running (**Importing**) the mapping is kept: wait 
 1. **Show the result as a table**: *Your column → ERPNext field*. Show each child table in its own table under its title. Below, mark the **unmapped columns** and the **required fields with no column** clearly. An unmapped column is not imported, like one mapped to "Don't Import".
 2. **Don't guess.** When you aren't confident about a column, leave it out of the call and ask the user with a choice card (`ask_user`), offering the likely fields and "Don't import". Then save their answer.
 3. **Corrections are one call.** When the user says "that's the billing city, not the shipping city", send just that column with its new field. The other columns keep their mapping. Confirm the change in a sentence.
-4. **A required field with no column** needs a decision: map a column to it, rely on its default if it has one, or the user adds the column to the file.
+4. **A required field with no column** needs a decision: map a column to it, rely on its default if it has one, or the user adds the column to the file. An update (Update Existing Records) lists none: it changes only the fields mapped.
 5. **Changing the target DocType** clears the mapping, because the fields differ. Say so before you do it.
 
 ## Next
