@@ -299,6 +299,8 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
 
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
     file_doc = readable_session_file(session)
+    sheet_rows = read_sheet_rows(file_doc, session.sheet or None)
+    _real_size(len(sheet_rows) - 1, in_background=commit_progress)
     # What is checked is the session as it is now: a change saved while the check runs (a remap
     # in another request) must not be stamped as checked when the result is stored.
     _checking()[session_name] = fingerprint(session, file_doc)
@@ -307,7 +309,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
         return engine.run(session_name, commit_progress=commit_progress)
     from frappe_assistant_core.plugins.core import import_update
 
-    rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
+    rows = apply_value_maps(session, sheet_rows)
     matches, column_map = None, None
     if import_update.is_update(session) and import_update.match_fields(session):
         matches = import_update.match_records(session, rows)
@@ -752,6 +754,22 @@ def held_back():
 
 
 # -- storing the result ----------------------------------------------------------------
+
+
+def _real_size(rows: int, in_background: bool) -> None:
+    """The Max Rows refusal and the choice of a background check read the row count the session
+    recorded, whose fields can be written over the REST API: the file's own count is held to them
+    too, so a file swapped in is neither checked past the limit nor inside the web request."""
+    problem = row_limit_problem(rows)
+    if problem:
+        raise DryRunProblem(problem)
+    if not in_background and rows > BACKGROUND_ROWS:
+        raise DryRunProblem(
+            _(
+                "This file has {0} rows, not the number this session recorded, so it isn't checked "
+                "here. Start a new import session for it."
+            ).format(rows)
+        )
 
 
 def _checking() -> Dict[str, str]:
