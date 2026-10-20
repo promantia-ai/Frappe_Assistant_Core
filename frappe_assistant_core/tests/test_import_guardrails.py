@@ -21,7 +21,7 @@ import frappe
 
 from frappe_assistant_core.mcp.server import MCPServer
 from frappe_assistant_core.mcp.tool_adapter import build_tool_dict
-from frappe_assistant_core.plugins.core import import_fixes, import_session
+from frappe_assistant_core.plugins.core import import_dry_run, import_fixes, import_session
 
 # The module, not its class: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_run as run_tests
@@ -159,6 +159,22 @@ class TestFileContentIsFenced(GuardrailCase):
     def test_create_document_names_the_file_content_its_replies_carry(self):
         # With import_session it creates an import's missing masters, named as the file has them.
         self.assertTrue(self.registry.get_tool("create_document").untrusted_fields)
+
+    def test_a_validate_only_list_reaches_the_model_fenced(self):
+        # Checking records before creating them: an error can quote the file's value ("<it> is
+        # not a valid Email Address")
+        payload = self._mcp(
+            "create_document",
+            {
+                "documents": [
+                    {"doctype": "Lead", "data": {"lead_name": f"L {self.tag}", "email_id": INJECTION}}
+                ],
+                "validate_only": True,
+            },
+        )
+
+        self.assertFalse(payload["validation_passed"], payload)
+        self.assertFencedWherever(payload)
 
     def test_a_master_that_was_not_planned_is_refused_fenced_and_briefly(self):
         rows = [f"Acme {self.tag},{INJECTION},Company"]
@@ -387,6 +403,40 @@ class TestTheRowLimit(GuardrailCase):
         missing = frappe.ValidationError("Field max_import_rows does not exist on Assistant Core Settings")
         with patch.object(frappe.db, "get_single_value", side_effect=missing):
             self.assertEqual(import_session.max_import_rows(), 50000)
+
+    def _swapped(self, count):
+        """A mapped session on a 2-row file whose source_file is then pointed at a ``count``-row
+        file, its recorded row count left at 2: a session's fields can be written over the REST
+        API, read-only or not, which is how production gets here."""
+        session = self._run("start_import_session", {"file_id": self._csv(self._rows(2)).name})["result"]
+        mapped = self._run(
+            "set_column_mapping",
+            {"session": session["session_id"], "mapping": run_tests.MAPPING, "doctype": "Customer"},
+        )
+        self.assertTrue(mapped["success"], mapped)
+        frappe.db.set_value(
+            "FAC Import Session", session["session_id"], "source_file", self._csv(self._rows(count)).name
+        )
+        return session["session_id"]
+
+    def test_the_limit_counts_the_files_rows_not_the_count_the_session_recorded(self):
+        self._limit(3)
+        session = self._swapped(4)
+
+        reply = self._run("dry_run_import", {"session": session})
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("Split it", json.dumps(reply))
+
+    def test_a_large_file_is_never_checked_inside_the_request(self):
+        # Over 500 rows a check runs in the background; the recorded count says 2
+        session = self._swapped(600)
+
+        with patch.object(import_dry_run, "enqueue", autospec=True):
+            reply = self._run("dry_run_import", {"session": session})
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("600 rows", json.dumps(reply))
 
     def test_a_corrected_file_over_the_limit_is_refused_and_the_session_keeps_its_file(self):
         self._limit(3)
