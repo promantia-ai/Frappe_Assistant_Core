@@ -73,6 +73,59 @@ class TestDataImportSession(run_tests.ImportRunCase):
         self.assertIn(GROUP_NODE, failed["reason"])
         self.assertEqual((summary["label"], summary["finished"]), ("Customer", True))
 
+    _failed_rows = failures_tests.TestImportFailures._failed_rows
+    _check = failures_tests.TestImportFailures._check
+    _csv = failures_tests.TestImportFailures._csv
+
+    def _send_back(self, session, groups, before_import=None):
+        """The failed-rows file's rows in ``groups`` (1 is its first data row) given that Customer
+        Group, sent back as the corrected file, checked and imported."""
+        _out, _file_doc, rows = self._failed_rows(session)
+        corrected = [rows[0]] + [rows[i][:1] + [group] + rows[i][2:] for i, group in groups.items()]
+        checked = self._check(session, file_id=self._csv("corrected.csv", corrected).name)
+        if before_import:
+            before_import()
+        with self._each_row_commits():
+            response = self._import(session, checked)
+        self.assertTrue(response["success"], response)
+        return response["result"]
+
+    def test_rows_sent_back_corrected_are_counted_with_the_first_file(self):
+        # The documented retry: only gamma (row 4) comes back, fixed; beta stays left out
+        session, _checked, _result = self._partly_imported()
+        self._send_back(session, {2: self.group})
+
+        summary = import_signoff.session_summary(self._doc(session))
+
+        self.assertEqual(
+            summary["rows"], {"source": 4, "imported": 3, "excluded": 1, "failed": 0, "not_imported": 0}
+        )
+        self.assertEqual(summary["excluded"][0]["rows"], "3")
+
+    def test_a_second_corrected_file_is_laid_over_the_one_before_it(self):
+        # Beta and gamma come back; gamma fails at import again (its group made a group node after
+        # the check, as _partly_imported does) and comes back again: its FACO Original Row in the
+        # second failed-rows file is its row in the first corrected file.
+        session, _checked, _result = self._partly_imported()
+        frappe.db.set_value("Customer Group", self.held, "is_group", 0)
+        self._send_back(
+            session,
+            {1: self.group, 2: self.held},
+            before_import=lambda: frappe.db.set_value("Customer Group", self.held, "is_group", 1),
+        )
+        midway = import_signoff.session_summary(self._doc(session))
+        self.assertEqual(
+            midway["rows"], {"source": 4, "imported": 3, "excluded": 0, "failed": 1, "not_imported": 0}
+        )
+        frappe.db.set_value("Customer Group", self.held, "is_group", 0)
+        self._send_back(session, {1: self.held})
+
+        summary = import_signoff.session_summary(self._doc(session))
+
+        self.assertEqual(
+            summary["rows"], {"source": 4, "imported": 4, "excluded": 0, "failed": 0, "not_imported": 0}
+        )
+
     def test_before_the_import_the_checked_rows_are_not_imported_yet(self):
         session, _checked = self._ready_session()
 
