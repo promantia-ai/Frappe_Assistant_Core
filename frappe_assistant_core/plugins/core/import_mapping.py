@@ -174,9 +174,10 @@ def duplicate_targets(column_to_field_map: Dict[str, str], headers: List[str]) -
 
 
 def describe_mapping(
-    schema: Dict[str, Any], headers: List[str], column_to_field_map: Dict[str, str]
+    schema: Dict[str, Any], headers: List[str], column_to_field_map: Dict[str, str], update: bool = False
 ) -> Dict[str, Any]:
-    """The mapping as FACO shows it: parent and child table rows apart, gaps marked."""
+    """The mapping as FACO shows it: parent and child table rows apart, gaps marked. An
+    ``update`` changes only the fields mapped, so no required field is missing for it."""
     targets = _mapping_targets(schema)
     parent_rows: List[Dict[str, Any]] = []
     child_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -204,7 +205,7 @@ def describe_mapping(
 
     mapped_tables = {field.split(".", 1)[0] for field in mapped_fields if "." in field}
     missing_required = []
-    for field, target in targets.items():
+    for field, target in [] if update else targets.items():
         table = target["table"]
         if not target.get("required") or target.get("default") or field in mapped_fields:
             continue
