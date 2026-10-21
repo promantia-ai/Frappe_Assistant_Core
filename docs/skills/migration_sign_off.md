@@ -14,8 +14,9 @@ report covers all of the user's sessions. Filters:
 - `from_date` / `to_date`: the sessions started between these dates. Always give them, `to_date`
   today and `from_date` the start of the current fiscal year unless the user says otherwise: left out, `generate_report` fills in the newest fiscal year, which can be next year's and miss
   every session. They don't narrow sessions named in `import_session`.
-- `import_session`: session ids, comma separated. Only when the user names the sessions themselves;
-  never just the ones in this chat.
+- `import_session`: session ids, comma separated. Only when the user names the sessions themselves,
+  or for a migration plan the user ran: its sessions (`plan_migration` or `run_migration_plan`
+  lists them). Never just the ones in this chat.
 - `user`: whose sessions; the user's own by default.
 - `document`: always 1. The report's `message` is then the whole report written as a document, for
   the PDF in step 3.

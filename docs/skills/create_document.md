@@ -159,3 +159,8 @@ A missing record that can't be created has no `create` fix in the check; its gro
 - **Child table rows** — pass as arrays of objects under the child table fieldname. A Table MultiSelect also accepts an array of its link values (see the example above). A plain Table does not, because no single field says what a bare value means; that returns `error_type: "child_table_handling_error"` with the `field`.
 - **Restricted fields in a child row** — each row is checked against its child doctype's restricted fields, as on the parent. When you copy rows from another document, leave out system fields such as `owner`, `creation`, `docstatus` and `idx`.
 - **Child-table doctypes** — `create_document` with a child doctype such as `Sales Invoice Item` is refused with `error_type: "child_table_doctype"` and the `parent_doctypes` it belongs to. A row exists only inside its parent, so add it with `update_document` on the parent document.
+
+## In a migration plan
+
+When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
+`plan_questions` gathers every question of the plan into one list. Missing masters of a planned session aren't created with `create_document`: answer their question with the `create` fix, and the plan creates them when it runs.

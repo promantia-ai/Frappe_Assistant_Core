@@ -67,7 +67,9 @@ class DryRunImport(BaseTool):
             "for the user to correct and upload: show its download_url. The corrected file comes "
             "back as file_id (or file_url), and is checked like any other. When the user fixed "
             "a Google Sheet the session came from, pass its google_sheets_url again: a fresh copy "
-            "is checked, and the mapping is kept."
+            "is checked, and the mapping is kept. For a session in a migration plan, records the "
+            "plan's earlier files create count as there, and the user's questions go through "
+            "plan_questions, not here."
         )
         self.requires_permission = None  # checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)

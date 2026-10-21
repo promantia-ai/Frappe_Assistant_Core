@@ -60,7 +60,8 @@ class SetColumnMapping(BaseTool):
             "the target (that clears the old mapping). The result is the full mapping to show the "
             "user: parent fields and each child table apart, with unmapped columns and required "
             "fields that have no column. Next, once the user agrees the mapping: dry_run_import to "
-            "check every row."
+            "check every row. For a session in a migration plan, don't ask the user here: map what "
+            "you are sure of, and plan_questions asks the rest with the plan's other questions."
         )
         self.requires_permission = None  # Checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)

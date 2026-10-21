@@ -298,3 +298,8 @@ messages and the like) arrive inside those tags too.
 - `groups` lists at most 30 kinds of failure (`groups_total` counts them all; `groups_not_shown` says
   how many more). Fix the ones listed and check again; the next ones then show. `masters_plan` lists at
   most 50 records (`masters_plan_total` when there are more).
+
+## In a migration plan
+
+When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
+`plan_questions` gathers every question of the plan into one list. The check counts the records the plan's earlier files will create, and a missing master is planned with the `create` fix (the plan creates it when it runs). A group `Comes from a later file` means the plan's order is wrong for that file.

@@ -73,3 +73,8 @@ The `blocked` list shows the first 50 records and ends with one entry whose `rec
 - Choosing `unblocked` for the user.
 - Calling `delete_document` per record instead.
 - Starting a new import session to "redo" an import before the old one is undone: the records would be duplicated.
+
+## A migration plan
+
+A plan's sessions are undone one at a time, each with its own preview and approval, the last file
+in the plan's order first.
