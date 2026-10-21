@@ -11,8 +11,9 @@ Call `generate_report` with `report_name: "Migration Sign-off"`, `filters` with 
 opening invoices, opening balances), and sessions from other chats count too. Without it, the
 report covers all of the user's sessions. Filters:
 
-- `from_date` / `to_date`: the sessions started between these dates. Left out, the current fiscal
-  year is used.
+- `from_date` / `to_date`: the sessions started between these dates. Always give them, `to_date`
+  today and `from_date` the start of the current fiscal year unless the user says otherwise: left out, `generate_report` fills in the newest fiscal year, which can be next year's and miss
+  every session. They don't narrow sessions named in `import_session`.
 - `import_session`: session ids, comma separated. Only when the user names the sessions themselves;
   never just the ones in this chat.
 - `user`: whose sessions; the user's own by default.

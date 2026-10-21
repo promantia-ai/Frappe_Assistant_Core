@@ -228,6 +228,23 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
 
         self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
 
+    def test_a_session_that_cant_be_saved_leaves_no_copy_behind(self):
+        from frappe_assistant_core.plugins.core.tools.start_import_session import StartImportSession
+
+        with (
+            _google(_reply(200, CSV_CONTENT)),
+            patch.object(
+                StartImportSession,
+                "_create_session",
+                autospec=True,
+                side_effect=frappe.ValidationError("the session couldn't be saved"),
+            ),
+        ):
+            response = self._run({"google_sheets_url": LINK})
+
+        self.assertFalse(response["success"], response)
+        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+
 
 GROUP = "FAC Sheets Group"
 MAPPING = {"Customer Name": "customer_name", "Customer Group": "customer_group"}

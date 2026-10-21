@@ -133,7 +133,7 @@ class DocumentCreate(BaseTool):
         if not doctype or "data" not in arguments:
             return {
                 "success": False,
-                "error": "Pass doctype and data for one record, or documents for several.",
+                "error": _("Pass doctype and data for one record, or documents for several."),
             }
         submit = arguments.get("submit", False)
         validate_only = arguments.get("validate_only", False)
@@ -516,7 +516,7 @@ class DocumentCreate(BaseTool):
             return {"success": False, "error": str(e), "problems": e.problems}
         except frappe.DoesNotExistError as e:
             if session is None and document_batch.given(session_name):
-                return {"success": False, "error": f"Import session '{session_name}' not found."}
+                return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
             return {"success": False, "error": exception_message(e)}
         except frappe.PermissionError as e:
             if session is None and document_batch.given(session_name):

@@ -71,7 +71,7 @@ class StartImport(BaseTool):
         try:
             session = load_session(session_name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{session_name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 

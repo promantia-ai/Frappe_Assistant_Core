@@ -57,7 +57,7 @@ class ImportOpeningBalances(BaseTool):
         try:
             session = load_session(name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=name)
         if not opening_balances.is_opening_balances(session):

@@ -112,12 +112,12 @@ class SetColumnMapping(BaseTool):
         mapping = arguments.get("mapping")
         try:
             if not isinstance(mapping, dict) or not mapping:
-                return {"success": False, "error": "mapping must be an object of column → field."}
+                return {"success": False, "error": _("mapping must be an object of column → field.")}
 
             try:
                 doc = load_session(session_name)
             except frappe.DoesNotExistError:
-                return {"success": False, "error": f"Import session '{session_name}' not found."}
+                return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
             except frappe.PermissionError as e:
                 return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
@@ -133,7 +133,7 @@ class SetColumnMapping(BaseTool):
             if not target:
                 return {
                     "success": False,
-                    "error": "This session has no target DocType yet. Pass doctype, e.g. 'Customer'.",
+                    "error": _("This session has no target DocType yet. Pass doctype, e.g. 'Customer'."),
                 }
 
             import_type = arguments.get("import_type") or doc.import_type or "Insert New Records"
@@ -147,7 +147,7 @@ class SetColumnMapping(BaseTool):
 
             headers = session_headers(doc)
             if not headers:
-                return {"success": False, "error": "The session has no column headers for its sheet."}
+                return {"success": False, "error": _("The session has no column headers for its sheet.")}
 
             schema = build_import_schema(target)
             existing = session_mapping(doc) if target == current_target else {}
@@ -164,7 +164,7 @@ class SetColumnMapping(BaseTool):
             if problems:
                 return {
                     "success": False,
-                    "error": "The mapping was not saved. Fix these and call again.",
+                    "error": _("The mapping was not saved. Fix these and call again."),
                     "problems": problems,
                     "columns": headers,
                 }

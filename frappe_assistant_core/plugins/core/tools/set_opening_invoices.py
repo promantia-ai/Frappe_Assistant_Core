@@ -12,6 +12,7 @@
 from typing import Any, Dict
 
 import frappe
+from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
@@ -60,7 +61,7 @@ class SetOpeningInvoices(BaseTool):
         try:
             session = load_session(name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=name)
         try:

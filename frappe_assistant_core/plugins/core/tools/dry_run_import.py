@@ -139,13 +139,16 @@ class DryRunImport(BaseTool):
         file_url = (arguments.get("file_url") or "").strip()
         sheet_url = (arguments.get("google_sheets_url") or "").strip()
         if sheet_url and (file_id or file_url):
-            return {"success": False, "error": "Give only the Google Sheets link, or only a file: not both."}
+            return {
+                "success": False,
+                "error": _("Give only the Google Sheets link, or only a file: not both."),
+            }
         if fixes is not None and (not isinstance(fixes, list) or not all(isinstance(f, dict) for f in fixes)):
-            return {"success": False, "error": "fixes must be a list of {group, action, ...}."}
+            return {"success": False, "error": _("fixes must be a list of {group, action, ...}.")}
         try:
             session = load_session(session_name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{session_name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
@@ -153,7 +156,7 @@ class DryRunImport(BaseTool):
             if fixes or file_id or file_url or sheet_url:
                 return {
                     "success": False,
-                    "error": "failed_rows_file is asked on its own, without fixes or a file.",
+                    "error": _("failed_rows_file is asked on its own, without fixes or a file."),
                 }
             try:
                 return {"success": True, **import_failures.failed_rows_file(session)}

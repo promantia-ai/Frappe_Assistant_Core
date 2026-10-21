@@ -17,6 +17,7 @@ Group", raised when the group is left empty and the default group is a group).
 """
 
 import json
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -347,6 +348,31 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(list(frappe.db.after_commit._functions)[-1], print)
         frappe.db.after_commit._functions.pop()
         self.assertFalse(frappe.flags.in_import)
+
+    def test_held_back_holds_back_only_its_own_request(self):
+        # A web worker with threads (frappe_docker runs gunicorn --threads=4) serves other
+        # requests while a small file is checked inline: their jobs and events still go out.
+        with (
+            patch("frappe.enqueue") as real_enqueue,
+            patch("frappe.utils.background_jobs.enqueue") as real_bg_enqueue,
+            patch("frappe.publish_realtime") as real_publish,
+            patch("frappe.realtime.publish_realtime") as real_realtime_publish,
+        ):
+            with import_dry_run.held_back():
+                other_request = threading.Thread(
+                    target=lambda: (
+                        frappe.enqueue("frappe.ping"),
+                        frappe.utils.background_jobs.enqueue("frappe.ping"),
+                        frappe.publish_realtime("x"),
+                        frappe.realtime.publish_realtime("x"),
+                    )
+                )
+                other_request.start()
+                other_request.join()
+                frappe.enqueue("frappe.ping")  # this request's own: held back
+
+            for real in (real_enqueue, real_bg_enqueue, real_publish, real_realtime_publish):
+                real.assert_called_once()
 
     # -- when it can't run ---------------------------------------------------------------------------
 

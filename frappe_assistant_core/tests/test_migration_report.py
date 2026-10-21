@@ -155,9 +155,18 @@ class TestDataImportSession(run_tests.ImportRunCase):
     def test_without_sessions_it_covers_the_users_own_sessions(self):
         session, _checked, _result = self._partly_imported()
 
-        result = self._report()  # generate_report adds the fiscal year's dates
+        # Dates given, as the skill asks: left out, generate_report fills in the newest Fiscal Year,
+        # which on a site with next year's (or ERPNext's test fixtures, up to 2050) misses today.
+        result = self._report(from_date=frappe.utils.today(), to_date=frappe.utils.today())
 
         self.assertIn(session, [row["item"] for row in section(result["data"], "Sessions")])
+
+    def test_a_named_session_is_reported_whatever_the_dates(self):
+        session, _checked, _result = self._partly_imported()
+
+        result = self._report(import_session=session, from_date="2050-01-01", to_date="2050-12-31")
+
+        self.assertEqual([row["item"] for row in section(result["data"], "Sessions")], [session])
 
     def test_a_session_the_user_cannot_read_is_refused(self):
         session, _checked = self._ready_session()

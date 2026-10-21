@@ -1225,3 +1225,72 @@ class TestSignoffReviewFixes(OpeningStockCase):
         self.assertEqual(summary["value"]["source"], 66)  # the totals row isn't a row of stock
         self.assertEqual(summary["value"]["failed"], 1)
         self.assertEqual(summary["erpnext"]["total"], 0)
+
+
+class TestCodeReviewFindings(OpeningStockCase):
+    """The code review's findings on opening stock, each pinned by a test that failed first."""
+
+    def test_a_refused_document_leaves_no_commit_work_behind(self):
+        # Submitting registers work for the commit (ERPNext's queued repost, realtime events);
+        # when the document is then refused and rolled back, that work must go with it.
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10"])
+        queued = []
+
+        def refuse(*args, **kwargs):
+            callback = lambda: None  # noqa: E731
+            queued.append(callback)
+            frappe.db.after_commit.add(callback)
+            raise frappe.ValidationError("refused after queuing commit work")
+
+        with patch.object(StockReconciliation, "on_submit", side_effect=refuse):
+            response = self._run("import_opening_stock", self._card(session, result))
+
+        self.assertFalse(response["success"], response)
+        self.assertTrue(queued)
+        self.assertFalse([c for c in queued if c in frappe.db.after_commit._functions])
+
+    def _approved_for_a_job(self):
+        from unittest.mock import patch
+
+        session, result = self._ready([f"{self.item},{self.stores},5,10", f"{self.item2},{self.shop},2,7.5"])
+        # The job is queued and hasn't run yet: the report finds it in the queue.
+        with (
+            patch.object(opening_stock, "CHUNK_ROWS", 1),
+            patch("frappe.enqueue"),
+            patch.object(opening_stock, "_job_running", return_value=True),
+        ):
+            response = self._run("import_opening_stock", self._card(session, result))
+        self.assertTrue(response["success"], response)
+        self.assertEqual(self._doc(session).status, "Importing")
+        return session
+
+    def test_the_job_stops_when_the_sheet_changed_but_not_its_row_count(self):
+        from unittest.mock import patch
+
+        session = self._approved_for_a_job()
+        doc = self._doc(session)
+        # A fix saved after the approval that keeps every row ready.
+        doc.transformation_rules = frappe.as_json({"zero_rate_items": ["X"]})
+        doc.save()
+
+        with patch.object(opening_stock, "CHUNK_ROWS", 1):
+            opening_stock.create_job(session, "Administrator")
+
+        self.assertFalse(self._doc(session).created_records)
+        self.assertFalse(self._qty(self.item, self.stores))
+        self.assertIn("check it again", self._doc(session).steps[-1].message)
+
+    def test_the_job_still_runs_what_was_approved(self):
+        from unittest.mock import patch
+
+        session = self._approved_for_a_job()
+
+        with patch.object(opening_stock, "CHUNK_ROWS", 1):
+            opening_stock.create_job(session, "Administrator")
+
+        self.assertEqual(len(self._doc(session).created_records), 2)
+        self.assertEqual(self._qty(self.item, self.stores), 5)

@@ -48,6 +48,7 @@ PRIVILEGED_TOOLS = {
     "run_database_query",
     "delete_document",
     "document_action",  # can cancel, which reverses accounting and stock entries
+    "undo_import",  # cancels and deletes the records an import created, ledger entries with them
 }
 
 # Tools that are always categorized as read_only (hardcoded list)
@@ -110,7 +111,6 @@ WRITE_TOOLS = {
     "import_opening_stock",  # creates and submits Stock Reconciliations
     "import_opening_invoices",  # creates and submits opening invoices
     "import_opening_balances",  # creates and submits the opening Journal Entry
-    "undo_import",  # cancels and deletes the records an import created
     "update_document",
     # Document generation (saves a private Frappe File — a create side effect)
     "generate_document",  # Markdown -> PDF saved as a File record; NOT read-only

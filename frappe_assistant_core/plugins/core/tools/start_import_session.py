@@ -162,9 +162,13 @@ class StartImportSession(BaseTool):
             discard_sheet_copy(copy)
             return {"success": False, "error": problem, "row_count": chosen.row_count}
 
-        session = self._create_session(
-            file_doc, file_name, sheets, chosen, target_doctype, import_type, sheet_url or None
-        )
+        try:
+            session = self._create_session(
+                file_doc, file_name, sheets, chosen, target_doctype, import_type, sheet_url or None
+            )
+        except Exception:
+            discard_sheet_copy(copy)  # no session holds it
+            raise
 
         result = {
             "success": True,

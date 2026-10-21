@@ -56,6 +56,8 @@ class PreviewImportUndo(BaseTool):
             "blocked figures and that mode. Deleted records cannot be restored."
         )
         self.requires_permission = None  # checked on the session; the job re-checks each record
+        # The records are named as the user's file named them (#34003).
+        self.untrusted_fields = ("by_doctype", "blockers", "kept_records", "error")
 
         self.inputSchema = {
             "type": "object",
@@ -70,7 +72,7 @@ class PreviewImportUndo(BaseTool):
         try:
             session = load_session(session_name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{session_name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 

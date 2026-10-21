@@ -30,6 +30,7 @@ from frappe.utils import cint, cstr, flt, getdate
 
 from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
 from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils.savepoint import open_savepoint, rollback_to_savepoint
 
 TARGET = "Stock Reconciliation"
 IMPORT_TOOL = "import_opening_stock"
@@ -1038,12 +1039,15 @@ def _commits() -> bool:
 def create_job(session_name: str, user: str) -> None:
     """Background job: the opening stock, as the user who approved it."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.plugins.core import import_fixes
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the import
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     lines = ready_lines(session)
+    # What the user approved is what the last check found: the same rows, and nothing the
+    # check depends on changed since.
     approved = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
-    if len(lines) != approved:
+    if len(lines) != approved or not import_fixes.checked_as_is(session):
         session.status = "Partially Completed" if submitted_documents(session) else "Failed"
         session.log_step(
             "Import",
@@ -1072,7 +1076,8 @@ def create_job(session_name: str, user: str) -> None:
 def _create_chunks(session, lines: List[Ready], commit: bool) -> List[str]:
     stock, made = settings(session), []
     for chunk in chunks(lines):
-        frappe.db.savepoint(CREATE_SAVEPOINT)
+        # What the insert or submit queued for the commit goes with a refused document.
+        marks = open_savepoint(CREATE_SAVEPOINT)
         try:
             batches = _ensure_batches(chunk)
             doc = build_document(stock, chunk).insert()
@@ -1091,7 +1096,7 @@ def _create_chunks(session, lines: List[Ready], commit: bool) -> List[str]:
             session.save()
             made.append(doc.name)
         except Exception as e:
-            frappe.db.rollback(save_point=CREATE_SAVEPOINT)
+            rollback_to_savepoint(CREATE_SAVEPOINT, marks, TARGET, None)
             session.reload()
             session.status = "Partially Completed" if documents(session) else "Failed"
             session.log_step("Import", "Failed", _message_of_create(e), rows_failed=len(chunk))

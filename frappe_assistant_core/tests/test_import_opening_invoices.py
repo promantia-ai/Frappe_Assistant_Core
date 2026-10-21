@@ -1389,3 +1389,64 @@ class TestSignoffReviewFixes(OpeningInvoicesCase):
         self.assertIn(self._number(2), text)
         self.assertIn("Refused for the test", text)
         self.assertNotIn(self._number(1), text)
+
+
+class TestCodeReviewFindings(OpeningInvoicesCase):
+    """The code review's findings on opening invoices, each pinned by a test that failed first."""
+
+    def _lines(self, n):
+        return [f"{self.customer},{self._number(i)},{self.date},,{10 * i}" for i in range(1, n + 1)]
+
+    def _import(self, session, result):
+        return self._run("import_opening_invoices", self._card(session, result))
+
+    def test_a_refused_invoice_leaves_no_commit_work_behind(self):
+        # A submit registers work for the commit (queued jobs, realtime events); when the invoice
+        # is then refused and rolled back, that work must go with it, or it runs at the commit.
+        session, result = self._ready(self._lines(2))
+        real = opening_invoices.make_invoice
+        queued = []
+
+        def refuse_second(invoices, line):
+            if line.invoice_number == self._number(2):
+                callback = lambda: None  # noqa: E731
+                queued.append(callback)
+                frappe.db.after_commit.add(callback)
+                frappe.throw(_("Refused after queuing commit work"))
+            return real(invoices, line)
+
+        with patch.object(opening_invoices, "make_invoice", side_effect=refuse_second):
+            reply = self._import(session, result)
+
+        self.assertTrue(reply["success"], reply)
+        self.assertTrue(frappe.db.exists("Sales Invoice", self._number(1)))
+        self.assertFalse([c for c in queued if c in frappe.db.after_commit._functions])
+
+    def test_the_job_stops_when_the_sheet_changed_but_not_its_row_count(self):
+        session, result = self._ready(self._lines(2))
+        with patch.object(opening_invoices, "REQUEST_LIMIT", 1), patch.object(frappe, "enqueue"):
+            self.assertTrue(self._import(session, result)["success"])
+        doc = self._doc(session)
+        # A fix saved after the approval that keeps every row ready: what the user approved is
+        # no longer what would be imported.
+        doc.transformation_rules = frappe.as_json({"post_at_cutoff": True})
+        doc.save()
+
+        opening_invoices.create_job(session, "Administrator")
+
+        for i in (1, 2):
+            self.assertFalse(frappe.db.exists("Sales Invoice", self._number(i)))
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Failed")
+        self.assertIn("check it again", doc.steps[-1].message)
+
+    def test_the_job_still_runs_what_was_approved(self):
+        session, result = self._ready(self._lines(2))
+        with patch.object(opening_invoices, "REQUEST_LIMIT", 1), patch.object(frappe, "enqueue"):
+            self.assertTrue(self._import(session, result)["success"])
+
+        opening_invoices.create_job(session, "Administrator")
+
+        for i in (1, 2):
+            self.assertTrue(frappe.db.exists("Sales Invoice", self._number(i)))
+        self.assertEqual(self._doc(session).status, "Completed")

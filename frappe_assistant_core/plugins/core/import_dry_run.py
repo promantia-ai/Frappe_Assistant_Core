@@ -24,6 +24,7 @@ import copy
 import hashlib
 import json
 import re
+import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -656,6 +657,38 @@ def _message_of(e: Exception) -> str:
     return _TEMPORARY_NAME.sub("", text).strip()
 
 
+#: What a row's insert could send out at once: held back by held_back(), in its request only.
+_HELD_FUNCTIONS = (
+    (frappe, "enqueue"),
+    (frappe.utils.background_jobs, "enqueue"),
+    (frappe, "publish_realtime"),
+    (frappe.realtime, "publish_realtime"),
+)
+_HOLD_LOCK = threading.Lock()
+
+
+def _hold_aware(original):
+    """``original``, doing nothing while this request holds back (held_back)."""
+
+    def hold_aware(*args, **kwargs):
+        if getattr(frappe.local, "fac_holding_back", 0):
+            return None
+        return original(*args, **kwargs)
+
+    hold_aware.__wrapped__ = original
+    hold_aware.fac_hold_aware = True
+    return hold_aware
+
+
+def _install_hold_aware() -> None:
+    """Put the hold-aware stand-ins in place, once: any other request still gets the real thing."""
+    with _HOLD_LOCK:
+        for owner, name in _HELD_FUNCTIONS:
+            current = getattr(owner, name)
+            if getattr(current, "fac_hold_aware", False) is not True:  # a Mock answers any attribute
+                setattr(owner, name, _hold_aware(current))
+
+
 @contextmanager
 def held_back():
     """Hold back what a row's insert would send out or commit while it is tried. The caller rolls
@@ -679,22 +712,17 @@ def held_back():
     def swallow(*args, **kwargs):
         return None
 
-    patched = [
-        (frappe, "enqueue"),
-        (frappe.utils.background_jobs, "enqueue"),
-        (frappe, "publish_realtime"),
-        (frappe.realtime, "publish_realtime"),
-    ]
-    originals = [(owner, name, getattr(owner, name)) for owner, name in patched]
-    for owner, name in patched:
-        setattr(owner, name, swallow)
-    frappe.db.commit = swallow  # a controller that commits must not keep the row
+    # Jobs and realtime events are module functions, shared by every request a worker serves at
+    # once: they are held back for this request only, never swapped out for the whole process.
+    _install_hold_aware()
+    frappe.local.fac_holding_back = getattr(frappe.local, "fac_holding_back", 0) + 1
+    # A controller that commits must not keep the row (frappe.db is this request's own).
+    frappe.db.commit = swallow
     try:
         yield
     finally:
         del frappe.db.commit
-        for owner, name, original in originals:
-            setattr(owner, name, original)
+        frappe.local.fac_holding_back -= 1
         rolled_back = list(frappe.db.after_rollback._functions)[len(callbacks["after_rollback"]) :]
         for name, functions in callbacks.items():
             manager = getattr(frappe.db, name)
@@ -846,7 +874,7 @@ def fingerprint(session, file_doc) -> str:
         session.import_type or "",
         session.match_key or "",
         str(session.submit_after_import or 0),
-        json.dumps(frappe.parse_json(session.template_options or "{}"), sort_keys=True),
+        json.dumps(_checked_options(session), sort_keys=True),
         json.dumps(frappe.parse_json(session.transformation_rules or "null"), sort_keys=True),
         json.dumps(sorted(_excluded_rows(session))),
     ]
@@ -856,6 +884,23 @@ def fingerprint(session, file_doc) -> str:
     if imported:  # an import since the check makes it stale: other rows are left to import
         parts.append(json.dumps(sorted(imported)))
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+#: What other steps keep in template_options that no check reads: the undo's plan and result
+#: (preview_import_undo), and the failures of the last opening invoices import (reset as an
+#: import starts). The records an import made stay in: the check leaves those rows out.
+_NOT_CHECKED = {"undo": None, "opening_invoices": ("failed",)}
+
+
+def _checked_options(session) -> Dict[str, Any]:
+    """The session's template_options as far as the check depends on them."""
+    options = dict(frappe.parse_json(session.template_options or "{}") or {})
+    for key, inner in _NOT_CHECKED.items():
+        if inner is None:
+            options.pop(key, None)
+        elif isinstance(options.get(key), dict):
+            options[key] = {k: v for k, v in options[key].items() if k not in inner}
+    return options
 
 
 def _bytes(content) -> bytes:

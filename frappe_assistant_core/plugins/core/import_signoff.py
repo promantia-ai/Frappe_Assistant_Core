@@ -218,17 +218,18 @@ def sessions_of(
     to_date: Optional[str] = None,
 ) -> List[Any]:
     """The sessions to report on, oldest first, that the user may read: the ones named, else
-    ``user``'s (the current user's by default), started between the dates when given. Cancelled
-    ones are left out."""
+    ``user``'s (the current user's by default) started between the dates when given. Cancelled
+    ones are left out. Named sessions count whenever they started: generate_report fills in a
+    fiscal year's dates by itself, and those must not hide a session the user asked for."""
     filters: List[Any] = [["status", "!=", "Cancelled"]]
     if names:
         filters.append(["name", "in", list(names)])
     else:
         filters.append(["user", "=", user or frappe.session.user])
-    if from_date:
-        filters.append(["creation", ">=", str(getdate(from_date))])
-    if to_date:
-        filters.append(["creation", "<", str(add_days(getdate(to_date), 1))])
+        if from_date:
+            filters.append(["creation", ">=", str(getdate(from_date))])
+        if to_date:
+            filters.append(["creation", "<", str(add_days(getdate(to_date), 1))])
     found = frappe.get_list(
         dry_run.SESSION_DOCTYPE,
         filters=filters,

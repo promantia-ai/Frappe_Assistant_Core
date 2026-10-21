@@ -32,6 +32,7 @@ from frappe.utils import cstr, flt, getdate
 from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
 from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils.savepoint import open_savepoint, rollback_to_savepoint
 
 TOOL = "Opening Invoice Creation Tool"
 IMPORT_TOOL = "import_opening_invoices"
@@ -924,15 +925,16 @@ def _commits() -> bool:
 def create_job(session_name: str, user: str) -> None:
     """Background job: the invoices, as the user who approved them."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.plugins.core import import_fixes
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the import
     try:
         session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
         lines = ready_lines(session)
-        # The count, not the fingerprint: create() has since reset this import's failures, which the
-        # fingerprint covers through the options, so a retry after failures would never match.
+        # What the user approved is what the last check found: the same rows, and nothing the
+        # check depends on changed since (the fingerprint leaves out the failures create() reset).
         approved = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
-        if len(lines) != approved:
+        if len(lines) != approved or not import_fixes.checked_as_is(session):
             _stopped(session_name, _("the sheet changed after it was approved; check it again."))
             if _commits():
                 frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
@@ -989,14 +991,15 @@ def _import(session_name: str, lines: List[Ready], commit: bool) -> None:
     created, failed = dict(invoices.get("created") or {}), {}
     position, total = len(session.created_records), len(lines)
     for done, line in enumerate(lines, start=1):
-        frappe.db.savepoint(CREATE_SAVEPOINT)
+        # What the insert or submit queued for the commit goes with a refused invoice.
+        marks = open_savepoint(CREATE_SAVEPOINT)
         try:
             doc = make_invoice(invoices, line)
             position += 1
             _record(session_name, position, invoices["doctype"], doc.name)
             created[doc.name] = {"row": line.row, "key": line.key, "amount": line.amount, "party": line.party}
         except Exception as e:
-            frappe.db.rollback(save_point=CREATE_SAVEPOINT)
+            rollback_to_savepoint(CREATE_SAVEPOINT, marks, invoices["doctype"], None)
             failed[str(line.row)] = {
                 "message": _message_of_create(e),
                 "error": type(e).__name__,

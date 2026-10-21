@@ -26,6 +26,7 @@ from frappe_assistant_core.plugins.core import import_fixes, import_session
 # The module, not its class: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_run as run_tests
 from frappe_assistant_core.utils.tool_category_detector import (
+    PRIVILEGED_TOOLS,
     READ_ONLY_TOOLS,
     WRITE_TOOLS,
     detect_tool_category,
@@ -45,6 +46,8 @@ IMPORT_TOOLS = (
     "import_opening_stock",
     "import_opening_invoices",
     "import_opening_balances",
+    "preview_import_undo",
+    "undo_import",
 )
 
 
@@ -475,7 +478,9 @@ class TestRefusedBeforeAnyWork(GuardrailCase):
 class TestToolHints(GuardrailCase):
     def test_every_import_tool_is_classified_on_purpose(self):
         for name in IMPORT_TOOLS:
-            self.assertIn(name, READ_ONLY_TOOLS | WRITE_TOOLS, f"{name} needs an explicit category")
+            self.assertIn(
+                name, READ_ONLY_TOOLS | WRITE_TOOLS | PRIVILEGED_TOOLS, f"{name} needs an explicit category"
+            )
 
     def test_tools_that_create_records_are_write_and_the_rest_read_only(self):
         writes = {
@@ -484,6 +489,8 @@ class TestToolHints(GuardrailCase):
             "import_opening_invoices",
             "import_opening_balances",
         }
+        destructive = {"undo_import"}  # deletes records, as delete_document does
         for name in IMPORT_TOOLS:
             category = detect_tool_category(self.registry.get_tool(name))
-            self.assertEqual(category, "write" if name in writes else "read_only", name)
+            expected = "privileged" if name in destructive else "write" if name in writes else "read_only"
+            self.assertEqual(category, expected, name)

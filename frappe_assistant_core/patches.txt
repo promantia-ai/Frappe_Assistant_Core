@@ -63,3 +63,7 @@ frappe_assistant_core.patches.v3_1.move_send_email_to_core_plugin
 # Version 3.1.0 - Max Rows per Import for the data migration (#34003): set the default on
 # existing sites, where the Single's schema default doesn't apply
 frappe_assistant_core.patches.v3_1.set_max_import_rows
+
+# Version 3.1.0 - undo_import deletes records: privileged (destructiveHint) on sites whose
+# FAC Tool Configuration row was seeded as write, unless an administrator chose its category
+frappe_assistant_core.patches.v3_1.recategorize_undo_import
