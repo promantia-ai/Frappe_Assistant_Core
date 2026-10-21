@@ -293,6 +293,37 @@ class TestDryRunImport(BaseAssistantTest):
 
         self.assertEqual((result["ready"], result["failed"], result["excluded"]), (1, 4, 2))
 
+    # -- references between rows of the same file ---------------------------------------------
+
+    def test_a_tree_row_whose_parent_is_an_earlier_row_of_the_file_is_ready(self):
+        # The import inserts row 2 before row 3, so row 3's parent exists by then. The check
+        # rolls each row back, and must not report the parent as missing.
+        parent, child = f"Parent {self.tag}", f"Child {self.tag}"
+        content = (
+            "Item Group Name,Parent Item Group,Is Group\n"
+            f"{parent},All Item Groups,1\n"  # row 2
+            f"{child},{parent},0\n"  # row 3: its parent is row 2
+        ).encode()
+        file_doc = frappe.get_doc(
+            {"doctype": "File", "file_name": "item_groups.csv", "content": content, "is_private": 1}
+        ).insert()
+        started = self._run("start_import_session", {"file_url": file_doc.file_url})
+        self.assertTrue(started["success"], started)
+        session = started["result"]["session_id"]
+        mapping = {
+            "Item Group Name": "item_group_name",
+            "Parent Item Group": "parent_item_group",
+            "Is Group": "is_group",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Item Group"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result.get("groups"))
+
     # -- criterion 4: large files run in the background -------------------------------------------
 
     def test_a_large_file_is_checked_in_the_background(self):

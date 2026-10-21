@@ -1,0 +1,162 @@
+{
+ "actions": [],
+ "autoname": "format:MIG-{YYYY}-{#####}",
+ "creation": "2026-10-21 00:00:00.000000",
+ "description": "Several import sessions of one migration, ordered masters first, checked together and run after one approval.",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "plan_section",
+  "title",
+  "status",
+  "failure_rule",
+  "column_break_plan",
+  "user",
+  "chat_session_id",
+  "stop_requested",
+  "order_section",
+  "order",
+  "masters",
+  "progress",
+  "steps_section",
+  "steps"
+ ],
+ "fields": [
+  {
+   "fieldname": "plan_section",
+   "fieldtype": "Section Break",
+   "label": "Plan"
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title"
+  },
+  {
+   "default": "Planning",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Planning\nReady to Run\nRunning\nCompleted\nPartially Completed\nStopped\nFailed",
+   "read_only": 1
+  },
+  {
+   "default": "leave_out",
+   "description": "What happens to rows that fail when their file comes up: leave_out leaves them out with their reason; stop stops the plan before that file.",
+   "fieldname": "failure_rule",
+   "fieldtype": "Select",
+   "label": "Failure Rule",
+   "options": "leave_out\nstop",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_plan",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "__user",
+   "description": "The owner. Only they and System Managers can see the plan.",
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "User",
+   "options": "User",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "description": "The conversation this plan belongs to.",
+   "fieldname": "chat_session_id",
+   "fieldtype": "Data",
+   "label": "Chat Session",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "default": "0",
+   "description": "Set by stop_migration_plan: the run stops once the file importing now is done.",
+   "fieldname": "stop_requested",
+   "fieldtype": "Check",
+   "label": "Stop Requested",
+   "read_only": 1
+  },
+  {
+   "fieldname": "order_section",
+   "fieldtype": "Section Break",
+   "label": "Order"
+  },
+  {
+   "description": "The sessions in the order they are imported, each with its position and why.",
+   "fieldname": "order",
+   "fieldtype": "JSON",
+   "label": "Order",
+   "read_only": 1
+  },
+  {
+   "description": "Records the plan creates before any file is imported, each with its session.",
+   "fieldname": "masters",
+   "fieldtype": "JSON",
+   "label": "Masters",
+   "read_only": 1
+  },
+  {
+   "description": "The run's state: which file is importing, and what the questions confirmed.",
+   "fieldname": "progress",
+   "fieldtype": "JSON",
+   "label": "Progress",
+   "read_only": 1
+  },
+  {
+   "fieldname": "steps_section",
+   "fieldtype": "Section Break",
+   "label": "Steps"
+  },
+  {
+   "fieldname": "steps",
+   "fieldtype": "Table",
+   "label": "Steps",
+   "options": "FAC Import Session Step",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Assistant Core",
+ "name": "FAC Migration Plan",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Desk User",
+   "write": 1
+  }
+ ],
+ "search_fields": "title, status",
+ "show_title_field_in_link": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "track_changes": 1
+}

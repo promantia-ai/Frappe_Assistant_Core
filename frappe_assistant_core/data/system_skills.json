@@ -230,6 +230,36 @@
     "content_file": "undo_import.md"
   },
   {
+    "skill_id": "plan-migration-usage",
+    "title": "How to Use plan_migration",
+    "description": "Grouping the import sessions of a migration of several files into one plan, ordered so each file comes after the files whose records it links to, for one approval at the end.",
+    "skill_type": "Tool Usage",
+    "linked_tool": "plan_migration",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "plan_migration.md"
+  },
+  {
+    "skill_id": "plan-questions-usage",
+    "title": "How to Use plan_questions",
+    "description": "Asking every open question of a migration plan at once (files to map, rows that would fail and their fixes, the failure rule) and applying the user's answers in one call.",
+    "skill_type": "Tool Usage",
+    "linked_tool": "plan_questions",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "plan_questions.md"
+  },
+  {
+    "skill_id": "run-migration-plan-usage",
+    "title": "How to Use run_migration_plan",
+    "description": "Running a migration plan after the user's one approval: masters first, then every file in order in the background, the failure rule applied, following it, stopping it.",
+    "skill_type": "Tool Usage",
+    "linked_tool": "run_migration_plan",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "run_migration_plan.md"
+  },
+  {
     "skill_id": "migrate-data",
     "title": "Migrate Data",
     "description": "Use when the user wants to migrate data into ERPNext or import a file: \"migrate my data\", \"import my customers\", \"import my items\", \"bring my data from Tally\" or another system, \"load my opening stock\" or opening balances, or attaches a spreadsheet to import. Follow its workflow every time: session, mapping, cleaning, dry run, fixes, import, failed rows, report.",

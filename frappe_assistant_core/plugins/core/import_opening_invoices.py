@@ -947,6 +947,10 @@ def create_job(session_name: str, user: str) -> None:
         _stopped(session_name, _message_of_create(e))
         frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
         frappe.log_error(title=_("FAC opening invoices import failed"), message=frappe.get_traceback())
+    finally:
+        from frappe_assistant_core.plugins.core import import_plan
+
+        import_plan.child_finished(session_name)  # in a migration plan, its next file
 
 
 def _record(session_name: str, position: int, doctype: str, name: str) -> None:
