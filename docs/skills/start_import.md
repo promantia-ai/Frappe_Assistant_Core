@@ -96,3 +96,8 @@ Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with
 - Importing without the user asking, or before the dry run said the file is ready.
 - Starting a new session to finish an interrupted import, or to try failed rows again: that would import the done rows again. Continue it, or check and import what is left, in the same session.
 - Re-importing the whole file after a partial success.
+
+## In a migration plan
+
+When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
+`plan_questions` gathers every question of the plan into one list. Don't call `start_import` for it: `run_migration_plan` imports every file of the plan.

@@ -6,6 +6,43 @@ attaches a spreadsheet and says to import it. Follow this workflow every time, h
 is worded. Each tool has its own skill page with the details; this page is the order and the rules
 that hold across them.
 
+## Two ways through a migration
+
+- **Several files, or the user wants to approve once**: make a **migration plan** (below). Every
+  question is asked up front, in one list; then one approval, and the whole migration runs with no
+  further questions.
+- **One file, taken step by step**: the workflow after it, one file at a time.
+
+When unsure, ask the user which they prefer. A plan is the better default for two files or more.
+
+## A migration plan: ask everything once, then run
+
+| # | Step | Tool | Done when |
+|---|---|---|---|
+| 1 | **Sessions**: open one per file | `apply_import_preset`, else `start_import_session` | Every file has a `session_id` |
+| 2 | **Plan**: group and order them | `plan_migration` with all the sessions | The user has seen the files in order, each with its reason |
+| 3 | **Map** every file | `get_import_schema`, `set_column_mapping` (opening files: `set_opening_stock`, `set_opening_invoices`, `set_opening_balances`) | Every file is mapped. Map yourself where you are sure; ask only where you aren't |
+| 4 | **Questions**: all of them at once | `plan_questions` | Show every question together, grouped by file, the suggested answer first; send all the answers in one call. Repeat until ready is true |
+| 5 | **Approve once** | `run_migration_plan` with the files, rows and masters it will do | The user approved |
+| 6 | **Follow it** | `run_migration_plan` again (it only reports) | The plan is Completed, Partially Completed, Stopped or Failed |
+| 7 | **Sign-off** | `get_skill("migration-sign-off")` with the plan's sessions | The user has the report |
+
+What the plan does for you:
+
+- **Order**: masters before the records that link to them, from the DocTypes' links; opening
+  stock, invoices and balances last.
+- **References between files**: a file's check counts the records earlier files of the plan will
+  create, so an Items file isn't failed for Item Groups the Item Groups file brings. A link to a
+  record a *later* file creates is reported as an order problem.
+- **Missing masters**: the create fix plans them; the plan creates them when it runs, before any
+  file, and each is undone with the session that needed it. Don't call `create_document` in a plan.
+- **The failure rule**: asked once. When a file comes up, it is checked again; rows that would
+  fail then (their parent row failed in an earlier file, say) are left out with their reason
+  (leave_out), or the plan stops before that file (stop).
+
+While the plan runs, don't ask the user anything about it. If they want to stop: `stop_migration_plan`
+(what's imported stays).
+
 ## The workflow, one file at a time
 
 Every file goes through the same steps, in this order. Never skip one, and never import before the
@@ -44,8 +81,9 @@ same date for all three. Never guess either of them.
 
 ## The order across files
 
-Records must exist before the records that link to them. When the user has several files, show
-this order as the plan, and work through it one file at a time:
+Records must exist before the records that link to them. In a migration plan, `plan_migration`
+orders the files this way for you. Without one, show this order as the plan, and work through it
+one file at a time:
 
 1. **Chart of accounts.** The accounts must be right before any transaction is posted. Replacing
    the chart is possible only on a company with no transactions yet, with ERPNext's **Chart of
@@ -117,6 +155,9 @@ deleted and what blocks it. Only after the user confirms, call `undo_import` wit
 figures. Deleted records can't be restored, so say so first. Never delete imported records one by
 one with `delete_document`. An update import can't be undone: the old values weren't kept.
 
+To take back a migration plan, undo its sessions the same way one at a time, the last file in the
+plan's order first (its records link to the earlier files' records).
+
 ## Off-topic questions during a migration
 
 The user may ask something unrelated in the middle of a migration ("what were our sales last
@@ -126,11 +167,14 @@ still to decide." Don't refuse the question, and don't drop the migration.
 
 The session keeps every step, so a migration can also continue in a later chat. To find where it
 stands, read the user's sessions with `list_documents` on `FAC Import Session` (its `status`), and
-open one with `get_document`. Carry on from its status. Never start the file again.
+open one with `get_document`. Carry on from its status. Never start the file again. A migration
+plan is a `FAC Migration Plan` record: its status says where it is; `plan_questions` (while it's
+Planning) or `run_migration_plan` (once it runs) carries on from there.
 
 ## Talking to the user
 
 - Plain business words: "412 customers use a group that doesn't exist", not the ERPNext error.
-- One decision at a time, grouped, never row by row.
+- One decision at a time, grouped, never row by row. In a migration plan, all the decisions come
+  together, still grouped: one list, so the user answers once.
 - Say what each step will do before an approval card, and what it did afterwards, with the counts.
 - After each file, say what's next in the order above.

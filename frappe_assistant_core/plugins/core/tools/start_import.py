@@ -45,7 +45,8 @@ class StartImport(BaseTool):
             "them, with what to do next: once the user has fixed the causes and asks to try those "
             "again, check them with dry_run_import (it checks only the rows not imported yet), "
             "then call this with its counts: a new Data Import imports just those rows, with the "
-            "fixes, and the session reports every run."
+            "fixes, and the session reports every run. Not for a session in a migration plan: "
+            "run_migration_plan imports the plan's files."
         )
         self.requires_permission = None  # checked on the session, the DocType and Data Import
         # what the user's file says reaches the model fenced (#34003)
