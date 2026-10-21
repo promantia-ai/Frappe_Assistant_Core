@@ -48,7 +48,8 @@ ACTIONS = (
     LEAVE_OUT,
     ALLOW_ZERO_RATE,
     POST_AT_CUTOFF,
-)  # applied by dry_run_import; create is done with create_document
+    CREATE,
+)  # applied by dry_run_import; create only in a migration plan, else create_document does it
 
 CLOSEST_LIMIT = 5
 MIN_SCORE = 0.5
@@ -269,15 +270,10 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
         fixes = [{"action": MAP, "closest": closest_names(doctype, value)}]
         reason = cannot_create(doctype, session)
         if not reason:
-            fixes.append(
-                {
-                    "action": CREATE,
-                    "use": "create_document",
-                    "doctype": doctype,
-                    "name": value,
-                    "parent": default_parent(doctype),
-                }
-            )
+            create = {"action": CREATE, "doctype": doctype, "name": value, "parent": default_parent(doctype)}
+            if not session.get("migration_plan"):  # in a plan, it is a fix: the plan creates it when it runs
+                create["use"] = "create_document"
+            fixes.append(create)
         fixes.append(leave_out)
         out = {"explanation": explanation, "fixes": fixes}
         if reason:
@@ -388,7 +384,7 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
     reasons = {str(entry["row"]): entry["reason"] for entry in left_out(session)}
     zero_rate = list(_rules(session).get("zero_rate_items") or [])
     post_at_cutoff = bool(_rules(session).get("post_at_cutoff"))
-    done, problems = [], []
+    done, problems, planned = [], [], []
     for fix in fixes:
         group = groups.get(cstr(fix.get("group")))
         try:
@@ -436,10 +432,19 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
                 post_at_cutoff = True
                 done.append(_("{0} are posted at the cut-off date.").format(_rows(group["count"])))
             elif action == CREATE:
-                raise FixProblem(
-                    _(
-                        "Create missing records with create_document (documents from masters_plan, "
-                        "with import_session), then call dry_run_import again without fixes."
+                if not session.get("migration_plan"):
+                    raise FixProblem(
+                        _(
+                            "Create missing records with create_document (documents from masters_plan, "
+                            "with import_session), then call dry_run_import again without fixes. "
+                            "create as a fix is for a session in a migration plan."
+                        )
+                    )
+                item = _plan_master(session, group, fix)
+                planned.append(item)
+                done.append(
+                    _("{0} '{1}' is created when the plan runs.").format(
+                        _(item["doctype"]), _planned_name(item)
                     )
                 )
             else:
@@ -449,6 +454,10 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
 
     if problems:
         raise FixProblems(problems)
+    if planned:
+        from frappe_assistant_core.plugins.core import import_plan
+
+        import_plan.add_masters(session, planned)
 
     rules = {
         "value_maps": maps,
@@ -788,6 +797,47 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
     if parent:
         planned[parent_field] = parent
     return {"doctype": doctype, "data": planned}
+
+
+def _plan_master(session, group: Dict[str, Any], fix: Dict[str, Any]) -> Dict[str, Any]:
+    """The missing master of ``group`` as its migration plan creates it: what masters_plan
+    proposes, with the user's parent (or data) instead, checked as create_document checks it."""
+    from frappe_assistant_core.plugins.core import import_plan
+
+    doctype = group.get("link_doctype")
+    if group.get("cause") != dry_run.CAUSE_MISSING_LINK or not doctype:
+        raise FixProblem(_("Only a record the rows link to and that doesn't exist can be created."))
+    source = (
+        import_plan.planned_names(session).get(doctype, {}).get(cstr(group.get("value")).strip().casefold())
+    )
+    if source:
+        raise FixProblem(
+            _("{0} '{1}' comes from {2}, so it isn't created again. Check the file again.").format(
+                _(doctype), group.get("value"), source
+            )
+        )
+    proposed = masters_plan(session, [group])
+    if not proposed:
+        raise FixProblem(
+            _("A {0} can't be created here: {1}.").format(_(doctype), cannot_create(doctype, session))
+        )
+    data = {**proposed[0]["data"], **(fix.get("data") or {})}
+    parent_field = _parent_field(frappe.get_meta(doctype))
+    if fix.get("parent") and parent_field:
+        data[parent_field] = fix["parent"]
+    known = {(entry["doctype"], entry["name"]): entry for entry in proposed}
+    return _planned_master(session, known, {"doctype": doctype, "data": data})
+
+
+def create_master(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Create one missing master as create_document creates it, refused if ERPNext would name it
+    otherwise than the rows have it (kept_its_name)."""
+    from frappe_assistant_core.plugins.core.tools.create_document import DocumentCreate
+
+    result = DocumentCreate().execute({"doctype": entry["doctype"], "data": dict(entry["data"])})
+    if result.get("success"):
+        result = kept_its_name(entry, result)
+    return {**result, "doctype": entry["doctype"]}
 
 
 def _planned_list(plan) -> str:

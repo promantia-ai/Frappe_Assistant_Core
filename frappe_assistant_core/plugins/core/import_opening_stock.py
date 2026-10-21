@@ -1069,6 +1069,9 @@ def create_job(session_name: str, user: str) -> None:
             frappe.db.rollback()
             _stopped(session_name, _("the background job stopped."))
             frappe.log_error(title=_("FAC opening stock import failed"), message=frappe.get_traceback())
+    from frappe_assistant_core.plugins.core import import_plan
+
+    import_plan.child_finished(session_name)  # in a migration plan, its next file
     if _commits():
         frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
 

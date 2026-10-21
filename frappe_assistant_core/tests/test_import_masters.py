@@ -442,10 +442,11 @@ class TestImportMasters(BaseAssistantTest):
         self.assertIn("must be an existing", can("Supplier Scorecard"))  # named after a Supplier
 
     def test_a_record_of_the_doctype_the_file_imports_is_not_planned(self):
-        # A Territory file: row 3's parent is row 2, so the dry run finds it missing.
+        # A Territory file whose row 3 names a parent that is neither in ERPNext nor in the file.
+        # (A parent higher up the file is fine: the import takes such a file a level at a time.)
         t = self.tag
         lines = ["Territory Name,Parent Territory,Is Group", f"FacNorth {t},All Territories,1"]
-        lines.append(f"FacNorth-1 {t},FacNorth {t},0")
+        lines.append(f"FacSouth-1 {t},FacSouth {t},0")
         file_doc = frappe.get_doc(
             {
                 "doctype": "File",
@@ -468,7 +469,7 @@ class TestImportMasters(BaseAssistantTest):
         result = self._run("dry_run_import", {"session": session})["result"]
 
         self.assertEqual(result["masters_plan"], [])
-        parent = next(g for g in result["groups"] if g.get("value") == f"FacNorth {t}")
+        parent = next(g for g in result["groups"] if g.get("value") == f"FacSouth {t}")
         self.assertNotIn("create", [f["action"] for f in parent["fixes"]])
         self.assertIn("imports Territory records itself", parent["cannot_create"])
 

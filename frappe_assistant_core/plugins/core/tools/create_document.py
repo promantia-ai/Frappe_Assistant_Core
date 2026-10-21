@@ -498,10 +498,9 @@ class DocumentCreate(BaseTool):
                 return self._validate_many(documents)
 
             def create_one(entry):
-                result = self.execute({"doctype": entry["doctype"], "data": dict(entry["data"])})
-                if session and result.get("success"):
-                    return import_fixes.kept_its_name(entry, result)
-                return result
+                if session:
+                    return import_fixes.create_master(entry)
+                return self.execute({"doctype": entry["doctype"], "data": dict(entry["data"])})
 
             after = (lambda results: import_fixes.link_created(session, results)) if session else None
             results = document_batch.write_all(documents, create_one, _("created"), after)

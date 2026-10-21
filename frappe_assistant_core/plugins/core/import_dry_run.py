@@ -33,7 +33,13 @@ import frappe
 import frappe.realtime
 import frappe.utils.background_jobs
 from frappe import _
-from frappe.core.doctype.data_import.importer import INSERT, Importer, ImportFile, get_autoname_field
+from frappe.core.doctype.data_import.importer import (
+    INSERT,
+    INVALID_VALUES,
+    Importer,
+    ImportFile,
+    get_autoname_field,
+)
 from frappe.utils import cstr, now_datetime, strip_html
 
 from frappe_assistant_core.plugins.core.import_session import (
@@ -76,6 +82,7 @@ UNSAFE_DOCTYPES = {
 }
 
 CAUSE_MISSING_LINK = "Missing link"
+CAUSE_LATER_FILE = "Comes from a later file"  # a migration plan's file imported after this one
 CAUSE_BAD_OPTION = "Not an allowed option"
 CAUSE_BAD_DATE = "Wrong date format"
 CAUSE_BAD_VALUE = "Invalid value"
@@ -312,7 +319,15 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     import_file = _parse(session, file_doc, rows, column_map)
     payloads = import_file.get_payloads_for_import()
 
-    checker = _Checker(session, import_file.header, matches)
+    from frappe_assistant_core.plugins.core import import_plan
+
+    checker = _Checker(
+        session,
+        import_file.header,
+        matches,
+        coming=import_plan.planned_names(session),
+        later=import_plan.later_names(session),
+    )
     excluded = _excluded_rows(session)
     imported = imported_rows(session)
     total = len(payloads)
@@ -392,7 +407,7 @@ def _excluded_rows(session) -> set:
 class _Checker:
     """Checks payloads one by one and collects the groups and the per-row list."""
 
-    def __init__(self, session, header, matches=None):
+    def __init__(self, session, header, matches=None, coming=None, later=None):
         self.doctype = session.target_doctype
         self.import_type = session.import_type or INSERT
         self.header = header
@@ -412,6 +427,14 @@ class _Checker:
         self.rows: List[Dict[str, Any]] = []
         self.matches = matches  # None unless updating on match fields: row → matching records
         self.seen_records: Dict[str, int] = {}
+        # A row may link to a record a row higher up the file creates (a tree's parent): Data
+        # Import is run a level at a time for such a file (import_run), so that link is no problem.
+        self.self_links = _self_links(self.doctype) if self.import_type == INSERT and matches is None else []
+        self.planned: Dict[str, Dict[str, Any]] = {}  # casefolded name → the ready row that creates it
+        # In a migration plan: DocType → casefolded name → the earlier file (or the plan) that creates
+        # it, and the same for the files imported after this one (import_plan).
+        self.coming: Dict[str, Dict[str, str]] = coming or {}
+        self.later: Dict[str, Dict[str, str]] = later or {}
         self.preview = {"records_changing": 0, "fields_changing": 0, "by_field": {}, "samples": []}
         if matches is not None:
             from frappe_assistant_core.plugins.core import import_update
@@ -427,9 +450,11 @@ class _Checker:
             self.rows += [{"row": n, "status": "excluded"} for n in row_numbers]
             return
 
+        needs = self._needs(payload)
+        from_files = self._from_earlier_files(payload)
         problems = self._match_problems(payload) if self.matches is not None else []
         if not problems:
-            problems = self._parse_problems(payload)
+            problems = self._parse_problems(payload, needs, from_files)
         if not problems:
             problems = self._duplicate_problems(payload)
         record, changed = self._record(payload), []
@@ -440,20 +465,39 @@ class _Checker:
             if not changed:  # Data Import would fail it: "No changes to update"
                 self.rows += [{"row": n, "status": "unchanged", "record": record} for n in row_numbers]
                 return
+        created = None
         if not problems:
-            problems = self._insert_problems(payload)
+            problems, created = self._insert_problems(payload, needs, from_files)
         if record and _no_changes(problems):  # Frappe saw no change the plan did: nothing to do
             self.rows += [{"row": n, "status": "unchanged", "record": record} for n in row_numbers]
             return
 
         if not problems:
             extra = {"record": record} if record else {}
+            if needs:  # imported once the rows it needs are (import_run)
+                extra["after"] = sorted(entry["row"] for entry in needs)
+            if from_files:  # imported once those files are (import_plan)
+                extra["after_files"] = sorted({link["file"] for link in from_files.values()})
+            if created:  # what a later file of a migration plan may link to
+                extra["name"] = created
             self.rows += [{"row": n, "status": "ready", **extra} for n in row_numbers]
+            if created and self.self_links:
+                self.planned[created.casefold()] = {
+                    "row": row_numbers[0],
+                    "name": created,
+                    "doc": _with_links(payload.doc, needs),
+                    "needs": needs,
+                }
             if record:
                 self._add_to_preview(payload.rows[0].row_number, record, changed)
             return
         ids = [self._group(key, info, payload) for key, info in problems]
-        self.rows += [{"row": n, "status": "failed", "groups": ids} for n in row_numbers]
+        # A failing row still names the record it means to create, when its name comes from one of
+        # its fields: a later file of the plan counts it as coming. Whether it comes is settled when
+        # its file is imported (the fix the user picks, else the plan's failure rule).
+        named = self._intended_name(payload)
+        extra = {"name": named} if named else {}
+        self.rows += [{"row": n, "status": "failed", "groups": ids, **extra} for n in row_numbers]
 
     # An update: the row's record, found on the match fields.
     def _record(self, payload) -> Optional[str]:
@@ -490,11 +534,16 @@ class _Checker:
             self.preview["samples"].append({"row": row, "record": record, "changes": changed})
 
     # Data Import's own value checks, made while it parsed the rows.
-    def _parse_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
+    def _parse_problems(self, payload, needs=(), from_files=None) -> List[Tuple[Tuple, Dict]]:
         problems = []
+        planned = {entry["name"].casefold() for entry in needs}
         for row in payload.rows:
             for warning in row.warnings:
-                if warning.get("type") == "info":
+                if (
+                    warning.get("type") == "info"
+                    or self._from_the_file(row, warning, planned)
+                    or self._link_key(row, warning) in (from_files or {})
+                ):
                     continue
                 problems.append(self._from_warning(row, warning))
         return problems
@@ -506,7 +555,14 @@ class _Checker:
             return (CAUSE_BAD_VALUE, message), {"cause": CAUSE_BAD_VALUE, "message": message}
 
         value = self._value_of(row, field)
-        if field.fieldtype == "Link":
+        later = self.later.get(field.options, {}).get(value.casefold()) if field.fieldtype == "Link" else None
+        if later:
+            cause = CAUSE_LATER_FILE
+            message = _(
+                "{0} '{1}' comes from {2}, which is imported after this file. Move that file first "
+                "(plan_migration's order)."
+            ).format(_(field.options), value, later)
+        elif field.fieldtype == "Link":
             cause = CAUSE_MISSING_LINK
             message = _("{0} '{1}' doesn't exist.").format(_(field.options), value)
         elif field.fieldtype == "Select":
@@ -527,6 +583,126 @@ class _Checker:
             "message": message,
         }
         return (cause, field.parent, field.fieldname, value), info
+
+    def _from_the_file(self, row, warning, planned: set) -> bool:
+        """Whether ``warning`` is Data Import's "missing" for a record a row higher up the file
+        creates, which is in ERPNext by the time this row is imported."""
+        field = frappe._dict(warning.get("field") or {})
+        return bool(
+            planned
+            and field.fieldtype == "Link"
+            and field.options == self.doctype
+            and field.parent == self.doctype
+            and self._value_of(row, field).casefold() in planned
+        )
+
+    def _intended_name(self, payload) -> Optional[str]:
+        """The name an insert of this row would give its record, when it is a field of the row."""
+        if self.import_type != INSERT or self.matches is not None:
+            return None
+        autoname = get_autoname_field(self.doctype)
+        if not autoname:
+            return None
+        for column in self.header.columns:
+            df = column.df
+            if (
+                df
+                and not column.skip_import
+                and df.parent == self.doctype
+                and df.fieldname == autoname.fieldname
+            ):
+                return cstr(payload.rows[0].data[column.index]).strip() or None
+        return None
+
+    # Links to records the earlier files of a migration plan create.
+    def _from_earlier_files(self, payload) -> Dict[Tuple[str, str], Dict[str, str]]:
+        """(DocType, casefolded value) → the earlier file of the plan that creates that record and
+        the field that links to it, for each of this record's links to one. Read from the rows
+        themselves: Data Import leaves a link it found missing out of the record it parsed."""
+        found: Dict[Tuple[str, str], Dict[str, str]] = {}
+        if not self.coming:
+            return found
+        for row in payload.rows:
+            for column in self.header.columns:
+                df = column.df
+                if not df or column.skip_import or df.fieldtype != "Link" or df.options not in self.coming:
+                    continue
+                value = cstr(row.data[column.index]).strip()
+                source = self.coming[df.options].get(value.casefold()) if value else None
+                if source:
+                    found[(df.options, value.casefold())] = {
+                        "doctype": df.options,
+                        "file": source,
+                        "field": df.fieldname,
+                        "parent": df.parent,
+                        "value": value,
+                    }
+        return found
+
+    def _put_back(self, payload, doc, from_files) -> None:
+        """Put back in ``doc`` the links to records earlier files of the plan create, which Data
+        Import's parse left out: on the record, and on each child row they are in."""
+        counters: Dict[str, int] = {}
+        for row in payload.rows:
+            for doctype, table_df in self.header.doctypes:
+                indexes = self.header.get_column_indexes(doctype, table_df)
+                if all(value in INVALID_VALUES for value in row.get_values(indexes)):
+                    continue  # no record of this table on this row
+                target = doc
+                if table_df:
+                    at = counters.get(table_df.fieldname, 0)
+                    counters[table_df.fieldname] = at + 1
+                    rows = doc.get(table_df.fieldname) or []
+                    target = rows[at] if at < len(rows) else None
+                if target is None:
+                    continue
+                for column in self.header.get_columns(indexes):
+                    df = column.df
+                    if df.fieldtype != "Link":
+                        continue
+                    value = cstr(row.data[column.index]).strip()
+                    if (df.options, value.casefold()) in from_files:
+                        target[df.fieldname] = value
+
+    def _link_key(self, row, warning) -> Optional[Tuple[str, str]]:
+        field = frappe._dict(warning.get("field") or {})
+        if field.fieldtype != "Link":
+            return None
+        return (field.options, self._value_of(row, field).casefold())
+
+    # Links to records rows higher up the file create.
+    def _needs(self, payload) -> List[Dict[str, Any]]:
+        """The ready rows higher up the file whose records this row links to, each with the field
+        that links. Read from the row itself: Data Import leaves a link it found missing out of
+        the record it parsed."""
+        if not self.planned:
+            return []
+        needs, rows = [], set()
+        for fieldname in self.self_links:
+            field = frappe._dict(fieldname=fieldname, parent=self.doctype)
+            value = self._value_of(payload.rows[0], field)
+            entry = self.planned.get(value.casefold()) if value else None
+            if entry and (fieldname, entry["row"]) not in rows:
+                rows.add((fieldname, entry["row"]))
+                needs.append({**entry, "field": fieldname})
+        return needs
+
+    @staticmethod
+    def _higher_up(needs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The records of ``needs`` and of the rows they need in turn, the topmost first."""
+        ordered, seen = [], set()
+
+        def visit(entry):
+            if entry["row"] in seen:
+                return
+            seen.add(entry["row"])
+            for parent in entry["needs"]:
+                visit(parent)
+            ordered.append(entry["doc"])
+
+        for entry in needs:
+            visit(entry)
+        return ordered
 
     def _value_of(self, row, field) -> str:
         for column in self.header.columns:
@@ -572,18 +748,32 @@ class _Checker:
             return [((CAUSE_ALREADY_EXISTS, self.key_df.fieldname), {**info, "message": message})]
         return []
 
-    # The real insert (or update), rolled back.
-    def _insert_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
-        doc = frappe._dict(copy.deepcopy(payload.doc))
+    # The real insert (or update), rolled back. Returns the problems and the name it created.
+    def _insert_problems(
+        self, payload, needs=(), from_files=None
+    ) -> Tuple[List[Tuple[Tuple, Dict]], Optional[str]]:
+        doc = frappe._dict(copy.deepcopy(_with_links(payload.doc, needs)))
         frappe.clear_messages()
         with held_back():
             frappe.db.savepoint(SAVEPOINT)
             try:
-                if self.import_type == INSERT:
-                    Importer.insert_record(self.importer, doc)
-                else:
+                if self.import_type != INSERT:
                     Importer.update_record(self.importer, doc)
-                return []
+                    return [], None
+                # The records rows higher up the file create are in ERPNext when this row is
+                # imported: put them in first, inside the same savepoint.
+                for earlier in self._higher_up(list(needs)):
+                    Importer.insert_record(self.importer, frappe._dict(copy.deepcopy(earlier)))
+                if from_files:
+                    # Records an earlier file of the plan creates aren't in ERPNext yet: stand-ins
+                    # take their place inside the savepoint, and the links Data Import's parse left
+                    # out are put back.
+                    for link in from_files.values():
+                        _stand_in(link["doctype"], link["value"])
+                    self._put_back(payload, doc, from_files)
+                    # The parse cached them as missing; the rollback clears this cache too.
+                    frappe.db.value_cache.clear()
+                return [], Importer.insert_record(self.importer, doc).name
             except Exception as e:
                 message = _message_of(e)
                 kind = type(e).__name__
@@ -592,7 +782,7 @@ class _Checker:
                         (CAUSE_REJECTED, kind, message),
                         {"cause": CAUSE_REJECTED, "error": kind, "message": message},
                     )
-                ]
+                ], None
             finally:
                 frappe.db.rollback(save_point=SAVEPOINT)
                 frappe.clear_messages()
@@ -621,6 +811,36 @@ class _Checker:
         while f"G{digest[:size]}" in taken:
             size += 2
         return f"G{digest[:size]}"
+
+
+def _stand_in(doctype: str, name: str) -> None:
+    """A bare ``doctype`` record called ``name``, for a row's check to link to while an earlier file
+    of its migration plan, which creates the real one, isn't imported yet. Only ever made inside the
+    row's savepoint, which is rolled back."""
+    if frappe.db.exists(doctype, name):
+        return
+    from frappe_assistant_core.plugins.core import import_fixes
+
+    meta = frappe.get_meta(doctype)
+    doc = frappe.new_doc(doctype)
+    name_field = import_fixes._name_field(meta)
+    if name_field:
+        doc.set(name_field, name)
+    parent_field = import_fixes._parent_field(meta)
+    if parent_field and not doc.get(parent_field):
+        doc.set(parent_field, import_fixes.default_parent(doctype))
+    doc.insert(ignore_permissions=True, ignore_links=True, ignore_mandatory=True, set_name=name)
+
+
+def _with_links(doc, needs) -> Dict[str, Any]:
+    """``doc`` with the links to records rows higher up the file create put back in."""
+    return {**doc, **{entry["field"]: entry["name"] for entry in needs}}
+
+
+def _self_links(doctype: str) -> List[str]:
+    """The fields of ``doctype`` that link to ``doctype`` itself, as a tree's parent does."""
+    meta = frappe.get_meta(doctype)
+    return [df.fieldname for df in meta.fields if df.fieldtype == "Link" and df.options == doctype]
 
 
 def _key_field(session, header):
@@ -716,12 +936,17 @@ def held_back():
     # once: they are held back for this request only, never swapped out for the whole process.
     _install_hold_aware()
     frappe.local.fac_holding_back = getattr(frappe.local, "fac_holding_back", 0) + 1
-    # A controller that commits must not keep the row (frappe.db is this request's own).
+    # A controller that commits must not keep the row (frappe.db is this request's own). What was
+    # in place before goes back after: the class's commit, or a stand-in set around this check.
+    before = frappe.db.__dict__.get("commit")
     frappe.db.commit = swallow
     try:
         yield
     finally:
-        del frappe.db.commit
+        if before is None:
+            del frappe.db.commit
+        else:
+            frappe.db.commit = before
         frappe.local.fac_holding_back -= 1
         rolled_back = list(frappe.db.after_rollback._functions)[len(callbacks["after_rollback"]) :]
         for name, functions in callbacks.items():
