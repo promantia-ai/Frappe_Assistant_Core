@@ -18,7 +18,8 @@ amount is not brought in, so Temporary Opening stays off zero by that amount.
 ## Before calling
 
 1. `start_import_session` with the file (`file_id`; upload it in File Manager first).
-2. Ask the user:
+2. Ask the user (in a migration plan, the company and the cut-off come from `plan_migration`'s
+   `opening_setup`, asked once there):
    - **which company**;
    - **the cut-off date** (the last day in the old system). Don't guess it. It must fall in a
      fiscal year of the company;

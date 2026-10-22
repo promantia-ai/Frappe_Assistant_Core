@@ -583,6 +583,15 @@ class TestRowRanges(BaseAssistantTest):
         self.assertTrue(text.endswith("and 19980 more rows"), text)
 
 
+class TestCurrencyWords(BaseAssistantTest):
+    def test_a_currency_written_as_a_word_or_symbol_is_offered_first(self):
+        # "RS" isn't close to "INR" by spelling, so a file's Rs would be left out instead of mapped.
+        if not frappe.db.get_value("Currency", "INR", "enabled"):
+            self.skipTest("INR is switched off on this site")
+        for written in ("RS", "Rs.", "Rupees", "₹"):
+            self.assertEqual(import_fixes.closest_names("Currency", written)[:1], ["INR"], written)
+
+
 class TestSwitchedOffRecords(BaseAssistantTest):
     def test_a_record_switched_off_by_its_enabled_field_is_never_offered_or_taken(self):
         # UOM and Currency are switched off by "enabled", not "disabled"

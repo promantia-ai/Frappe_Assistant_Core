@@ -16,7 +16,6 @@ from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core import import_opening_stock, import_plan
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
-PLAN = "FAC Migration Plan"
 SESSION = "FAC Import Session"
 
 
@@ -67,30 +66,146 @@ class ImportPlanCase(BaseAssistantTest):
         return email
 
 
-class TestThePlanRecord(ImportPlanCase):
+def set_plan(plan_name, **fields):
+    """Change the plan kept on its first session, as the run does between files."""
+    plan = import_plan.get_plan(plan_name)
+    for field, value in fields.items():
+        setattr(plan, field, value)
+    plan.save()
+
+
+class TestThePlanOnItsFirstSession(ImportPlanCase):
+    """A plan has no DocType of its own (#34351): its first file's session keeps it."""
+
+    def _two(self):
+        t = self.tag
+        item = self._session(
+            "items.csv",
+            ["Code", "Group"],
+            [[f"I {t}", f"G {t}"]],
+            "Item",
+            {"Code": "item_code", "Group": "item_group"},
+        )
+        group = self._session("groups.csv", ["Name"], [[f"G {t}"]], "Item Group", {"Name": "item_group_name"})
+        return item, group
+
+    def _plan(self, sessions):
+        response = self._run("plan_migration", {"sessions": sessions})
+        self.assertTrue(response["success"], response)
+        return response["result"]["plan"]
+
+    def test_the_plan_is_its_first_files_session(self):
+        item, group = self._two()
+
+        plan = self._plan([item, group])
+
+        self.assertEqual(plan, item)
+        self.assertEqual(frappe.get_meta(SESSION).get_field("migration_plan").options, SESSION)
+        rows = {
+            s: frappe.db.get_value(
+                SESSION, s, ["migration_plan", "plan_position", "plan_reason"], as_dict=True
+            )
+            for s in (item, group)
+        }
+        self.assertEqual({s: r.migration_plan for s, r in rows.items()}, {item: plan, group: plan})
+        self.assertEqual((rows[group].plan_position, rows[item].plan_position), (1, 2))
+        self.assertIn("groups.csv", rows[item].plan_reason)
+        self.assertIsNone(frappe.db.get_value(SESSION, group, "plan_settings"))
+
     def test_a_plan_is_the_users_own(self):
-        plan = frappe.get_doc({"doctype": PLAN, "title": f"Plan {self.tag}"}).insert()
+        item, _group = self._two()
+        plan = self._plan([item])
 
-        self.assertEqual(plan.user, "Administrator")
-        self.assertFalse(frappe.has_permission(PLAN, "read", doc=plan, user=self._desk_user()))
-        self.assertTrue(frappe.has_permission(PLAN, "read", doc=plan, user="Administrator"))
+        doc = frappe.get_doc(SESSION, plan)
+        self.assertFalse(frappe.has_permission(SESSION, "read", doc=doc, user=self._desk_user()))
+        self.assertTrue(frappe.has_permission(SESSION, "read", doc=doc, user="Administrator"))
 
-    def test_a_session_names_its_plan(self):
-        plan = frappe.get_doc({"doctype": PLAN, "title": f"Plan {self.tag}"}).insert()
-        session = frappe.get_doc(
-            {"doctype": SESSION, "file_name": f"f-{self.tag}.csv", "migration_plan": plan.name}
-        ).insert()
+    def test_the_first_files_session_shows_the_plan_in_fields_of_its_own(self):
+        # Read in Desk as Madesh's FAC Migration Plan form read: its status, rule, cut-off, stop
+        # and the file importing now, in a Migration Plan section of their own.
+        item, group = self._two()
+        plan = self._plan([item, group])
+        set_plan(
+            plan, failure_rule="stop", progress=frappe.as_json({"cut_off": "2026-09-30", "current": group})
+        )
+        import_plan.request_stop(plan)
 
-        self.assertEqual(frappe.db.get_value(SESSION, session.name, "migration_plan"), plan.name)
+        shown = frappe.db.get_value(
+            SESSION,
+            plan,
+            ["plan_status", "plan_failure_rule", "plan_cut_off", "plan_stop_requested", "plan_importing_now"],
+        )
+
+        self.assertEqual(shown, ("Planning", "stop", frappe.utils.getdate("2026-09-30"), 1, group))
+        self.assertFalse(frappe.db.get_value(SESSION, group, "plan_status"))  # only the first file's
+        # the fields between the Migration Plan section and the next one
+        fields, in_section = frappe.get_meta(SESSION).fields, []
+        start = next(i for i, df in enumerate(fields) if df.fieldname == "plan_section")
+        for df in fields[start + 1 :]:
+            if df.fieldtype == "Section Break":
+                break
+            in_section.append(df.fieldname)
+        for fieldname in ("migration_plan", "plan_position", "plan_reason", "plan_status", "plan_settings"):
+            self.assertIn(fieldname, in_section)
+        # what is the whole plan's is said so: it sits on the first file, but isn't that file's
+        meta = frappe.get_meta(SESSION)
+        for fieldname in ("plan_status", "plan_failure_rule", "plan_cut_off", "plan_stop_requested"):
+            self.assertIn("(all files)", meta.get_field(fieldname).label)
+        self.assertIn("all files", meta.get_field("whole_plan_heading").label)
 
     def test_a_plan_logs_its_steps(self):
-        plan = frappe.get_doc({"doctype": PLAN, "title": f"Plan {self.tag}"}).insert()
+        item, group = self._two()
+        plan = import_plan.get_plan(self._plan([item, group]))
 
-        plan.log_step("Plan", "Success", "Ordered 2 files.")
-        plan.save()
-
-        self.assertEqual((plan.steps[-1].step, plan.steps[-1].message), ("Plan", "Ordered 2 files."))
+        self.assertEqual((plan.steps[-1].step, plan.steps[-1].message), ("Plan", "2 files in order."))
         self.assertEqual((plan.status, plan.failure_rule), ("Planning", "leave_out"))
+
+    def test_an_older_copy_of_a_session_doesnt_write_the_plan_back(self):
+        # The run saves a file's session it read before it moved the plan on (_next_file reads the
+        # files, then records the current one). The plan's writes leave modified alone, so Frappe's
+        # timestamp check doesn't stop that save: the plan's fields must survive it.
+        item, group = self._two()
+        plan = self._plan([item, group])
+        older, older_first = frappe.get_doc(SESSION, group), frappe.get_doc(SESSION, plan)
+        self._run("plan_migration", {"sessions": [], "plan": plan, "order": [item, group]})
+        set_plan(plan, failure_rule="stop")
+
+        older.save()
+        older_first.save()
+
+        self.assertEqual(frappe.db.get_value(SESSION, group, "plan_position"), 2)
+        self.assertEqual(import_plan.get_plan(plan).failure_rule, "stop")
+
+    def test_a_stop_asked_while_the_run_saves_the_plan_stays_asked(self):
+        item, group = self._two()
+        plan_name = self._plan([item, group])
+        running = import_plan.get_plan(plan_name)  # the run's copy, read before the stop
+
+        import_plan.request_stop(plan_name)
+        running.status = "Running"
+        running.save()
+
+        self.assertEqual(import_plan.get_plan(plan_name).stop_requested, 1)
+
+    def test_a_file_of_a_plan_is_not_a_plan(self):
+        item, group = self._two()
+        self._plan([item, group])
+
+        response = self._run("plan_questions", {"plan": group})
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("not found", response["result"]["error"])
+
+    def test_a_session_that_kept_an_ended_plan_doesnt_keep_a_new_one(self):
+        item, group = self._two()
+        first = self._plan([item])
+        set_plan(first, status="Stopped")
+
+        second = self._plan([item, group])
+
+        self.assertEqual(second, group)
+        self.assertEqual(frappe.db.get_value(SESSION, item, "migration_plan"), group)
+        self.assertEqual(import_plan.get_plan(second).status, "Planning")
 
 
 class TestTheOrder(ImportPlanCase):
@@ -208,7 +323,7 @@ class TestPlanMigration(ImportPlanCase):
     def test_another_users_plan_is_refused(self):
         item, group = self._two()
         plan = self._run("plan_migration", {"sessions": [item]})["result"]["plan"]
-        frappe.db.set_value(PLAN, plan, "user", self._desk_user())
+        frappe.db.set_value(SESSION, plan, "user", self._desk_user())
         frappe.set_user(self._desk_user())
         try:
             response = self._run("plan_migration", {"sessions": [], "plan": plan})
@@ -268,17 +383,8 @@ class TestRecordsEarlierFilesCreate(ImportPlanCase):
 
     def test_a_record_from_a_later_file_is_an_order_problem(self):
         plan, group, item = self._plan(f"G {self.tag}")
-        frappe.db.set_value(
-            PLAN,
-            plan,
-            "order",
-            frappe.as_json(
-                [
-                    {"session": item, "position": 1, "reason": ""},
-                    {"session": group, "position": 2, "reason": ""},
-                ]
-            ),
-        )
+        frappe.db.set_value(SESSION, item, "plan_position", 1)
+        frappe.db.set_value(SESSION, group, "plan_position", 2)
 
         result = self._check(item)
 
@@ -324,7 +430,7 @@ class TestPlannedMasters(ImportPlanCase):
         self.assertTrue(response["success"], response)
         self.assertEqual((response["result"]["ready"], response["result"]["failed"]), (1, 0))
         self.assertFalse(frappe.db.exists("Customer Group", self.group))
-        masters = frappe.parse_json(frappe.db.get_value(PLAN, plan, "masters"))
+        masters = frappe.parse_json(import_plan.get_plan(plan).masters)
         self.assertEqual(
             [(m["doctype"], m["name"], m["session"]) for m in masters],
             [("Customer Group", self.group, session)],
@@ -349,7 +455,7 @@ class TestPlannedMasters(ImportPlanCase):
             "dry_run_import", {"session": session, "fixes": [{"group": group["id"], "action": "create"}]}
         )
 
-        made = import_plan.create_planned(frappe.get_doc(PLAN, plan))
+        made = import_plan.create_planned(import_plan.get_plan(plan))
 
         self.assertEqual([m["name"] for m in made], [self.group])
         self.assertTrue(frappe.db.exists("Customer Group", self.group))
@@ -392,7 +498,7 @@ class TestPlanQuestions(ImportPlanCase):
         self.assertEqual(fix["fixes"][0]["action"], "map")
         self.assertIn("create", [f["action"] for f in fix["fixes"]])
         self.assertFalse(result["ready"])
-        self.assertEqual(frappe.db.get_value(PLAN, plan, "status"), "Planning")
+        self.assertEqual(import_plan.get_plan(plan).status, "Planning")
 
     def test_answers_are_applied_and_the_plan_becomes_ready_to_run(self):
         plan, _customers = self._plan_with_a_missing_group()
@@ -417,7 +523,7 @@ class TestPlanQuestions(ImportPlanCase):
         result = response["result"]
         self.assertEqual(result["questions"], [])
         self.assertTrue(result["ready"])
-        self.assertEqual(frappe.db.get_value(PLAN, plan, "status"), "Ready to Run")
+        self.assertEqual(import_plan.get_plan(plan).status, "Ready to Run")
         self.assertFalse(frappe.db.exists("Customer Group", self.group))
 
     def test_a_wrong_answer_changes_nothing(self):
@@ -433,11 +539,9 @@ class TestPlanQuestions(ImportPlanCase):
         )
 
         self.assertFalse(response["success"], response)
-        self.assertEqual(frappe.db.get_value(PLAN, plan, "failure_rule"), "leave_out")
+        self.assertEqual(import_plan.get_plan(plan).failure_rule, "leave_out")
         self.assertFalse(
-            (frappe.parse_json(frappe.db.get_value(PLAN, plan, "progress") or "{}") or {}).get(
-                "rule_confirmed"
-            )
+            (frappe.parse_json(import_plan.get_plan(plan).progress or "{}") or {}).get("rule_confirmed")
         )
 
 

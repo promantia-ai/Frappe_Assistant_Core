@@ -14,19 +14,26 @@ after one approval.
 The order comes from the target DocTypes' Link fields, not a hand-written list: a file comes
 after every other file of the plan whose DocType it links to. The opening imports come last,
 stock, then invoices, then the trial balance, as migrate_data.md has always told FACO.
+
+A plan has no DocType of its own (#34351): the session of its first file keeps it. Every file's
+session links to that session through migration_plan (the first one to itself) and keeps its own
+place in the order (plan_position, plan_reason); plan_settings on the first session holds the
+rest: status, failure rule, stop flag, the masters it creates, the run's progress and its log.
 """
 
+import datetime
 import hashlib
 import json
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
-from frappe.utils import cstr
+from frappe.utils import add_months, cint, cstr, get_last_day, getdate, now_datetime, today
 
 from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
-PLAN_DOCTYPE = "FAC Migration Plan"
+SESSION_DOCTYPE = dry_run.SESSION_DOCTYPE
 ANSWERS_SAVEPOINT = "fac_plan_answers"
 #: A session in one of these may join a plan: nothing of it is imported, undone or cancelled.
 JOINABLE = ("File Read", "Mapped", "Dry Run Failed", "Ready to Import")
@@ -43,28 +50,156 @@ class PlanProblem(Exception):
 # -- the plan ----------------------------------------------------------------------------------
 
 
+class Plan:
+    """A migration plan, as its first session's plan_settings hold it. save() writes them alone,
+    so the plan's saves and its files' own saves never overwrite each other."""
+
+    def __init__(self, name: str, settings: Dict[str, Any]):
+        self.name = name
+        self._read(settings)
+
+    def _read(self, settings: Dict[str, Any]) -> None:
+        self.title = settings.get("title") or ""
+        self.status = settings.get("status") or "Planning"
+        self.failure_rule = settings.get("failure_rule") or "leave_out"
+        self.stop_requested = cint(settings.get("stop_requested"))
+        # JSON text, as the plan's code reads and writes them
+        self.masters = frappe.as_json(settings["masters"]) if settings.get("masters") else None
+        self.progress = frappe.as_json(settings["progress"]) if settings.get("progress") else None
+        self.steps = [frappe._dict(step) for step in settings.get("steps") or []]
+
+    def log_step(self, step: str, outcome: str, message: str) -> None:
+        """Append a row to the plan's step log. The caller saves the plan."""
+        self.steps.append(
+            frappe._dict(
+                {
+                    "timestamp": str(now_datetime()),
+                    "step": step,
+                    "outcome": outcome,
+                    "user": frappe.session.user,
+                    "message": message,
+                }
+            )
+        )
+
+    def reload(self) -> None:
+        self._read(_settings(self.name))
+
+    def save(self) -> None:
+        settings = {
+            "title": self.title,
+            "status": self.status,
+            "failure_rule": self.failure_rule,
+            # The stop flag is request_stop's alone: a run saving a copy read before the stop keeps it.
+            "stop_requested": cint(_settings(self.name, for_update=True).get("stop_requested")),
+            "masters": frappe.parse_json(self.masters or "[]") or [],
+            "progress": frappe.parse_json(self.progress or "{}") or {},
+            "steps": [dict(step) for step in self.steps],
+        }
+        progress = settings["progress"]
+        # What Desk shows of the plan, in fields of its own on the first file's session
+        shown = {
+            "plan_status": self.status,
+            "plan_failure_rule": self.failure_rule,
+            "plan_cut_off": progress.get("cut_off") or None,
+            "plan_importing_now": progress.get("current") or None,
+        }
+        _write(self.name, settings, shown)
+
+
+def _settings(name: str, for_update: bool = False) -> Dict[str, Any]:
+    raw = frappe.db.get_value(SESSION_DOCTYPE, name, "plan_settings", for_update=for_update)
+    return frappe.parse_json(raw or "{}") or {}
+
+
+def _write(name: str, settings: Dict[str, Any], shown: Optional[Dict[str, Any]] = None) -> None:
+    """Write the plan's settings, and the fields that show them in Desk (the stop flag always)."""
+    values = {
+        "plan_settings": frappe.as_json(settings),
+        "plan_stop_requested": cint(settings.get("stop_requested")),
+        **(shown or {}),
+    }
+    # Not the session's modified: the file's own saves would find it changed under them.
+    frappe.db.set_value(SESSION_DOCTYPE, name, values, update_modified=False)
+
+
+def get_plan(name: str) -> Plan:
+    """The plan session ``name`` keeps. Raises DoesNotExistError when it keeps none: a file of a
+    plan that isn't its first, or a session whose plan ended before it joined another."""
+    row = frappe.db.get_value(SESSION_DOCTYPE, name, ["migration_plan", "plan_settings"], as_dict=True)
+    if not row or not row.plan_settings or row.migration_plan != name:
+        raise frappe.DoesNotExistError(_("Migration plan {0} not found.").format(name))
+    return Plan(name, frappe.parse_json(row.plan_settings) or {})
+
+
+def plan_status(name: str) -> Optional[str]:
+    """The plan's status, or None when ``name`` keeps no plan."""
+    try:
+        return get_plan(name).status
+    except frappe.DoesNotExistError:
+        return None
+
+
+def new_plan(sessions: List[Any]) -> Plan:
+    """A new plan, kept on the first of ``sessions`` that keeps no other. The caller links the
+    sessions to it, then saves it."""
+    lead = next((s for s in sessions if not s.get("plan_settings")), None)
+    if lead is None:
+        raise PlanProblem(_("Each of these files kept an earlier plan. Open one of them again, then plan."))
+    return Plan(lead.name, {"title": ", ".join(s.file_name for s in sessions[:3]) or _("Migration")})
+
+
+def request_stop(plan_name: str, stop: int = 1) -> None:
+    """Set the plan's stop flag on its own: the run saves the plan between files, and keeps it."""
+    settings = _settings(plan_name, for_update=True)
+    settings["stop_requested"] = stop
+    _write(plan_name, settings)
+
+
+def imported_by_its_plan(session) -> Optional[str]:
+    """Why ``session``'s file isn't imported on its own, or None: while its plan is open or
+    running, the plan imports it, in its order, after the one approval."""
+    plan = session.get("migration_plan")
+    status = plan_status(plan) if plan else None
+    if status in (*OPEN, "Running"):
+        return _(
+            "{0} is in migration plan {1} ({2}): the plan imports it, in its order. Answer "
+            "plan_questions, then run_migration_plan."
+        ).format(session.file_name, plan, _(status))
+    return None
+
+
 def load_plan(name: str):
     """The plan, if this user may change it. Raises DoesNotExistError or PermissionError."""
-    doc = frappe.get_doc(PLAN_DOCTYPE, name)
-    if not frappe.has_permission(PLAN_DOCTYPE, "write", doc=doc):
+    doc = frappe.get_doc(SESSION_DOCTYPE, name)
+    if not frappe.has_permission(SESSION_DOCTYPE, "write", doc=doc):
         raise frappe.PermissionError(_("You can't change migration plan {0}.").format(name))
-    return doc
-
-
-def positions(plan) -> Dict[str, int]:
-    """Session → its place in the plan's order."""
-    return {entry["session"]: entry["position"] for entry in frappe.parse_json(plan.order or "[]") or []}
+    return get_plan(name)
 
 
 def children(plan) -> List[Any]:
     """The plan's sessions in its order; one not ordered yet goes last, oldest first."""
-    names = frappe.get_all(
-        dry_run.SESSION_DOCTYPE, filters={"migration_plan": plan.name}, order_by="creation", pluck="name"
+    rows = frappe.get_all(
+        SESSION_DOCTYPE,
+        filters={"migration_plan": plan.name},
+        fields=["name", "plan_position"],
+        order_by="creation",
     )
-    place = positions(plan)
-    oldest = {name: i for i, name in enumerate(names)}
-    names.sort(key=lambda name: place.get(name, len(place) + 1 + oldest[name]))
-    return [frappe.get_doc(dry_run.SESSION_DOCTYPE, name) for name in names]
+    place = {row.name: row.plan_position for row in rows if row.plan_position}
+    oldest = {row.name: i for i, row in enumerate(rows)}
+    names = sorted(oldest, key=lambda name: place.get(name, len(place) + 1 + oldest[name]))
+    return [frappe.get_doc(SESSION_DOCTYPE, name) for name in names]
+
+
+def _set_order(ordered: List[Dict[str, Any]]) -> None:
+    """Keep each session's place in the order, and why, on the session itself."""
+    for entry in ordered:
+        frappe.db.set_value(
+            SESSION_DOCTYPE,
+            entry["session"],
+            {"plan_position": entry["position"], "plan_reason": entry["reason"]},
+            update_modified=False,
+        )
 
 
 def join_problems(plan_name: str, sessions: List[Any]) -> List[str]:
@@ -73,7 +208,7 @@ def join_problems(plan_name: str, sessions: List[Any]) -> List[str]:
     for session in sessions:
         other = session.migration_plan if session.migration_plan != plan_name else None
         # A plan that stopped or ended lets its files go: the rest can be planned again.
-        if other and frappe.db.get_value(PLAN_DOCTYPE, other, "status") in (*OPEN, "Running"):
+        if other and plan_status(other) in (*OPEN, "Running"):
             problems.append(_("{0} is already in plan {1}.").format(session.file_name, other))
         elif session.status not in JOINABLE:
             problems.append(
@@ -172,9 +307,12 @@ def _names(sessions: List[Any], plan=None) -> Dict[str, Dict[str, str]]:
 
 def _split(session) -> Tuple[Any, List[Any], List[Any]]:
     """The session's plan, and its files before and after the session."""
-    if not session.get("migration_plan"):
+    try:
+        plan = get_plan(session.migration_plan) if session.get("migration_plan") else None
+    except frappe.DoesNotExistError:  # its plan ended, and its first file went to another
+        plan = None
+    if not plan:
         return None, [], []
-    plan = frappe.get_doc(PLAN_DOCTYPE, session.migration_plan)
     files = children(plan)
     at = next((i for i, s in enumerate(files) if s.name == session.name), len(files))
     return plan, files[:at], files[at + 1 :]
@@ -203,26 +341,24 @@ def arrange(plan) -> List[str]:
         ordered = [{"session": name, "reason": _("In the order you set.")} for name in fixed] + [
             {"session": entry["session"], "reason": entry["reason"]} for entry in ordered
         ]
-        plan.order = frappe.as_json([{**entry, "position": i} for i, entry in enumerate(ordered, start=1)])
+        _set_order([{**entry, "position": i} for i, entry in enumerate(ordered, start=1)])
         return []
     ordered, problems = order(files)
-    plan.order = frappe.as_json(ordered)
+    _set_order(ordered)
     return problems
 
 
 def describe(plan) -> Dict[str, Any]:
     """The plan as FACO shows it: its files in order, each with why it's there and its state."""
-    reasons = {entry["session"]: entry for entry in frappe.parse_json(plan.order or "[]") or []}
     files = []
     for session in children(plan):
-        entry = reasons.get(session.name) or {}
         files.append(
             {
                 "session": session.name,
                 "file_name": session.file_name,
                 "doctype": session.target_doctype,
-                "position": entry.get("position"),
-                "reason": entry.get("reason"),
+                "position": session.plan_position or None,
+                "reason": session.plan_reason,
                 "status": session.status,
             }
         )
@@ -317,16 +453,16 @@ def order(sessions: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
         placed.add(free.name)
         before = needs[free.name]
         if before:
-            reason = _("After {0}: it links to their {1} records.").format(
+            reason = _("After {0}: it needs the {1} records from there.").format(
                 ", ".join(o.file_name for o in before),
                 ", ".join(sorted({_(o.target_doctype) for o in before})),
             )
         else:
-            reason = _("Nothing in the plan has to come first.")
+            reason = _("No other file is needed before this one.")
         ordered.append((free, reason))
 
     for session in opening:
-        ordered.append((session, _("Opening balances come after the records they refer to.")))
+        ordered.append((session, _("Opening files go last: they need the records the other files bring.")))
     return [
         {"session": session.name, "position": position, "reason": reason}
         for position, (session, reason) in enumerate(ordered, start=1)
@@ -340,6 +476,7 @@ def order(sessions: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
 # and the failure rule. Answers come back in one call.
 
 FAILURE_RULE_ID = "plan:failure_rule"
+CUT_OFF_ID = "plan:cut_off"
 CHECKED = ("Dry Run Failed", "Ready to Import")
 
 
@@ -391,15 +528,16 @@ def _file_questions(plan, session) -> List[Dict[str, Any]]:
     if waiting:
         return [{"id": f"{session.name}:check", **about, **waiting}]
     if session.status == "File Read" or not session.target_doctype:
+        message = _(
+            "Map this file (get_import_schema, set_column_mapping), or set it up as opening "
+            "stock, invoices or balances."
+        )
         return [
             {
                 "id": f"{session.name}:structure",
                 **about,
                 "kind": "structure",
-                "message": _(
-                    "Map this file (get_import_schema, set_column_mapping), or set it up as opening "
-                    "stock, invoices or balances."
-                ),
+                "message": message,
                 "columns": session_headers(session),
             }
         ]
@@ -449,6 +587,29 @@ def open_questions(plan) -> Dict[str, Any]:
             first_unchecked = session.file_name
         questions += asked
     progress = frappe.parse_json(plan.progress or "{}") or {}
+    dates = cut_offs(children(plan))
+    said = name_dates(children(plan)) if dates else {}
+    if dates and not (len(set(dates.values())) == 1 and progress.get("cut_off") in dates.values()):
+        # Never a guess (a file's name, today): a wrong date puts invoices after it in the opening.
+        message = _(
+            "The cut-off date: the day the old system's balances are taken at. Show it on "
+            "the card the user approves ('cut-off <date>'): never a date they haven't seen. "
+            "Each opening file is set up with the date shown: one that differs from the "
+            "user's is set again first (set_opening_stock, set_opening_invoices, "
+            "set_opening_balances)."
+        )
+        questions.append(
+            {
+                "id": CUT_OFF_ID,
+                "kind": "cut_off",
+                "message": message,
+                "dates": dates,
+                # a file whose name gives another date: shown, so the user checks it
+                **({"file_names_say": said} if said else {}),
+                # a choice card: the date the files are set to, or another the user gives
+                "choices": sorted({date for date in dates.values() if date}) + ["another_date"],
+            }
+        )
     if not progress.get("rule_confirmed"):
         questions.append(
             {
@@ -464,10 +625,43 @@ def open_questions(plan) -> Dict[str, Any]:
             }
         )
     files = children(plan)
+    _add_needed_by(questions, files)
     ready = bool(files) and not questions and all(s.status == "Ready to Import" for s in files)
     plan.status = "Ready to Run" if ready else "Planning"
     plan.save()
-    return {**describe(plan), "questions": questions, "ready": ready}
+    result = {**describe(plan), "questions": questions, "ready": ready}
+    if ready:  # what run_migration_plan is given, so its approval card shows it
+        result["approval"] = card_figures(plan)
+    return result
+
+
+def _add_needed_by(questions: List[Dict[str, Any]], files: List[Any]) -> None:
+    """A fix question whose rows create records a later file of the plan needs says which later
+    rows need them: leaving those rows out leaves the later ones without their record (an invoice
+    without its customer), which the user must know before choosing."""
+    from frappe_assistant_core.plugins.core import import_run
+
+    rows = {session.name: import_run._checked_rows(session) for session in files}
+    place = {session.name: i for i, session in enumerate(files)}
+    for question in questions:
+        if question.get("kind") != "fix" or question.get("session") not in place:
+            continue
+        group = question["id"].rpartition(":")[2]
+        names = {
+            row["name"].casefold(): row["name"]
+            for row in rows[question["session"]]
+            if group in (row.get("groups") or []) and row.get("name")
+        }
+        needed = []
+        for later in files[place[question["session"]] + 1 :]:
+            for row in rows[later.name]:
+                wanted = [name for name in row.get("needs") or [] if name.casefold() in names]
+                if wanted:
+                    needed.append(
+                        _("{0} row {1} ({2})").format(later.file_name, row["row"], ", ".join(wanted))
+                    )
+        if needed:
+            question["needed_by"] = needed
 
 
 def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
@@ -477,11 +671,14 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
 
     files = {session.name: session for session in children(plan)}
     fixes: Dict[str, List[Dict[str, Any]]] = {}
-    rule = None
+    rule = cut_off = None
     for answer in answers:
         if not isinstance(answer, dict):
             raise PlanProblem(_("Each answer is an object with the id of its question."))
         question = cstr(answer.get("id"))
+        if question == CUT_OFF_ID:
+            cut_off = as_date(answer.get("date"))
+            continue
         if question == FAILURE_RULE_ID:
             rule = answer.get("rule")
             if rule not in ("leave_out", "stop"):
@@ -494,6 +691,9 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
             {"group": group, **{k: v for k, v in answer.items() if k != "id"}}
         )
 
+    if cut_off:
+        _check_cut_off(list(files.values()), cut_off)
+
     done: List[str] = []
     frappe.db.savepoint(ANSWERS_SAVEPOINT)
     try:
@@ -501,18 +701,66 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
             session = files[session_name]
             done += import_fixes.apply_fixes(session, import_fixes.last_groups(session), session_fixes)
             session.save()
-        if rule:
+        if rule or cut_off:
             plan.reload()
-            plan.failure_rule = rule
-            progress = frappe.parse_json(plan.progress or "{}") or {}
-            plan.progress = frappe.as_json({**progress, "rule_confirmed": True})
-            plan.log_step("Questions", "Success", _("Failure rule: {0}.").format(rule))
+            progress = _progress(plan)
+            if rule:
+                plan.failure_rule = rule
+                progress["rule_confirmed"] = True
+                plan.log_step("Questions", "Success", _("Failure rule: {0}.").format(rule))
+                done.append(_("Rows that fail when their file comes up: {0}.").format(rule))
+            if cut_off:
+                progress["cut_off"] = cut_off
+                plan.log_step("Questions", "Success", _("Cut-off date: {0}.").format(cut_off))
+                done.append(_("Cut-off date: {0}.").format(cut_off))
+            plan.progress = frappe.as_json(progress)
             plan.save()
-            done.append(_("Rows that fail when their file comes up: {0}.").format(rule))
     except Exception:
         frappe.db.rollback(save_point=ANSWERS_SAVEPOINT)
         raise
     return done
+
+
+def cut_offs(files: List[Any]) -> Dict[str, str]:
+    """Each opening file of the plan (stock, invoices, balances) → the cut-off date it is set up
+    with."""
+    from frappe_assistant_core.plugins.core import import_opening_stock
+
+    dates = {}
+    for session in files:
+        engine = dry_run.special_engine(session)
+        if engine:
+            settings = engine.settings(session)
+            date = settings.get("posting_date") if engine is import_opening_stock else settings.get("cut_off")
+            dates[session.file_name] = as_date(date) if date else ""
+    return dates
+
+
+def as_date(value) -> str:
+    # Only YYYY-MM-DD: getdate reads "30 Sept" as this year's, a year nobody gave.
+    if isinstance(value, str) and value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+        raise PlanProblem(_("The cut-off date is a date, YYYY-MM-DD: '{0}' isn't.").format(value))
+    try:
+        return str(getdate(value)) if value else ""
+    except Exception:
+        raise PlanProblem(_("The cut-off date is a date, YYYY-MM-DD: '{0}' isn't.").format(value))
+
+
+def _check_cut_off(files: List[Any], cut_off: str) -> None:
+    """The user's cut-off date is what every opening file is set up with. Raises PlanProblem."""
+    dates = cut_offs(files)
+    if not dates:
+        raise PlanProblem(_("This plan has no opening stock, invoices or balances: no cut-off date to give."))
+    wrong = [
+        _("{0} has {1}").format(name, date or _("none")) for name, date in dates.items() if date != cut_off
+    ]
+    if wrong:
+        raise PlanProblem(
+            _(
+                "Nothing was applied. {0}, not {1}: set the user's date on it first (set_opening_stock, "
+                "set_opening_invoices or set_opening_balances), then answer again."
+            ).format("; ".join(wrong), cut_off)
+        )
 
 
 # -- the run -------------------------------------------------------------------------------------
@@ -535,7 +783,7 @@ def _progress(plan) -> Dict[str, Any]:
 def _update(plan_name: str, status: Optional[str] = None, step: Optional[Tuple[str, str]] = None, **progress):
     """Change the plan as it is in the database now. The run and stop_migration_plan both write to
     it, so nothing saves a copy read before a long step."""
-    plan = frappe.get_doc(PLAN_DOCTYPE, plan_name)
+    plan = get_plan(plan_name)
     if progress:
         plan.progress = frappe.as_json({**_progress(plan), **progress})
     if status:
@@ -553,18 +801,149 @@ def plan_digest(session) -> str:
     return hashlib.sha256(json.dumps(planned_names(session), sort_keys=True).encode()).hexdigest()
 
 
-def card_figures(plan) -> Dict[str, int]:
-    """What the approval card shows: files, rows ready to import, masters to create."""
+def card_figures(plan) -> Dict[str, Any]:
+    """What the approval card shows, and run_migration_plan is given: files, rows ready to import,
+    masters to create, the cut-off date and every decision the answers made, so the user approves
+    what they can read rather than what FACO decided out of sight."""
     files = children(plan)
     rows = sum((frappe.parse_json(s.validation_summary or "{}") or {}).get("ready") or 0 for s in files)
     new = [m for m in masters(plan) if not frappe.db.exists(m["doctype"], m["name"])]
-    return {"files": len(files), "rows": rows, "masters": len(new)}
+    dates = sorted({date for date in cut_offs(files).values() if date})
+    return {
+        "files": len(files),
+        "rows": rows,
+        "masters": len(new),
+        "cut_off": ", ".join(dates),
+        "decisions": decisions(plan, files, new),
+    }
+
+
+def decisions(plan, files: List[Any], new: List[Dict[str, Any]]) -> List[str]:
+    """Each decision of the plan, one plain line each: the records it creates, each file's fixes
+    and left-out rows, a file name whose date isn't the cut-off, and the failure rule."""
+    from frappe_assistant_core.plugins.core import import_fixes
+
+    lines = [_("Create {0} '{1}'.").format(_(entry["doctype"]), entry["name"]) for entry in new]
+    for session in files:
+        for rule in import_fixes.value_maps(session):
+            lines.append(
+                _("{0}: {1} '{2}' → '{3}'.").format(
+                    session.file_name,
+                    _(rule.get("label") or rule.get("field")),
+                    rule.get("from"),
+                    rule.get("to"),
+                )
+            )
+        for row in import_fixes.left_out(session):
+            if row["reason"]:
+                lines.append(
+                    _("{0}: row {1} left out: {2}").format(session.file_name, row["row"], row["reason"])
+                )
+            else:
+                lines.append(_("{0}: row {1} left out.").format(session.file_name, row["row"]))
+        rules = frappe.parse_json(session.transformation_rules or "{}") or {}
+        for item in rules.get("zero_rate_items") or []:
+            lines.append(_("{0}: {1} is valued at zero.").format(session.file_name, item))
+        if rules.get("post_at_cutoff"):
+            lines.append(
+                _("{0}: invoices dated in no fiscal year are posted at the cut-off.").format(
+                    session.file_name
+                )
+            )
+    dates = cut_offs(files)
+    for file_name, said in name_dates(files).items():
+        lines.append(
+            _("Check: {0}'s name says {1}, but its cut-off is {2}.").format(
+                file_name, said, dates.get(file_name)
+            )
+        )
+    lines.append(
+        _("Rows that still fail when their file comes up: {0}.").format(
+            _("left out, with their reason") if plan.failure_rule == "leave_out" else _("the plan stops")
+        )
+    )
+    return lines
+
+
+MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+# Only a month's own name (Sep, Sept, September), so 30-Sepac isn't read as a date.
+NAME_DATE = re.compile(
+    r"(?<!\d)(\d{1,2})[-_ .]?(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?![a-z])"
+    r"(?:[-_ .](\d{4}))?",
+    re.IGNORECASE,
+)
+
+
+def name_dates(files: List[Any]) -> Dict[str, str]:
+    """The opening files whose name gives a day and month (Closing Stock 30-Sep) other than their
+    cut-off date: file → the date as its name gives it. Not a guess at the cut-off: a check."""
+    dates, found = cut_offs(files), {}
+    for session in files:
+        cut_off = dates.get(session.file_name)
+        match = NAME_DATE.search(session.file_name or "")
+        if not cut_off or not match:
+            continue
+        day, month, year = int(match.group(1)), MONTHS.index(match.group(2)[:3].lower()) + 1, match.group(3)
+        when = getdate(cut_off)
+        if (day, month) != (when.day, when.month) or (year and int(year) != when.year):
+            found[session.file_name] = match.group(0)
+    return found
+
+
+def opening_setup(plan) -> Dict[str, Any]:
+    """What the plan's opening files (stock, invoices, balances) are set up with, asked once at the
+    start rather than file by file: the company (the site's only one: nothing to ask) and the
+    cut-off date, the user's once given, else dates to offer on one choice card."""
+    if not frappe.db.exists("DocType", "Company"):
+        return {}
+    companies = frappe.get_all("Company", pluck="name", order_by="name")
+    if len(companies) == 1:
+        setup: Dict[str, Any] = {"company": companies[0]}
+    else:
+        setup = {"companies": companies, "suggested_company": frappe.defaults.get_user_default("Company")}
+    cut_off = _progress(plan).get("cut_off")
+    if cut_off:
+        setup["cut_off"] = cut_off
+    else:
+        setup["cut_off_choices"] = cut_off_choices(children(plan)) + ["another_date"]
+    return setup
+
+
+def cut_off_choices(files: List[Any], on: Optional[str] = None) -> List[str]:
+    """Dates to offer for the cut-off, newest first: a day a file's name gives (Closing Stock 30-Sep,
+    the last one by then when it has no year), the last month end and the last fiscal year end,
+    none after today. Choices the user picks from, never a date taken without asking."""
+    on = getdate(on or today())
+    dates = {get_last_day(add_months(on, -1))}
+    for session in files:
+        match = NAME_DATE.search(session.file_name or "")
+        if not match:
+            continue
+        day, month, year = int(match.group(1)), MONTHS.index(match.group(2)[:3].lower()) + 1, match.group(3)
+        for candidate in [int(year)] if year else [on.year, on.year - 1]:
+            try:
+                when = datetime.date(candidate, month, day)
+            except ValueError:  # 31-Sep, 29-Feb
+                break
+            if when <= on:
+                dates.add(when)
+                break
+    if frappe.db.exists("DocType", "Fiscal Year"):
+        year_end = frappe.get_all(
+            "Fiscal Year",
+            filters={"year_end_date": ("<", on), "disabled": 0},
+            pluck="year_end_date",
+            order_by="year_end_date desc",
+            limit=1,
+        )
+        dates.update(getdate(d) for d in year_end)
+    return [str(d) for d in sorted(dates, reverse=True)]
 
 
 def run_problem(plan) -> Optional[str]:
     """Why the plan can't run now, or None."""
     from frappe_assistant_core.plugins.core import import_fixes, import_run
-    from frappe_assistant_core.plugins.core.import_session import import_target_problem
 
     if plan.status != "Ready to Run":
         return _("The plan is {0}: run plan_questions until it is Ready to Run.").format(_(plan.status))
@@ -578,8 +957,15 @@ def run_problem(plan) -> Optional[str]:
             return _(
                 "{0} changed since it was checked. Run plan_questions again: the approval is for what was checked."
             ).format(session.file_name)
-        if dry_run.special_engine(session):
-            problem = import_target_problem(session.target_doctype) if session.target_doctype else None
+        engine = dry_run.special_engine(session)
+        if engine:
+            # The opening engines make their documents themselves, not through Data Import: what they
+            # need (company, date, account, create and submit) is theirs to say, not Allow Import.
+            try:
+                engine.check_can_run(session)
+                problem = None
+            except dry_run.DryRunProblem as e:
+                problem = str(e)
         else:
             problem = import_run.cannot_import(
                 session.target_doctype, session.import_type or "Insert New Records"
@@ -601,7 +987,7 @@ def start(plan) -> None:
     """Run the approved plan in the background, as the user who approved it. Each file's
     fingerprint is kept: a file that changes after the approval isn't imported."""
     approved = {s.name: s.validated_fingerprint for s in children(plan)}
-    frappe.db.set_value(PLAN_DOCTYPE, plan.name, "stop_requested", 0, update_modified=False)
+    request_stop(plan.name, 0)
     _update(
         plan.name,
         status="Running",
@@ -616,15 +1002,15 @@ def start(plan) -> None:
 
 
 def _enqueue(plan_name: str, method: str, **kwargs) -> None:
-    from frappe_assistant_core.plugins.core import import_run
-
     frappe.enqueue(
         f"{__name__}.{method}",
         queue="long",
         timeout=4 * 60 * 60,
         job_id=PLAN_JOB.format(plan_name),
         enqueue_after_commit=True,
-        now=import_run._runs_now(),
+        # Always a job, also in developer mode (where Data Import runs in the request): a plan imports
+        # every file, and in a chat request it would outlast the client's timeout and roll back.
+        now=bool(frappe.flags.in_test),
         plan_name=plan_name,
         **kwargs,
     )
@@ -674,7 +1060,7 @@ def run_job(plan_name: str, user: str) -> None:
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the plan
 
     def masters_then_files():
-        create_planned(frappe.get_doc(PLAN_DOCTYPE, plan_name))
+        create_planned(get_plan(plan_name))
         _next_file(plan_name)
 
     _guarded(plan_name, masters_then_files)
@@ -690,7 +1076,10 @@ def child_finished(session_name: str) -> None:
     plan_name = frappe.db.get_value(dry_run.SESSION_DOCTYPE, session_name, "migration_plan")
     if not plan_name:
         return
-    plan = frappe.get_doc(PLAN_DOCTYPE, plan_name)
+    try:
+        plan = get_plan(plan_name)
+    except frappe.DoesNotExistError:
+        return
     if plan.status != "Running" or _progress(plan).get("current") != session_name:
         return
     _enqueue(
@@ -706,7 +1095,7 @@ def continue_job(plan_name: str, session_name: str, user: str) -> None:
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the plan
 
     def next_files():
-        plan = frappe.get_doc(PLAN_DOCTYPE, plan_name)
+        plan = get_plan(plan_name)
         if plan.status != "Running" or _progress(plan).get("current") != session_name:
             return
         if _file_done(plan_name, session_name):
@@ -723,7 +1112,7 @@ def _next_file(plan_name: str) -> None:
     frappe.local.fac_plan_running = plan_name
     try:
         while True:
-            plan = frappe.get_doc(PLAN_DOCTYPE, plan_name)
+            plan = get_plan(plan_name)
             done = set(_progress(plan).get("done") or [])
             child = next((s for s in children(plan) if s.name not in done), None)
             if child is None:
@@ -741,7 +1130,7 @@ def _next_file(plan_name: str) -> None:
                 waiting = _import(child)
             except Exception as e:
                 return _end(
-                    plan_name, "Stopped", _("{0} couldn't be imported: {1}").format(child.file_name, e)
+                    plan_name, "Stopped", _("{0} couldn't be imported: {1}").format(child.file_name, str(e))
                 )
             if waiting:
                 return  # its job calls child_finished when it ends
@@ -822,7 +1211,7 @@ def _file_done(plan_name: str, session_name: str) -> bool:
         last = child.steps[-1].message if child.steps else ""
         _end(plan_name, "Stopped", _("{0} didn't finish importing: {1}").format(child.file_name, last))
         return False
-    plan = frappe.get_doc(PLAN_DOCTYPE, plan_name)
+    plan = get_plan(plan_name)
     done = list(_progress(plan).get("done") or [])
     if child.name not in done:
         done.append(child.name)
@@ -836,7 +1225,7 @@ def _file_done(plan_name: str, session_name: str) -> bool:
 
 
 def _finish(plan_name: str) -> None:
-    plan = frappe.get_doc(PLAN_DOCTYPE, plan_name)
+    plan = get_plan(plan_name)
     files = children(plan)
     left_out = sum((_progress(plan).get("left_out") or {}).values())
     if all(s.status == "Failed" for s in files):

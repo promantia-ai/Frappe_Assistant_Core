@@ -89,11 +89,13 @@ def get_readable_file_by_id(file_id: str):
 
 
 def find_site_file(file_id: str = "", file_url: str = ""):
-    """The File the current user may read, by its ID or its URL; exactly one of them is given."""
-    if file_id and file_url:
-        raise FileProblem(_("Give file_id or file_url, not both."))
+    """The File the current user may read, by its ID or its URL. Both may be given when they name
+    the same file, as a chat attachment gives them."""
     if file_id:
-        return get_readable_file_by_id(file_id)
+        file_doc = get_readable_file_by_id(file_id)
+        if file_url and file_doc.file_url != file_url:
+            raise FileProblem(_("file_id and file_url name different files: give one of them."))
+        return file_doc
     return get_readable_file(file_url)
 
 

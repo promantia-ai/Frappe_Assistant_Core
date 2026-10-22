@@ -20,7 +20,7 @@ When unsure, ask the user which they prefer. A plan is the better default for tw
 | # | Step | Tool | Done when |
 |---|---|---|---|
 | 1 | **Sessions**: open one per file | `apply_import_preset`, else `start_import_session` | Every file has a `session_id` |
-| 2 | **Plan**: group and order them | `plan_migration` with all the sessions | The user has seen the files in order, each with its reason |
+| 2 | **Plan**: group and order them | `plan_migration` with all the sessions | The user has seen the files in order, each with its reason; with opening files, the cut-off picked on one card from `opening_setup` |
 | 3 | **Map** every file | `get_import_schema`, `set_column_mapping` (opening files: `set_opening_stock`, `set_opening_invoices`, `set_opening_balances`) | Every file is mapped. Map yourself where you are sure; ask only where you aren't |
 | 4 | **Questions**: all of them at once | `plan_questions` | Show every question together, grouped by file, the suggested answer first; send all the answers in one call. Repeat until ready is true |
 | 5 | **Approve once** | `run_migration_plan` with the files, rows and masters it will do | The user approved |
@@ -77,7 +77,9 @@ have their own import tool in step 6 instead of `start_import`:
 | Closing trial balance | `set_opening_balances` | `import_opening_balances` |
 
 Ask for the **company** and the **cut-off date** (the last day in the old system) once, and use the
-same date for all three. Never guess either of them.
+same date for all three. Never guess either of them. In a migration plan, `plan_migration`'s
+`opening_setup` gives them: the site's only company is used without asking, and the cut-off is
+one single-choice card of its `cut_off_choices`.
 
 ## The order across files
 
@@ -167,9 +169,10 @@ still to decide." Don't refuse the question, and don't drop the migration.
 
 The session keeps every step, so a migration can also continue in a later chat. To find where it
 stands, read the user's sessions with `list_documents` on `FAC Import Session` (its `status`), and
-open one with `get_document`. Carry on from its status. Never start the file again. A migration
-plan is a `FAC Migration Plan` record: its status says where it is; `plan_questions` (while it's
-Planning) or `run_migration_plan` (once it runs) carries on from there.
+open one with `get_document`. Carry on from its status. Never start the file again. A file in a
+migration plan names it in `migration_plan`: the plan's id, the session of its first file, whose
+`plan_settings` hold the plan's status. `plan_questions` (while it's Planning) or
+`run_migration_plan` (once it runs) carries on from there.
 
 ## Talking to the user
 

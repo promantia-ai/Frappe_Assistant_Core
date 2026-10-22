@@ -17,6 +17,7 @@ from typing import Any, Dict
 
 import frappe
 from frappe import _
+from frappe.utils import cstr
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.plugins.core import import_plan
@@ -32,14 +33,15 @@ class RunMigrationPlan(BaseTool):
             "Run a migration plan that is Ready to Run, once the user approves: creates the "
             "masters the plan planned, then imports every file in order in the background, each "
             "checked again just before its import, rows that would fail then handled by the plan's "
-            "failure rule. Nothing asks the user again. Pass files, rows and masters exactly as "
-            "plan_questions' last result implies (the card shows them), or nothing runs. Called "
+            "failure rule. Nothing asks the user again. Pass plan_questions' last `approval` "
+            "exactly: files, rows, masters, cut_off and decisions, so the approval card shows the "
+            "user every decision before anything is imported; anything else is refused. Called "
             "again for a plan that is running or done, it only reports: each file's status, "
             "created and left-out counts. Stopping keeps what is imported (stop_migration_plan)."
         )
         self.requires_permission = None  # checked on the plan; each file's import checks its own
         # File names and messages quote the user's files (#34003).
-        self.untrusted_fields = ("files", "message", "error")
+        self.untrusted_fields = ("files", "message", "error", "approval")
 
         self.inputSchema = {
             "type": "object",
@@ -54,8 +56,18 @@ class RunMigrationPlan(BaseTool):
                     "type": "integer",
                     "description": "How many missing records the plan creates first.",
                 },
+                "cut_off": {
+                    "type": "string",
+                    "description": "The cut-off date of its opening files, '' when it has none.",
+                },
+                "decisions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Every decision of the plan, one line each, as plan_questions' "
+                    "approval gives them: the user reads them on the approval card.",
+                },
             },
-            "required": ["plan", "files", "rows", "masters"],
+            "required": ["plan", "files", "rows", "masters", "cut_off", "decisions"],
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -65,7 +77,7 @@ class RunMigrationPlan(BaseTool):
         except frappe.DoesNotExistError:
             return {"success": False, "error": _("Migration plan '{0}' not found.").format(plan_name)}
         except frappe.PermissionError as e:
-            return permission_error_result(import_plan.PLAN_DOCTYPE, exception_message(e), name=plan_name)
+            return permission_error_result(import_plan.SESSION_DOCTYPE, exception_message(e), name=plan_name)
         if plan.status not in import_plan.OPEN:
             return {"success": True, **import_plan.result(plan)}  # running or done: report
 
@@ -73,11 +85,18 @@ class RunMigrationPlan(BaseTool):
         if not problem:
             figures = import_plan.card_figures(plan)
             asked = {key: arguments.get(key) for key in figures}
+            asked["decisions"] = [cstr(line).strip() for line in asked["decisions"] or []]
             if asked != figures:
-                problem = _(
-                    "The plan imports {files} files, {rows} rows, and creates {masters} records first. "
-                    "Pass those, so the approval card shows them."
-                ).format(**figures)
+                return {
+                    "success": False,
+                    "error": _(
+                        "The plan imports {files} files, {rows} rows, creates {masters} records first, "
+                        "with the cut-off '{cut_off}' and the decisions in approval. Pass approval "
+                        "exactly, so the approval card shows the user all of it."
+                    ).format(**figures),
+                    "plan": plan.name,
+                    "approval": figures,
+                }
         if problem:
             return {"success": False, "error": problem, "plan": plan.name}
         try:

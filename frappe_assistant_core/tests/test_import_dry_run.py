@@ -219,6 +219,17 @@ class TestDryRunImport(BaseAssistantTest):
         existing = self._group(result, "Already in ERPNext")
         self.assertEqual([e["row"] for e in existing["examples"]], [7])
 
+    def test_a_duplicate_is_found_beside_its_first_rows_other_problem(self):
+        # The first row's own problem (a Customer Type typo) must not hide the duplicate below it:
+        # found only after the typo is fixed, it would be a second round of questions.
+        t = self.tag
+        session = self._session([[f"Ravi {t}", GROUP, "Compnay", ""], [f"Ravi {t}", GROUP, "Company", ""]])
+
+        result = self._check(session)
+
+        in_file = self._group(result, "Duplicate in the file")
+        self.assertEqual([e["row"] for e in in_file["examples"]], [3])
+
     # -- the session holds the result ----------------------------------------------------------
 
     def test_the_session_holds_the_summary_the_full_list_and_a_step(self):
@@ -391,13 +402,16 @@ class TestDryRunImport(BaseAssistantTest):
                 self.assertTrue(frappe.flags.mute_emails and frappe.flags.in_import)
                 frappe.enqueue("frappe.ping")
                 frappe.utils.background_jobs.enqueue("frappe.ping")
+                # nosemgrep: frappe-realtime-pick-room — mocked: the test checks it is held back
                 frappe.publish_realtime("x")
+                # nosemgrep: frappe-manual-commit — mocked: the test checks it is held back
                 frappe.db.commit()
                 frappe.db.after_commit.add(len)  # a row's callback must not outlive the row
 
             for real in (real_commit, real_enqueue, real_bg_enqueue, real_publish):
                 real.assert_not_called()
             # Restored afterwards.
+            # nosemgrep: frappe-manual-commit — mocked: the test checks it goes out again
             frappe.db.commit()
             frappe.enqueue("frappe.ping")
             real_commit.assert_called_once()
@@ -421,6 +435,7 @@ class TestDryRunImport(BaseAssistantTest):
                     target=lambda: (
                         frappe.enqueue("frappe.ping"),
                         frappe.utils.background_jobs.enqueue("frappe.ping"),
+                        # nosemgrep: frappe-realtime-pick-room — mocked: another request's event
                         frappe.publish_realtime("x"),
                         frappe.realtime.publish_realtime("x"),
                     )
@@ -526,11 +541,13 @@ class TestDryRunImport(BaseAssistantTest):
 
         self.assertEqual(unknown["error"], folder["error"])
 
-    def test_file_id_and_file_url_together_are_refused(self):
+    def test_file_id_and_file_url_of_different_files_are_refused(self):
+        # Both of the same file are taken (test_import_session); two different files are not.
         session = self._chat_session()
         file_doc = self._upload([[f"Both {self.tag}", GROUP, "Company", ""]])
+        other = self._upload([[f"Other {self.tag}", GROUP, "Company", ""]])
 
-        self._check_fails(session, "not both", file_id=file_doc.name, file_url=file_doc.file_url)
+        self._check_fails(session, "different files", file_id=file_doc.name, file_url=other.file_url)
 
         self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
 

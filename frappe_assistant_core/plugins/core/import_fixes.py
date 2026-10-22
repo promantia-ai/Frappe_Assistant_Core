@@ -205,6 +205,27 @@ def _with_target(session, group: Dict[str, Any]) -> Dict[str, Any]:
 # -- closest existing values -------------------------------------------------------------
 
 
+#: How files write a currency other than by its code, which no spelling match finds ("RS" isn't
+#: close to "INR"): the code it means, offered first when that currency is switched on.
+CURRENCY_WORDS = {
+    "rs": "INR",
+    "rs.": "INR",
+    "rupee": "INR",
+    "rupees": "INR",
+    "₹": "INR",
+    "$": "USD",
+    "us$": "USD",
+    "dollar": "USD",
+    "dollars": "USD",
+    "€": "EUR",
+    "euro": "EUR",
+    "euros": "EUR",
+    "£": "GBP",
+    "pound": "GBP",
+    "pounds": "GBP",
+}
+
+
 def closest_names(doctype: str, value: str, limit: int = CLOSEST_LIMIT) -> List[str]:
     """Existing names of ``doctype`` closest to ``value``, best first, that the user can read.
 
@@ -228,7 +249,11 @@ def closest_names(doctype: str, value: str, limit: int = CLOSEST_LIMIT) -> List[
                 pluck="name",
                 limit_page_length=WORD_MATCHES,
             )
-    return rank(value, names, limit)
+    ranked = rank(value, names, limit)
+    meant = CURRENCY_WORDS.get(cstr(value).strip().casefold()) if doctype == "Currency" else None
+    if meant and frappe.db.exists(doctype, {"name": meant, **filters}):
+        ranked = [meant] + [name for name in ranked if name != meant][: limit - 1]
+    return ranked
 
 
 def _switched_on(meta) -> Dict[str, int]:
@@ -287,7 +312,7 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
         doctype = group["link_doctype"]
         explanation = _("{0}: there is no {1} called '{2}' in ERPNext.").format(rows, _(doctype), value)
         fixes = [{"action": MAP, "closest": closest_names(doctype, value)}]
-        reason = cannot_create(doctype, session)
+        reason = _creating_problem(doctype, session)
         if not reason:
             create = {"action": CREATE, "doctype": doctype, "name": value, "parent": default_parent(doctype)}
             if not session.get("migration_plan"):  # in a plan, it is a fix: the plan creates it when it runs
@@ -588,6 +613,17 @@ def _check_account(session, name: str) -> None:
         )
 
 
+def _creating_problem(doctype: str, session) -> str:
+    """Why the missing ``doctype`` record of ``session``'s rows can't be created, or "". In a
+    migration plan, the plan creates it when it runs, as create_planned does, with no session: a
+    party, which create_document makes for an opening-invoices file, it can't make (ERPNext names
+    it in code), so it isn't offered and an approved plan never refuses to run over it."""
+    reason = cannot_create(doctype, session)
+    if not reason and session.get("migration_plan"):
+        reason = cannot_create(doctype)
+    return reason
+
+
 def cannot_create(doctype: str, session=None) -> str:
     """Why a missing ``doctype`` record can't be created here, or "" when it can.
 
@@ -832,6 +868,9 @@ def _plan_master(session, group: Dict[str, Any], fix: Dict[str, Any]) -> Dict[st
     doctype = group.get("link_doctype")
     if group.get("cause") != dry_run.CAUSE_MISSING_LINK or not doctype:
         raise FixProblem(_("Only a record the rows link to and that doesn't exist can be created."))
+    reason = _creating_problem(doctype, session)
+    if reason:
+        raise FixProblem(_("A {0} can't be created here: {1}.").format(_(doctype), reason))
     source = (
         import_plan.planned_names(session).get(doctype, {}).get(cstr(group.get("value")).strip().casefold())
     )

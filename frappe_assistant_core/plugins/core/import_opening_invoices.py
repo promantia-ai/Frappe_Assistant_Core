@@ -215,9 +215,14 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     invoices = settings(session)
     file_doc = readable_session_file(session)
     checker = _InvoiceChecker(invoices["doctype"])
-    ready = _erpnext_check(session, _check_lines(session, checker), checker, commit_progress)
+    ready = _check_lines(session, checker)
+    # ERPNext can't check an invoice whose party an earlier file of the plan brings until it is there.
+    waiting = [line for line in ready if line.after_file]
+    ready = _erpnext_check(session, [line for line in ready if not line.after_file], checker, commit_progress)
+    ready += waiting
     for line in ready:
-        checker.mark(line.row, "ready")
+        waits = {"after_files": [line.after_file], "needs": [line.party]} if line.after_file else {}
+        checker.mark(line.row, "ready", **waits)
     checker.rows.sort(key=lambda r: r["row"])
     summary = dry_run._store(session_name, file_doc, checker, len(checker.rows))
     summary["opening_invoices"] = _totals(invoices, ready)
@@ -338,6 +343,7 @@ class Ready:
     item_name: str = ""
     original_date: str = ""  # the file's date, when the invoice is posted at the cut-off
     key: str = ""
+    after_file: str = ""  # in a migration plan: the earlier file that brings its party
 
 
 class _InvoiceChecker(opening_stock._StockChecker):
@@ -395,8 +401,11 @@ def _fiscal_years(company: str):
     return has_year
 
 
-def _line_problem(line: opening_stock.Line, invoices: Dict[str, Any], post_at_cutoff: bool, has_year):
-    """The line's problem as (key, info), or the Ready line."""
+def _line_problem(
+    line: opening_stock.Line, invoices: Dict[str, Any], post_at_cutoff: bool, has_year, coming=None
+):
+    """The line's problem as (key, info), or the Ready line. ``coming``: in a migration plan, the
+    records its earlier files bring (import_plan.planned_names)."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
     cells = line.cells
@@ -431,6 +440,13 @@ def _line_problem(line: opening_stock.Line, invoices: Dict[str, Any], post_at_cu
 
     party_type, given = invoices["party_type"], cells.get("party", "")
     party = find_party(party_type, given)
+    brought = (
+        (coming or {}).get(party_type, {}).get(given.strip().casefold()) if given and not party else None
+    )
+    if brought:
+        # An earlier file of the plan creates it: the line is checked without it now, and again in
+        # full just before its file is imported, as the plan checks every file then.
+        party = frappe._dict(name=given, brought_by=brought)
     if not party:
         return _problem(
             invoices,
@@ -505,6 +521,7 @@ def _line_problem(line: opening_stock.Line, invoices: Dict[str, Any], post_at_cu
         cells.get("invoice_number", ""),
         cells.get("item_name", ""),
         original,
+        after_file=party.brought_by or "",
     )
 
 
@@ -558,8 +575,13 @@ def _check_lines(
     session, checker: _InvoiceChecker, lines: Optional[List[opening_stock.Line]] = None
 ) -> List[Ready]:
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.plugins.core import import_plan
 
-    invoices, excluded = settings(session), dry_run._excluded_rows(session)
+    invoices, excluded, coming = (
+        settings(session),
+        dry_run._excluded_rows(session),
+        import_plan.planned_names(session),
+    )
     post, has_year, imported = (
         _post_at_cutoff(session),
         _fiscal_years(invoices["company"]),
@@ -579,7 +601,7 @@ def _check_lines(
             checker.mark(line.row, "imported")
             continue
         first = first_of.setdefault(key, line.row) if numbered else line.row
-        outcome = _line_problem(line, invoices, post, has_year)
+        outcome = _line_problem(line, invoices, post, has_year, coming)
         if not isinstance(outcome, Ready):
             checker.fail(line.row, *outcome)
             continue

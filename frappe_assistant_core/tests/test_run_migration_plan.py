@@ -15,9 +15,9 @@ import frappe
 from erpnext.setup.doctype.item_group.item_group import ItemGroup
 
 from frappe_assistant_core.plugins.core import import_plan, import_run
+from frappe_assistant_core.tests.test_import_plan import set_plan
 from frappe_assistant_core.tests.test_import_run import ImportRunCase
 
-PLAN = "FAC Migration Plan"
 SESSION = "FAC Import Session"
 
 
@@ -59,7 +59,8 @@ class TestRunMigrationPlan(ImportRunCase):
         return plan, groups, items
 
     def _approve(self, plan, **changes):
-        figures = {"plan": plan, "files": 2, "rows": 4, "masters": 0, **changes}
+        # what plan_questions hands FACO for the approval card, with the changes a test makes to it
+        figures = {"plan": plan, **import_plan.card_figures(import_plan.get_plan(plan)), **changes}
         with self._each_row_commits():
             return self._run("run_migration_plan", figures)
 
@@ -72,7 +73,7 @@ class TestRunMigrationPlan(ImportRunCase):
         self.assertEqual(frappe.db.get_value("Item Group", self.g2, "parent_item_group"), self.g1)
         for code in self.items:
             self.assertEqual(frappe.db.get_value("Item", code, "item_group"), self.g2)
-        self.assertEqual(frappe.db.get_value(PLAN, plan, "status"), "Completed")
+        self.assertEqual(import_plan.get_plan(plan).status, "Completed")
         self.assertEqual(
             [frappe.db.get_value(SESSION, s, "status") for s in (groups, items)], ["Completed"] * 2
         )
@@ -119,7 +120,7 @@ class TestRunMigrationPlan(ImportRunCase):
 
         def validate(doc, *args, **kwargs):
             if doc.name == self.g2:
-                frappe.throw("G2 refused for the test")
+                frappe.throw(frappe._("G2 refused for the test"))
             return real(doc, *args, **kwargs)
 
         return patch.object(ItemGroup, "validate", autospec=True, side_effect=validate)
@@ -133,7 +134,7 @@ class TestRunMigrationPlan(ImportRunCase):
         self.assertTrue(response["success"], response)
         self.assertTrue(frappe.db.exists("Item Group", self.g1))
         self.assertFalse(any(frappe.db.exists("Item", code) for code in self.items))
-        doc = frappe.get_doc(PLAN, plan)
+        doc = import_plan.get_plan(plan)
         self.assertEqual(doc.status, "Partially Completed")
         self.assertTrue(
             any("2 rows left out" in step.message for step in doc.steps), [s.message for s in doc.steps]
@@ -148,7 +149,7 @@ class TestRunMigrationPlan(ImportRunCase):
         with self._g2_fails():
             self._approve(plan)
 
-        doc = frappe.get_doc(PLAN, plan)
+        doc = import_plan.get_plan(plan)
         self.assertEqual(doc.status, "Stopped")
         self.assertIn("groups.csv", doc.steps[-1].message)
         self.assertFalse(frappe.db.exists("Item Group", self.g1))
@@ -161,13 +162,13 @@ class TestRunMigrationPlan(ImportRunCase):
 
         def done_then_stop(plan_name, session_name):
             finished = real(plan_name, session_name)
-            frappe.db.set_value(PLAN, plan_name, "stop_requested", 1)
+            import_plan.request_stop(plan_name)
             return finished
 
         with patch.object(import_plan, "_file_done", side_effect=done_then_stop):
             self._approve(plan)
 
-        self.assertEqual(frappe.db.get_value(PLAN, plan, "status"), "Stopped")
+        self.assertEqual(import_plan.get_plan(plan).status, "Stopped")
         self.assertTrue(frappe.db.exists("Item Group", self.g2))
         self.assertFalse(any(frappe.db.exists("Item", code) for code in self.items))
 
@@ -203,17 +204,30 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
         with patch.object(import_plan, "_prepare", side_effect=second_file_breaks):
             self._approve(plan)
 
-        doc = frappe.get_doc(PLAN, plan)
+        doc = import_plan.get_plan(plan)
         self.assertEqual(doc.status, "Stopped")
         self.assertIn("the disk is full", doc.steps[-1].message)
         self.assertTrue(frappe.db.exists("Item Group", self.g2))  # the file before it stays imported
 
+    def test_a_plan_runs_in_the_background_also_in_developer_mode(self):
+        # Data Import runs in the request in developer mode, but a plan imports every file: run in
+        # a chat request it outlasts the client's timeout, and the whole run rolls back.
+        in_test = frappe.flags.in_test
+        frappe.flags.in_test = False  # as a chat request runs, outside the test runner
+        try:
+            with patch.object(import_plan.frappe, "enqueue") as enqueue, patch.dict(
+                frappe.conf, {"developer_mode": 1}
+            ):
+                import_plan._enqueue("IMP-0", "run_job", user="Administrator")
+        finally:
+            frappe.flags.in_test = in_test
+
+        self.assertFalse(enqueue.call_args.kwargs["now"])
+
     def test_a_finished_files_job_hands_the_plan_to_a_job_of_its_own(self):
         plan, groups, _items = self._ready_plan()
-        frappe.db.set_value(
-            PLAN,
-            plan,
-            {"status": "Running", "progress": frappe.as_json({"current": groups, "user": "Administrator"})},
+        set_plan(
+            plan, status="Running", progress=frappe.as_json({"current": groups, "user": "Administrator"})
         )
 
         with patch.object(import_plan, "_enqueue") as enqueue, patch.object(
@@ -227,25 +241,26 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
 
     def test_stopping_doesnt_change_the_plan_the_run_is_saving(self):
         plan, _groups, _items = self._ready_plan()
-        frappe.db.set_value(PLAN, plan, "status", "Running")
-        before = frappe.db.get_value(PLAN, plan, "modified")
+        set_plan(plan, status="Running")
+        before = frappe.db.get_value(SESSION, plan, "modified")
 
         with patch.object(import_plan, "alive", return_value=True):
             response = self._run("stop_migration_plan", {"plan": plan})
 
         self.assertTrue(response["success"], response)
-        self.assertEqual(frappe.db.get_value(PLAN, plan, ["stop_requested", "status"]), (1, "Running"))
-        self.assertEqual(frappe.db.get_value(PLAN, plan, "modified"), before)
+        stopped = import_plan.get_plan(plan)
+        self.assertEqual((stopped.stop_requested, stopped.status), (1, "Running"))
+        self.assertEqual(frappe.db.get_value(SESSION, plan, "modified"), before)
 
     def test_stopping_a_plan_nothing_is_running_for_ends_it(self):
         plan, _groups, _items = self._ready_plan()
-        frappe.db.set_value(PLAN, plan, "status", "Running")
+        set_plan(plan, status="Running")
 
         with patch.object(import_plan, "alive", return_value=False):
             response = self._run("stop_migration_plan", {"plan": plan})
 
         self.assertTrue(response["success"], response)
-        self.assertEqual(frappe.db.get_value(PLAN, plan, "status"), "Stopped")
+        self.assertEqual(import_plan.get_plan(plan).status, "Stopped")
 
     def test_a_file_changed_after_the_approval_isnt_imported(self):
         plan, groups, items = self._ready_plan()
@@ -260,14 +275,14 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
         with patch.object(import_plan, "_file_done", side_effect=groups_done_then_items_change):
             self._approve(plan)
 
-        doc = frappe.get_doc(PLAN, plan)
+        doc = import_plan.get_plan(plan)
         self.assertEqual(doc.status, "Stopped")
         self.assertIn("items.csv changed after the plan was approved", doc.steps[-1].message)
         self.assertFalse(any(frappe.db.exists("Item", code) for code in self.items))
 
     def test_a_session_of_a_running_plan_cant_be_changed(self):
         plan, _groups, items = self._ready_plan()
-        frappe.db.set_value(PLAN, plan, "status", "Running")
+        set_plan(plan, status="Running")
 
         response = self._run("set_column_mapping", {"session": items, "mapping": {"Name": "description"}})
 
@@ -286,7 +301,7 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
             }
             for name in (first, second)
         ]
-        frappe.db.set_value(PLAN, plan, "masters", frappe.as_json(entries))
+        set_plan(plan, masters=frappe.as_json(entries))
         from frappe_assistant_core.plugins.core import import_fixes
 
         real = import_fixes.create_master
@@ -298,7 +313,7 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
 
         with patch.object(import_fixes, "create_master", side_effect=second_refused):
             with self.assertRaises(import_plan.PlanProblem):
-                import_plan.create_planned(frappe.get_doc(PLAN, plan))
+                import_plan.create_planned(import_plan.get_plan(plan))
 
         self.assertFalse(frappe.db.exists("Customer Group", first))
         self.assertEqual(frappe.get_doc(SESSION, groups).created_records, [])
@@ -306,11 +321,9 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
     def test_a_master_the_user_cant_create_stops_the_approval(self):
         plan, groups, _items = self._ready_plan()
         name = f"M {self.tag}"
-        frappe.db.set_value(
-            PLAN,
+        set_plan(
             plan,
-            "masters",
-            frappe.as_json(
+            masters=frappe.as_json(
                 [
                     {
                         "session": groups,
@@ -329,14 +342,14 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
             "has_permission",
             side_effect=lambda doctype, *a, **k: doctype != "Customer Group",
         ):
-            problem = import_plan.run_problem(frappe.get_doc(PLAN, plan))
+            problem = import_plan.run_problem(import_plan.get_plan(plan))
 
         self.assertIn("can't be created", problem)
         self.assertIn("Customer Group", problem)
 
     def test_a_stopped_plans_files_can_join_a_new_plan(self):
         plan, groups, items = self._ready_plan()
-        frappe.db.set_value(PLAN, plan, "status", "Stopped")
+        set_plan(plan, status="Stopped")
 
         response = self._run("plan_migration", {"sessions": [groups, items]})
 

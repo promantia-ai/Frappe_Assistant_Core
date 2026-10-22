@@ -100,4 +100,4 @@ Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with
 ## In a migration plan
 
 When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
-`plan_questions` gathers every question of the plan into one list. Don't call `start_import` for it: `run_migration_plan` imports every file of the plan.
+`plan_questions` gathers every question of the plan into one list. Don't call `start_import` for it: `run_migration_plan` imports every file of the plan. While the plan is open or running, `start_import` (and the opening import tools) refuse its files.

@@ -304,11 +304,13 @@ def _table_title(table: Dict[str, Any]) -> str:
 
 def load_session(name: str):
     """The session, if this user may change it. Raises DoesNotExistError or PermissionError."""
+    from frappe_assistant_core.plugins.core import import_plan
+
     doc = frappe.get_doc(SESSION_DOCTYPE, name)
     if not frappe.has_permission(SESSION_DOCTYPE, "write", doc=doc):
         raise frappe.PermissionError(f"You can't change import session {name}.")
     plan = doc.get("migration_plan")
-    if plan and frappe.db.get_value("FAC Migration Plan", plan, "status") == "Running":
+    if plan and import_plan.plan_status(plan) == "Running":
         raise frappe.PermissionError(
             _(
                 "Import session {0} is being imported by migration plan {1}: it can't change until the "

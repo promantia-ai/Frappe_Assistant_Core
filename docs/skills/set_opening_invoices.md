@@ -13,7 +13,8 @@ It writes no business data.
 1. `start_import_session` with the file (`file_id`; upload it in File Manager first).
 2. Ask the user **which company**, whether the file is **receivables or payables** (one kind per
    session; a file with both is two sessions), and **the cut-off date** (the last day in the old
-   system). Don't guess the date.
+   system). Don't guess the date. In a migration plan, take the company and the date from
+   `plan_migration`'s `opening_setup` (asked once there).
 
 ## Parameters
 

@@ -32,17 +32,26 @@ class PlanQuestions(BaseTool):
             "Every open question of a migration plan in one list, so the user answers them all "
             "before one approval: files still to map (kind structure), files that link to each "
             "other (order), each group of rows that would fail with the fixes that fit it (fix), "
-            "and what happens to rows that still fail when their file comes up (failure_rule). "
-            "Files are checked again first, in the plan's order. Show the questions together, the "
-            "suggested answer first. Map files yourself where you are sure. Then call again with "
+            "the cut-off date of opening stock, invoices and balances (cut_off: ask the user, never "
+            "guess it), and what happens to rows that still fail when their file comes up "
+            "(failure_rule). "
+            "Files are checked again first, in the plan's order. Ask once: one table of every "
+            "question (duplicates and left-out rows too, and what needed_by says) with the answer "
+            "you suggest and the cut-off date, in your message, not in the card; then ONE "
+            "single-choice card with one short line (ask_user single_select, never "
+            "multi_select): 'Apply all suggested answers and start (cut-off <date>)' or 'Let me "
+            "change some'. A question with nothing to suggest gets its own single-choice card. "
+            "Never questions as text to type answers to. Map files yourself where you are sure. "
+            "Then call again with "
             "answers: [{id, ...}], a fix's fields as dry_run_import takes them (action map/"
             "leave_out/create...; create plans a missing record that the plan creates when it "
-            "runs), or {id: 'plan:failure_rule', rule}. All answers apply or none. When ready is "
-            "true, the plan is Ready to Run: next run_migration_plan."
+            "runs), {id: 'plan:cut_off', date}, or {id: 'plan:failure_rule', rule}. All answers "
+            "apply or none. When ready is "
+            "true, the plan is Ready to Run: next run_migration_plan, given approval exactly."
         )
         self.requires_permission = None  # checked on the plan and its sessions
         # Questions quote the user's files: values, file names, columns (#34003).
-        self.untrusted_fields = ("questions", "files", "problems", "applied", "error")
+        self.untrusted_fields = ("questions", "files", "problems", "applied", "error", "approval")
 
         self.inputSchema = {
             "type": "object",
@@ -67,7 +76,7 @@ class PlanQuestions(BaseTool):
         except frappe.DoesNotExistError:
             return {"success": False, "error": _("Migration plan '{0}' not found.").format(plan_name)}
         except frappe.PermissionError as e:
-            return permission_error_result(import_plan.PLAN_DOCTYPE, exception_message(e), name=plan_name)
+            return permission_error_result(import_plan.SESSION_DOCTYPE, exception_message(e), name=plan_name)
         if plan.status not in import_plan.OPEN:
             return {
                 "success": False,
@@ -86,7 +95,29 @@ class PlanQuestions(BaseTool):
             return {"success": False, "error": exception_message(e)}
         if applied:
             result["applied"] = applied
+        result["next"] = _next(result, bool(answers))
         return {"success": True, **result}
+
+
+def _next(result: Dict[str, Any], answered: bool) -> str:
+    """What to do with the result: FACO otherwise asks again what the one card already asked."""
+    if result.get("ready") and answered:
+        return (
+            "If the user chose 'Apply all suggested answers and start', call run_migration_plan now "
+            "with approval exactly: they already said start, ask nothing more."
+        )
+    if result.get("ready"):
+        return (
+            "Show approval.decisions as a table in your message, then ONE ask_user single_select: "
+            "'Start the migration (cut-off <date>)' or 'Not yet'."
+        )
+    if any(q.get("kind") in ("checking", "structure") for q in result.get("questions") or []):
+        return "Map or wait for the files the questions name, then call plan_questions again."
+    return (
+        "One table in your message of every question (file, problem, suggested answer, the cut-off), "
+        "then ONE ask_user single_select: 'Apply all suggested answers and start (cut-off <date>)' "
+        "or 'Let me change some'. No other card."
+    )
 
 
 # Make sure class name matches file name for discovery

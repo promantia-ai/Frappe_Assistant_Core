@@ -38,7 +38,11 @@ class PlanMigration(BaseTool):
             "first, then pass them all. Pass plan to add sessions to an existing plan (it orders "
             "again), order to set the order yourself, and failure_rule if the user already chose it. "
             "Show the user the files in "
-            "order with each reason, and any problems. Next: map each file, then plan_questions."
+            "order with each reason, and any problems. opening_setup is for opening stock, invoices "
+            "and balances: use its company without asking (companies: ask which); ask the cut-off "
+            "once, now, on ONE ask_user single_select card of cut_off_choices (never as text to "
+            "type, never a guessed year), set every opening file to it, and pass it here as cut_off "
+            "(plan, no sessions). Next: map each file, then plan_questions."
         )
         self.requires_permission = None  # checked on the plan and on each session
         # File names and reasons quote the user's files (#34003).
@@ -62,6 +66,11 @@ class PlanMigration(BaseTool):
                     "description": "The plan's session ids in the order to import them, when the user "
                     "wants another order than the one worked out (files that link to each other, or a "
                     "file that must come first). Files left out of it go after.",
+                },
+                "cut_off": {
+                    "type": "string",
+                    "description": "The cut-off date the user picked, YYYY-MM-DD: plan_questions then "
+                    "doesn't ask it again.",
                 },
                 "failure_rule": {
                     "type": "string",
@@ -87,11 +96,11 @@ class PlanMigration(BaseTool):
             return {"success": False, "error": _("Pass the import sessions to plan.")}
 
         try:
-            plan = import_plan.load_plan(plan_name) if plan_name else frappe.new_doc(import_plan.PLAN_DOCTYPE)
+            plan = import_plan.load_plan(plan_name) if plan_name else None
         except frappe.DoesNotExistError:
             return {"success": False, "error": _("Migration plan '{0}' not found.").format(plan_name)}
         except frappe.PermissionError as e:
-            return permission_error_result(import_plan.PLAN_DOCTYPE, exception_message(e), name=plan_name)
+            return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=plan_name)
         if plan_name and plan.status not in import_plan.OPEN:
             return {
                 "success": False,
@@ -107,7 +116,7 @@ class PlanMigration(BaseTool):
             except frappe.PermissionError as e:
                 return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=name)
 
-        problems = import_plan.join_problems(plan.name if plan_name else None, sessions)
+        problems = import_plan.join_problems(plan.name if plan else None, sessions)
         if problems:
             return {
                 "success": False,
@@ -116,12 +125,15 @@ class PlanMigration(BaseTool):
             }
 
         try:
-            if not plan_name:
-                plan.title = ", ".join(s.file_name for s in sessions[:3]) or _("Migration")
-                plan.chat_session_id = next((s.chat_session_id for s in sessions if s.chat_session_id), None)
-                plan.insert()
+            if not plan:
+                plan = import_plan.new_plan(sessions)  # kept on its first file's session (#34351)
             if arguments.get("failure_rule"):
                 plan.failure_rule = arguments["failure_rule"]
+            if arguments.get("cut_off"):
+                cut_off = import_plan.as_date(arguments["cut_off"])
+                progress = frappe.parse_json(plan.progress or "{}") or {}
+                plan.progress = frappe.as_json({**progress, "cut_off": cut_off})
+                plan.log_step("Plan", "Success", _("Cut-off date: {0}.").format(cut_off))
             if fixed_order is not None:
                 progress = frappe.parse_json(plan.progress or "{}") or {}
                 plan.progress = frappe.as_json({**progress, "fixed_order": list(dict.fromkeys(fixed_order))})
@@ -132,14 +144,21 @@ class PlanMigration(BaseTool):
             plan.log_step(
                 "Plan",
                 "Warning" if problems else "Success",
-                _("{0} files in order.").format(len(frappe.parse_json(plan.order) or [])),
+                _("{0} files in order.").format(len(import_plan.children(plan))),
             )
             plan.save()
+        except import_plan.PlanProblem as e:
+            return {"success": False, "error": str(e)}
         except Exception as e:
             frappe.log_error(title=_("Plan Migration Error"), message=frappe.get_traceback())
             return {"success": False, "error": exception_message(e)}
 
-        return {"success": True, **import_plan.describe(plan), "problems": problems}
+        return {
+            "success": True,
+            **import_plan.describe(plan),
+            "problems": problems,
+            "opening_setup": import_plan.opening_setup(plan),
+        }
 
 
 # Make sure class name matches file name for discovery

@@ -81,7 +81,7 @@ Its `status`, `template_options` (mapping), `transformation_rules`, `validation_
 
 - **Target not allowed** — returns `success: false` with the reason: no Create permission, no Import permission, Allow Import turned off for the DocType, or a child table (import it through its parent).
 - **File not found or not readable** (`file_id`, `file_url`) — a file the user may not read (for example another user's private file) is reported the same way as a missing file. Every later step checks again, so a user who loses access to the file can't carry on.
-- **Both `file_id` and `file_url`** — refused; give one. A Google Sheets link with a file is refused too.
+- **`file_id` and `file_url` of different files** — refused; give one. Both of the same file are fine. A Google Sheets link with a file is refused.
 - **Google Sheet not shared, deleted, or the wrong tab** — refused with what to do: in Google Sheets click **Share**, under **General access** choose **Anyone with the link** (Viewer), then paste the link again. Pass the message on; don't retry until the user says it's shared.
 - **Not a Google Sheets link** (another site, Google Drive, `http://`) — refused: ask for the link from the browser's address bar while the sheet is open.
 - **Google Sheets didn't answer** — ask the user to try again in a moment. The same message comes when the download takes more than 2 minutes.

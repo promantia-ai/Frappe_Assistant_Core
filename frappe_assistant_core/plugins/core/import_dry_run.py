@@ -462,8 +462,9 @@ class _Checker:
         problems = self._match_problems(payload) if self.matches is not None else []
         if not problems:
             problems = self._parse_problems(payload, needs, from_files)
-        if not problems:
-            problems = self._duplicate_problems(payload)
+            # Checked beside the row's other problems too: a duplicate under a row with a typo would
+            # otherwise show only once the typo is fixed, a second round of questions.
+            problems += self._duplicate_problems(payload)
         record, changed = self._record(payload), []
         if not problems and record:
             from frappe_assistant_core.plugins.core import import_update
@@ -485,6 +486,7 @@ class _Checker:
                 extra["after"] = sorted(entry["row"] for entry in needs)
             if from_files:  # imported once those files are (import_plan)
                 extra["after_files"] = sorted({link["file"] for link in from_files.values()})
+                extra["needs"] = sorted({link["value"] for link in from_files.values()})
             if created:  # what a later file of a migration plan may link to
                 extra["name"] = created
             self.rows += [{"row": n, "status": "ready", **extra} for n in row_numbers]
@@ -616,17 +618,12 @@ class _Checker:
         """The name an insert of this row would give its record, when it is a field of the row."""
         if self.import_type != INSERT or self.matches is not None:
             return None
-        autoname = get_autoname_field(self.doctype)
-        if not autoname:
+        fieldname = _name_field(self.doctype)
+        if not fieldname:
             return None
         for column in self.header.columns:
             df = column.df
-            if (
-                df
-                and not column.skip_import
-                and df.parent == self.doctype
-                and df.fieldname == autoname.fieldname
-            ):
+            if df and not column.skip_import and df.parent == self.doctype and df.fieldname == fieldname:
                 return cstr(payload.rows[0].data[column.index]).strip() or None
         return None
 
@@ -846,6 +843,24 @@ def _stand_in(doctype: str, name: str) -> None:
     if parent_field and not doc.get(parent_field):
         doc.set(parent_field, import_fixes.default_parent(doctype))
     doc.insert(ignore_permissions=True, ignore_links=True, ignore_mandatory=True, set_name=name)
+
+
+#: ERPNext names these in code, from a field, when its settings say so: not in the DocType's autoname.
+NAMED_BY_SETTING = {
+    "Customer": ("Selling Settings", "cust_master_name", "Customer Name", "customer_name"),
+    "Supplier": ("Buying Settings", "supp_master_name", "Supplier Name", "supplier_name"),
+}
+
+
+def _name_field(doctype: str) -> Optional[str]:
+    """The field whose value a new ``doctype`` record is named by, if it is named by one."""
+    autoname = get_autoname_field(doctype)
+    if autoname:
+        return autoname.fieldname
+    rule = NAMED_BY_SETTING.get(doctype)
+    if rule and frappe.db.get_single_value(rule[0], rule[1]) == rule[2]:
+        return rule[3]
+    return None
 
 
 def _with_links(doc, needs) -> Dict[str, Any]:

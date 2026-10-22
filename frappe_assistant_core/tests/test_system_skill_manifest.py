@@ -58,11 +58,15 @@ MIGRATE_DATA_STEPS = (
 NOT_TOOLS = {
     "ask_user",
     "closest",
+    "cut_off_choices",
     "documents",
     "failed_rows_file",
     "fixes",
     "google_sheets_url",
     "import_session",
+    "migration_plan",
+    "opening_setup",
+    "plan_settings",
     "session_id",
     "status",
 }

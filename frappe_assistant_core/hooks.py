@@ -425,10 +425,6 @@ permission_query_conditions.update(
             "frappe_assistant_core.assistant_core.doctype.fac_import_session"
             ".fac_import_session.get_permission_query_conditions"
         ),
-        "FAC Migration Plan": (
-            "frappe_assistant_core.assistant_core.doctype.fac_migration_plan"
-            ".fac_migration_plan.get_permission_query_conditions"
-        ),
     }
 )
 
@@ -443,9 +439,6 @@ has_permission = {
     ),
     "FAC Import Session": (
         "frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session.has_permission"
-    ),
-    "FAC Migration Plan": (
-        "frappe_assistant_core.assistant_core.doctype.fac_migration_plan.fac_migration_plan.has_permission"
     ),
 }
 
@@ -515,7 +508,6 @@ user_data_fields = [
     {"doctype": "FAC Chat User Preferences", "filter_by": "user", "strict": False},
     {"doctype": "FAC Chat Usage Log", "filter_by": "user", "strict": False},
     {"doctype": "FAC Import Session", "filter_by": "user", "strict": False},
-    {"doctype": "FAC Migration Plan", "filter_by": "user", "strict": False},
 ]
 
 # NOTE: FACO browser and document tools are discovered via the `plugins/faco/`

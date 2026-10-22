@@ -16,6 +16,7 @@ from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
+from frappe_assistant_core.plugins.core import import_plan
 from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
 from frappe_assistant_core.plugins.core.import_session import FileProblem
 
@@ -60,6 +61,9 @@ class ImportOpeningInvoices(BaseTool):
             return {"success": False, "error": _("Import session '{0}' not found.").format(name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=name)
+        refused = import_plan.imported_by_its_plan(session)
+        if refused:
+            return {"success": False, "error": refused, "session": session.name}
         if not opening_invoices.is_opening_invoices(session):
             return {
                 "success": False,

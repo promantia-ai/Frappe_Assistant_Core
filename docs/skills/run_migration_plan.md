@@ -15,9 +15,12 @@ Only when `plan_questions` says `ready: true` (the plan is `Ready to Run`) and t
 | `files` | integer | Yes | How many files the plan imports. |
 | `rows` | integer | Yes | Rows ready to import, all files together (the sum of each file's `ready`). |
 | `masters` | integer | Yes | Missing records the plan creates first. |
+| `cut_off` | string | Yes | The cut-off date of its opening files, `""` when it has none. |
+| `decisions` | list of strings | Yes | Every decision of the plan, one line each: the records it creates, each fix ("Customer Group 'Retal' → 'Retail'"), rows left out, a file name whose date isn't the cut-off, and the failure rule. |
 
-The approval card shows these. If they aren't what the plan would do now, nothing runs and the
-error gives the right figures: pass those.
+Pass `plan_questions`' last `approval` exactly. The approval card shows it, so the user reads
+every decision and the cut-off date before anything is imported. If it isn't what the plan would
+do now, nothing runs and the reply's `approval` is what to pass.
 
 ## What happens
 
@@ -28,7 +31,7 @@ error gives the right figures: pass those.
 
 ## Following it
 
-Call `run_migration_plan` again with the plan (any figures): while it runs or once it's done it
+Call `run_migration_plan` again with the plan (any figures, the same `approval`): while it runs or once it's done it
 only reports `status` (`Running`, `Completed`, `Partially Completed`, `Stopped`, `Failed`) and each
 file's `status`, `created` and `left_out`.
 

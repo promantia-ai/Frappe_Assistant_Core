@@ -47,7 +47,7 @@ class StopMigrationPlan(BaseTool):
         except frappe.DoesNotExistError:
             return {"success": False, "error": _("Migration plan '{0}' not found.").format(plan_name)}
         except frappe.PermissionError as e:
-            return permission_error_result(import_plan.PLAN_DOCTYPE, exception_message(e), name=plan_name)
+            return permission_error_result(import_plan.SESSION_DOCTYPE, exception_message(e), name=plan_name)
         if plan.status != "Running":
             return {
                 "success": False,
@@ -57,7 +57,7 @@ class StopMigrationPlan(BaseTool):
             "FAC Import Session", (frappe.parse_json(plan.progress or "{}") or {}).get("current"), "file_name"
         )
         # Written on its own: the run saves the plan between files, and must not find it changed.
-        frappe.db.set_value(import_plan.PLAN_DOCTYPE, plan.name, "stop_requested", 1, update_modified=False)
+        import_plan.request_stop(plan.name)
         if not import_plan.alive(plan):
             # Nothing is running to see the flag (a job that died): the plan ends here.
             import_plan._end(plan.name, "Stopped", _("Stopped, as asked."))

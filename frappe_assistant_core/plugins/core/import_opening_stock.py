@@ -358,6 +358,7 @@ class Ready:
     batch_no: str = ""
     serial_no: str = ""
     expiry_date: str = ""
+    after_file: str = ""  # in a migration plan: the earlier file that brings its item
 
 
 def check_can_run(session) -> None:
@@ -397,8 +398,8 @@ class _StockChecker:
         group_id = self._group_of(self, key, info, payload)
         self.rows.append({"row": row, "status": "failed", "groups": [group_id]})
 
-    def mark(self, row: int, status: str) -> None:
-        self.rows.append({"row": row, "status": status})
+    def mark(self, row: int, status: str, **extra) -> None:
+        self.rows.append({"row": row, "status": status, **extra})
 
 
 def _problem(cause: str, field: str, value: str, message: str):
@@ -452,8 +453,11 @@ def _has_stock(item_code: str, warehouse: str, posting_date: str) -> bool:
 IMPORTED = object()  # a line whose item and warehouse an earlier document of the session holds
 
 
-def _line_problem(line: Line, stock: Dict[str, Any], allowed_zero: set, imported: set = frozenset()):
-    """The line's problem as (key, info), the Ready line, or IMPORTED."""
+def _line_problem(
+    line: Line, stock: Dict[str, Any], allowed_zero: set, imported: set = frozenset(), coming=None
+):
+    """The line's problem as (key, info), the Ready line, or IMPORTED. ``coming``: in a migration
+    plan, the records its earlier files bring (import_plan.planned_names)."""
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
 
     cells = line.cells
@@ -493,9 +497,14 @@ def _line_problem(line: Line, stock: Dict[str, Any], allowed_zero: set, imported
         as_dict=True,
     )
     if not item:
-        return _problem(
-            dry_run.CAUSE_MISSING_LINK, "item_code", code, _("Item '{0}' doesn't exist.").format(code)
-        )
+        brought = (coming or {}).get("Item", {}).get(code.strip().casefold()) if code else None
+        if not brought:
+            return _problem(
+                dry_run.CAUSE_MISSING_LINK, "item_code", code, _("Item '{0}' doesn't exist.").format(code)
+            )
+        # An earlier file of the plan creates it: the line is checked without it now, and again in
+        # full just before its file is imported, as the plan checks every file then.
+        item = frappe._dict(name=code, is_stock_item=1, brought_by=brought)
     given = cells.get("warehouse", "")
     warehouse = _warehouse(given, stock["company"])
     if not warehouse:
@@ -530,7 +539,7 @@ def _line_problem(line: Line, stock: Dict[str, Any], allowed_zero: set, imported
 
     qty, rate, amount = values["qty"] or 0, values["valuation_rate"], values["amount"]
     uom = cells.get("uom", "")
-    if uom and uom != item.stock_uom:
+    if uom and uom != item.stock_uom and not item.brought_by:
         factor = _conversion(item.name, uom)
         if not factor:
             return _problem(
@@ -604,6 +613,7 @@ def _line_problem(line: Line, stock: Dict[str, Any], allowed_zero: set, imported
         batch,
         "\n".join(serials),
         cells.get("expiry_date", ""),
+        item.brought_by or "",
     )
 
 
@@ -614,15 +624,16 @@ def _allowed_zero(session) -> set:
 
 def _check_lines(session, checker: _StockChecker, lines: Optional[List[Line]] = None) -> List[Ready]:
     from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.plugins.core import import_plan
 
     stock, excluded, allowed = settings(session), dry_run._excluded_rows(session), _allowed_zero(session)
-    imported = imported_keys(session)
+    imported, coming = imported_keys(session), import_plan.planned_names(session)
     ready, seen = [], {}
     for line in read_lines(session) if lines is None else lines:
         if line.row in excluded:
             checker.mark(line.row, "excluded")
             continue
-        outcome = _line_problem(line, stock, allowed, imported)
+        outcome = _line_problem(line, stock, allowed, imported, coming)
         if outcome is IMPORTED:
             checker.mark(line.row, "imported")
             continue
@@ -677,9 +688,12 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     file_doc = readable_session_file(session)
     checker = _StockChecker()
     ready = _check_lines(session, checker)
-    ready = _erpnext_check(session, ready, checker)
+    # ERPNext can't check a line whose item an earlier file of the plan brings until it is there.
+    waiting = [line for line in ready if line.after_file]
+    ready = _erpnext_check(session, [line for line in ready if not line.after_file], checker) + waiting
     for line in ready:
-        checker.mark(line.row, "ready")
+        waits = {"after_files": [line.after_file], "needs": [line.item_code]} if line.after_file else {}
+        checker.mark(line.row, "ready", **waits)
     checker.rows.sort(key=lambda r: r["row"])
     summary = dry_run._store(session_name, file_doc, checker, len(checker.rows))
     summary["opening_stock"] = _totals(ready)
