@@ -20,10 +20,10 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes, import_plan
-from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_failures, import_fixes
+from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.utils.import_session import (
     FileProblem,
     discard_sheet_copy,
     file_from_google_sheet,
@@ -67,14 +67,13 @@ class DryRunImport(BaseTool):
             "for the user to correct and upload: show its download_url. The corrected file comes "
             "back as file_id (or file_url), and is checked like any other. When the user fixed "
             "a Google Sheet the session came from, pass its google_sheets_url again: a fresh copy "
-            "is checked, and the mapping is kept."
+            "is checked, and the mapping is kept. For a session in a migration plan, records the "
+            "plan's earlier files create count as there, and the user's questions go through "
+            "plan_questions, not here."
         )
         self.requires_permission = None  # checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)
         self.untrusted_fields = (
-            "steps",
-            "next",
-            "message",
             "groups",
             "masters_plan",
             "left_out",
@@ -142,27 +141,24 @@ class DryRunImport(BaseTool):
         file_url = (arguments.get("file_url") or "").strip()
         sheet_url = (arguments.get("google_sheets_url") or "").strip()
         if sheet_url and (file_id or file_url):
-            return {"success": False, "error": "Give only the Google Sheets link, or only a file: not both."}
+            return {
+                "success": False,
+                "error": _("Give only the Google Sheets link, or only a file: not both."),
+            }
         if fixes is not None and (not isinstance(fixes, list) or not all(isinstance(f, dict) for f in fixes)):
-            return {"success": False, "error": "fixes must be a list of {group, action, ...}."}
+            return {"success": False, "error": _("fixes must be a list of {group, action, ...}.")}
         try:
             session = load_session(session_name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{session_name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
-
-        if import_plan.is_plan(session):
-            # A plan has no file: its "check" is the order of its files and where each stands.
-            if fixes or file_id or file_url or sheet_url or arguments.get("failed_rows_file"):
-                return {"success": False, "error": import_plan.refused(session), "session": session_name}
-            return {"success": True, **import_plan.build(session)}
 
         if arguments.get("failed_rows_file"):
             if fixes or file_id or file_url or sheet_url:
                 return {
                     "success": False,
-                    "error": "failed_rows_file is asked on its own, without fixes or a file.",
+                    "error": _("failed_rows_file is asked on its own, without fixes or a file."),
                 }
             try:
                 return {"success": True, **import_failures.failed_rows_file(session)}

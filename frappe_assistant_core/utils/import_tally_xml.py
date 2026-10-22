@@ -26,8 +26,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from frappe import _
 from lxml import etree
 
-from frappe_assistant_core.plugins.core.import_presets import MAX_PRESET_ROWS, Sheet, _number, _plain
-from frappe_assistant_core.plugins.core.import_session import MAX_FILE_SIZE, FileProblem
+from frappe_assistant_core.utils.import_presets import MAX_PRESET_ROWS, Sheet, _number, _plain
+from frappe_assistant_core.utils.import_session import MAX_FILE_SIZE, FileProblem
 
 PARTS = {"LEDGER": "ledgers", "STOCKITEM": "stock_items", "GROUP": "groups"}
 IMPORTABLE = {"ledgers": "tally_prime.ledgers", "stock_items": "tally_prime.stock_items"}
@@ -178,7 +178,7 @@ def _walk(content: bytes, company: List[str]) -> Iterator[Tuple[str, Any]]:
     except FileProblem:
         raise
     except etree.LxmlError as e:
-        raise FileProblem(_("Could not read the XML: {0}").format(e))
+        raise FileProblem(_("Could not read the XML: {0}").format(str(e)))
     if not started:
         raise FileProblem(_(NOT_TALLY))
 
@@ -206,7 +206,7 @@ def survey(file_doc) -> Survey:
             ranked = other.most_common()
             held = ", ".join(f"{tag} {count}" for tag, count in ranked[:MAX_NAMED])
             if len(ranked) > MAX_NAMED:
-                held += _(" and {0} more").format(len(ranked) - MAX_NAMED)
+                held += " " + _("and {0} more").format(len(ranked) - MAX_NAMED)
             raise FileProblem(_(NO_MASTERS).format(held))
         raise FileProblem(_(NOT_TALLY))
     return Survey(company[0] if company else None, parts, dict(other))

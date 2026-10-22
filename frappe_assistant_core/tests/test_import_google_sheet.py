@@ -22,8 +22,8 @@ import frappe
 import requests
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_session
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_session
 
 LINK = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMn/edit#gid=0"
 EXPORT = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMn/export?format=csv&gid=0"
@@ -256,6 +256,23 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
         with _google(_reply(200, CSV_CONTENT)):
             self._start_fails("more than the 10", google_sheets_url=LINK)
 
+        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+
+    def test_a_session_that_cant_be_saved_leaves_no_copy_behind(self):
+        from frappe_assistant_core.plugins.core.tools.start_import_session import StartImportSession
+
+        with (
+            _google(_reply(200, CSV_CONTENT)),
+            patch.object(
+                StartImportSession,
+                "_create_session",
+                autospec=True,
+                side_effect=frappe.ValidationError("the session couldn't be saved"),
+            ),
+        ):
+            response = self._run({"google_sheets_url": LINK})
+
+        self.assertFalse(response["success"], response)
         self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
 
 

@@ -24,10 +24,10 @@ from unittest.mock import patch
 import frappe
 import openpyxl
 
-from frappe_assistant_core.plugins.core import import_fixes, import_run
-from frappe_assistant_core.plugins.core.import_failures import REASON_COLUMN, ROW_COLUMN
-from frappe_assistant_core.plugins.core.import_session import FileProblem, read_sheet_rows
 from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase
+from frappe_assistant_core.utils import import_fixes, import_run
+from frappe_assistant_core.utils.import_failures import REASON_COLUMN, ROW_COLUMN
+from frappe_assistant_core.utils.import_session import FileProblem, read_sheet_rows
 
 GROUP_NODE = "Cannot select a Group type Customer Group"
 
@@ -575,8 +575,8 @@ class TestImportFailures(ImportRunCase):
     # -- Frappe v16 refuses SQL functions in get_all's fields ------------------------------------
 
     def test_the_runs_are_counted_without_asking_get_all_for_a_sql_function(self):
-        from frappe_assistant_core.plugins.core import import_failures
         from frappe_assistant_core.tests.test_import_opening_stock import refuse_sql_functions
+        from frappe_assistant_core.utils import import_failures
 
         session, _checked, _result = self._partly_imported()
 

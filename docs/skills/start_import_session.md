@@ -31,7 +31,6 @@ Other parameters:
 | `sheet` | string | No | For a file on this site: the sheet to use. Default: the first sheet with rows. For `file_name`: the sheet you read. |
 | `target_doctype` | string | No | DocType the rows become, if already known. The user's permission to import into it is checked **before** anything else. |
 | `import_type` | string | No | `Insert New Records` (default) or `Update Existing Records` to change existing records: see set_column_mapping's `match_on`. |
-| `plan_with` | string | No | When the user migrates **several files**: the session_id of another file of the same migration (or its plan). This file joins that migration plan, made the first time; the reply's `plan_session` is the plan. Read it with `dry_run_import` on the plan (see the migrate-data skill). Only the user's own sessions. |
 
 Supported files: `.csv`, `.xlsx`, `.xls`. **Row 1 must hold the column headers.** One file holds one kind of record, e.g. customers.
 
@@ -82,7 +81,7 @@ Its `status`, `template_options` (mapping), `transformation_rules`, `validation_
 
 - **Target not allowed** — returns `success: false` with the reason: no Create permission, no Import permission, Allow Import turned off for the DocType, or a child table (import it through its parent).
 - **File not found or not readable** (`file_id`, `file_url`) — a file the user may not read (for example another user's private file) is reported the same way as a missing file. Every later step checks again, so a user who loses access to the file can't carry on.
-- **Both `file_id` and `file_url`** — refused; give one. A Google Sheets link with a file is refused too.
+- **`file_id` and `file_url` of different files** — refused; give one. Both of the same file are fine. A Google Sheets link with a file is refused.
 - **Google Sheet not shared, deleted, or the wrong tab** — refused with what to do: in Google Sheets click **Share**, under **General access** choose **Anyone with the link** (Viewer), then paste the link again. Pass the message on; don't retry until the user says it's shared.
 - **Not a Google Sheets link** (another site, Google Drive, `http://`) — refused: ask for the link from the browser's address bar while the sheet is open.
 - **Google Sheets didn't answer** — ask the user to try again in a moment. The same message comes when the download takes more than 2 minutes.

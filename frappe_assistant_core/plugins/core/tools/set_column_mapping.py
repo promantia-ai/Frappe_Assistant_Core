@@ -25,8 +25,8 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_plan, import_update
-from frappe_assistant_core.plugins.core.import_mapping import (
+from frappe_assistant_core.utils import import_update
+from frappe_assistant_core.utils.import_mapping import (
     DONT_IMPORT,
     SESSION_DOCTYPE,
     build_import_schema,
@@ -38,7 +38,7 @@ from frappe_assistant_core.plugins.core.import_mapping import (
     session_headers,
     session_mapping,
 )
-from frappe_assistant_core.plugins.core.import_session import import_target_problem
+from frappe_assistant_core.utils.import_session import import_target_problem
 
 
 class SetColumnMapping(BaseTool):
@@ -60,7 +60,8 @@ class SetColumnMapping(BaseTool):
             "the target (that clears the old mapping). The result is the full mapping to show the "
             "user: parent fields and each child table apart, with unmapped columns and required "
             "fields that have no column. Next, once the user agrees the mapping: dry_run_import to "
-            "check every row."
+            "check every row. For a session in a migration plan, don't ask the user here: map what "
+            "you are sure of, and plan_questions asks the rest with the plan's other questions."
         )
         self.requires_permission = None  # Checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)
@@ -112,19 +113,19 @@ class SetColumnMapping(BaseTool):
         mapping = arguments.get("mapping")
         try:
             if not isinstance(mapping, dict) or not mapping:
-                return {"success": False, "error": "mapping must be an object of column → field."}
+                return {"success": False, "error": _("mapping must be an object of column → field.")}
 
             try:
                 doc = load_session(session_name)
             except frappe.DoesNotExistError:
-                return {"success": False, "error": f"Import session '{session_name}' not found."}
+                return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
             except frappe.PermissionError as e:
                 return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
             # Mapping sets the session back to Mapped, for a check of the rows not imported yet: never
             # while its import runs (a second import would take rows the first hasn't reached yet),
             # nor once it was cancelled or undone.
-            refused = import_plan.refused(doc) or _mapping_refused(doc.status) or _check_running(doc)
+            refused = _mapping_refused(doc.status) or _check_running(doc)
             if refused:
                 return {"success": False, "error": refused, "session": session_name}
 
@@ -133,7 +134,7 @@ class SetColumnMapping(BaseTool):
             if not target:
                 return {
                     "success": False,
-                    "error": "This session has no target DocType yet. Pass doctype, e.g. 'Customer'.",
+                    "error": _("This session has no target DocType yet. Pass doctype, e.g. 'Customer'."),
                 }
 
             import_type = arguments.get("import_type") or doc.import_type or "Insert New Records"
@@ -147,7 +148,7 @@ class SetColumnMapping(BaseTool):
 
             headers = session_headers(doc)
             if not headers:
-                return {"success": False, "error": "The session has no column headers for its sheet."}
+                return {"success": False, "error": _("The session has no column headers for its sheet.")}
 
             schema = build_import_schema(target)
             existing = session_mapping(doc) if target == current_target else {}
@@ -164,7 +165,7 @@ class SetColumnMapping(BaseTool):
             if problems:
                 return {
                     "success": False,
-                    "error": "The mapping was not saved. Fix these and call again.",
+                    "error": _("The mapping was not saved. Fix these and call again."),
                     "problems": problems,
                     "columns": headers,
                 }
@@ -206,14 +207,14 @@ def _imported_as(doc, target: str, import_type: str):
 
 def _check_running(doc):
     """A background check stores its result when it ends: a remap now would be stamped as checked."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     return dry_run.check_running() if dry_run.is_running(doc) else None
 
 
 def _mapping_refused(status: str):
     """Why a session with ``status`` can't be remapped, or None."""
-    from frappe_assistant_core.plugins.core.import_dry_run import RUNNABLE_STATUSES
+    from frappe_assistant_core.utils.import_dry_run import RUNNABLE_STATUSES
 
     if status in ("File Read", *RUNNABLE_STATUSES):
         return None

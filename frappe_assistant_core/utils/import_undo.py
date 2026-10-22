@@ -30,6 +30,8 @@ from pypika import Case
 from pypika import functions as fn
 from pypika.terms import Tuple as Row
 
+from frappe_assistant_core.utils.savepoint import open_savepoint, release_savepoint, rollback_to_savepoint
+
 # Accounts Frozen Till: on each Company in Frappe v16, in Accounts Settings in v15.
 COMPANY_FROZEN_FIELD = "accounts_frozen_till_date"
 SETTINGS_FROZEN_FIELD = "acc_frozen_upto"
@@ -112,7 +114,7 @@ def window(session) -> dict:
 
 def refusal(session) -> str:
     """Why the session can't be undone now, or "" when it can."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     if dry_run.is_running(session):
         return dry_run.check_running()
@@ -510,14 +512,33 @@ def link_blockers(records: List[Record], ignore: Set[Key], session=None) -> List
         linker = first.get(_key(record))
         if not linker:
             continue
-        by = _label(*linker)
         more = count[_key(record)] - 1
-        if more > 0:
-            detail = _("{0} links to it ({1} more).").format(by, more)
+        if not _readable(*linker):
+            # The query read every document; the user is told only that one they can't open exists.
+            by = None
+            detail = (
+                _("A record you can't open links to it ({0} more).").format(more)
+                if more > 0
+                else _("A record you can't open links to it.")
+            )
         else:
-            detail = _("{0} links to it.").format(by)
+            by = _label(*linker)
+            detail = (
+                _("{0} links to it ({1} more).").format(by, more)
+                if more > 0
+                else _("{0} links to it.").format(by)
+            )
         blockers.append(Blocker(record, "linked", detail, by))
     return blockers
+
+
+def _readable(doctype: str, name: str) -> bool:
+    """Whether the current user may read the document ``name`` of ``doctype``, so may see it named."""
+    try:
+        return bool(frappe.has_permission(doctype, "read", doc=name))
+    except frappe.DoesNotExistError:
+        frappe.clear_last_message()
+        return False
 
 
 # -- changed -------------------------------------------------------------------------------
@@ -709,10 +730,16 @@ def _later_stock_blockers(records: List[Record], in_set: Set[Key]) -> List[Block
             if rows and (earliest is None or rows[0].posting_datetime < earliest.posting_datetime):
                 earliest = rows[0]
         if earliest:
-            by = _label(earliest.voucher_type, earliest.voucher_no)
-            detail = _("{0} moved {1} in {2} on {3}, after this reconciliation.").format(
-                by, earliest.item_code, earliest.warehouse, earliest.posting_datetime
-            )
+            if _readable(earliest.voucher_type, earliest.voucher_no):
+                by = _label(earliest.voucher_type, earliest.voucher_no)
+                detail = _("{0} moved {1} in {2} on {3}, after this reconciliation.").format(
+                    by, earliest.item_code, earliest.warehouse, earliest.posting_datetime
+                )
+            else:
+                by = None  # the user is told the item and warehouse they imported, not the voucher
+                detail = _(
+                    "A stock movement you can't open moved {0} in {1} on {2}, after this reconciliation."
+                ).format(earliest.item_code, earliest.warehouse, earliest.posting_datetime)
             blockers.append(Blocker(record, "later_stock", detail, by))
     return blockers
 
@@ -736,6 +763,7 @@ def _permission_blockers(records: List[Record]) -> List[Blocker]:
                         limit_page_length=0,
                     )
                 )
+        # nosemgrep: unchecked-frappe-permission-call — the answer is used: a record the user can't cancel is listed as blocked
         can_cancel = frappe.has_permission(doctype, "cancel") if submitted else True
         for record in (r for r in records if r.doctype == doctype):
             if not can_delete:
@@ -1141,7 +1169,7 @@ def undo_job(session_name: str, user: str, mode: str) -> None:
     """Background job: the undo, as the user who approved it. A record that can't be removed
     is kept (delete_failed) with what it needs; anything else that goes wrong rolls back and
     sets the session back to its status before the undo."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the undo
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
@@ -1366,7 +1394,8 @@ def _remove(session, record: Record):
     for each record would rewrite its whole Created Records table (and a Version) every time.
     The session in memory still lists the row, so the caller reloads it before saving."""
     since = len(frappe.local.message_log or [])
-    frappe.db.savepoint(RECORD_SAVEPOINT)
+    # What the cancel or delete queued for the commit goes with it if the record is refused.
+    marks = open_savepoint(RECORD_SAVEPOINT)
     try:
         _drop_row(session, record)
         try:
@@ -1383,16 +1412,16 @@ def _remove(session, record: Record):
         frappe.delete_doc(record.doctype, record.name)
     except Exception as e:
         error = _error_of(e, since)
-        frappe.db.rollback(save_point=RECORD_SAVEPOINT)
-        frappe.clear_document_cache(record.doctype, record.name)
+        rollback_to_savepoint(RECORD_SAVEPOINT, marks, record.doctype, record.name)
         return error
+    release_savepoint(RECORD_SAVEPOINT)
     return None
 
 
 def _error_of(e: Exception, since: int) -> str:
     """What refused a record: the messages shown since ``since``, which are then dropped, so
     one record's failure isn't shown with the next."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     log = list(frappe.local.message_log or [])
     frappe.local.message_log = log[since:]

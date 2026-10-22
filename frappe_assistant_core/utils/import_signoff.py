@@ -23,9 +23,9 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, cint, cstr, escape_html, flt, fmt_money, getdate, now_datetime
 
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_failures, import_fixes
+from frappe_assistant_core.utils.import_session import (
     FileProblem,
     get_readable_file_by_id,
     read_sheet_rows,
@@ -337,18 +337,18 @@ def sessions_of(
     to_date: Optional[str] = None,
 ) -> List[Any]:
     """The sessions to report on, oldest first, that the user may read: the ones named, else
-    ``user``'s (the current user's by default), started between the dates when given. Cancelled
-    ones are left out."""
-    # A migration plan (#33995) has no file: its files' sessions are reported, not it.
-    filters: List[Any] = [["status", "!=", "Cancelled"], ["file_source", "!=", "Migration Plan"]]
+    ``user``'s (the current user's by default) started between the dates when given. Cancelled
+    ones are left out. Named sessions count whenever they started: generate_report fills in a
+    fiscal year's dates by itself, and those must not hide a session the user asked for."""
+    filters: List[Any] = [["status", "!=", "Cancelled"]]
     if names:
         filters.append(["name", "in", list(names)])
     else:
         filters.append(["user", "=", user or frappe.session.user])
-    if from_date:
-        filters.append(["creation", ">=", str(getdate(from_date))])
-    if to_date:
-        filters.append(["creation", "<", str(add_days(getdate(to_date), 1))])
+        if from_date:
+            filters.append(["creation", ">=", str(getdate(from_date))])
+        if to_date:
+            filters.append(["creation", "<", str(add_days(getdate(to_date), 1))])
     found = frappe.get_list(
         dry_run.SESSION_DOCTYPE,
         filters=filters,

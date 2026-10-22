@@ -15,11 +15,11 @@ from unittest.mock import patch
 import frappe
 from openpyxl import Workbook
 
-from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
-from frappe_assistant_core.plugins.core import import_presets as presets
-from frappe_assistant_core.plugins.core.import_presets import Sheet
-from frappe_assistant_core.plugins.core.import_session import FileProblem
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_opening_stock as opening_stock
+from frappe_assistant_core.utils import import_presets as presets
+from frappe_assistant_core.utils.import_presets import Sheet
+from frappe_assistant_core.utils.import_session import FileProblem
 
 
 class TestNormalise(BaseAssistantTest):

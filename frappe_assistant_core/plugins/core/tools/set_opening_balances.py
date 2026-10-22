@@ -12,10 +12,11 @@
 from typing import Any, Dict
 
 import frappe
+from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
-from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.utils import import_opening_balances as opening_balances
+from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
 
 
 class SetOpeningBalances(BaseTool):
@@ -28,7 +29,8 @@ class SetOpeningBalances(BaseTool):
             "Make an import session's file the old system's closing trial balance, brought in as one "
             "opening Journal Entry (voucher type Opening Entry) at the cut-off date. Use it instead of "
             "set_column_mapping for such a file. Ask the user for the company, the cut-off date (the "
-            "last day in the old system) and what to do with Profit and Loss rows: stop and say why "
+            "last day in the old system; in a migration plan, plan_migration's opening_setup gives "
+            "both) and what to do with Profit and Loss rows: stop and say why "
             "(profit_and_loss stop, the default, because ERPNext refuses them in an opening entry), or "
             "roll their net into a retained-earnings account the user names (profit_and_loss "
             "retained_earnings with retained_earnings_account, an Equity account of the company). Map "
@@ -74,7 +76,7 @@ class SetOpeningBalances(BaseTool):
         try:
             session = load_session(name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=name)
         try:

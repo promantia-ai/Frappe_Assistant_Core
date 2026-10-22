@@ -11,6 +11,7 @@ It writes no business data.
 
 1. `start_import_session` with the file (`file_id`).
 2. Ask the user **which company** and **the cut-off date** (the last day in the old system). Don't guess the date.
+   In a migration plan, take both from `plan_migration`'s `opening_setup` (asked once there).
 3. Items and warehouses must exist first. If they don't, import them first.
 
 ## Parameters

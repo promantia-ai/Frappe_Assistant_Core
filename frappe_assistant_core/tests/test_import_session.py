@@ -370,10 +370,17 @@ class TestImportSession(BaseAssistantTest):
 
         self.assertEqual(self._start(file_id=theirs.name)["row_count"], 25)
 
-    def test_file_id_and_file_url_together_are_refused(self):
+    def test_file_id_and_file_url_of_the_same_file_are_taken(self):
+        # FACO often passes both from the chat attachment: one file, said twice, isn't a mistake.
         file_doc = self._upload("customers.csv", CSV_CONTENT)
 
-        self._start_fails("not both", file_id=file_doc.name, file_url=file_doc.file_url)
+        self.assertEqual(self._start(file_id=file_doc.name, file_url=file_doc.file_url)["row_count"], 25)
+
+    def test_file_id_and_file_url_of_different_files_are_refused(self):
+        file_doc = self._upload("customers.csv", CSV_CONTENT)
+        other = self._upload("suppliers.csv", b"Supplier Name\nSupplier 1\n")  # other content: another file
+
+        self._start_fails("different files", file_id=file_doc.name, file_url=other.file_url)
 
         self.assertEqual(self._new_sessions(), 0)
 

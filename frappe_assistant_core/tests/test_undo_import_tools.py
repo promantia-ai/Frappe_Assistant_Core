@@ -25,10 +25,10 @@ from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_
     FACImportSession,
 )
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.plugins.core.plugin import CorePlugin
 from frappe_assistant_core.tests.test_import_run import MAPPING
 from frappe_assistant_core.tests.test_import_undo import BlockerCase
+from frappe_assistant_core.utils import import_undo
 from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
 
 
@@ -719,9 +719,53 @@ class TestRegistration(UndoToolsCase):
             self.assertIsNotNone(tool, name)
             self.assertIsNone(tool.requires_permission)
 
-    def test_undo_import_is_a_write_tool_and_the_preview_is_not(self):
-        self.assertEqual(detect_tool_category(self.registry.get_tool("undo_import")), "write")
+    def test_undo_import_is_destructive_and_the_preview_is_read_only(self):
+        # It deletes records, as delete_document does: the client is told so (#34003).
+        self.assertEqual(detect_tool_category(self.registry.get_tool("undo_import")), "privileged")
         self.assertEqual(detect_tool_category(self.registry.get_tool("preview_import_undo")), "read_only")
+
+    def test_tools_list_tells_the_client_undo_import_is_destructive(self):
+        from frappe_assistant_core.api.fac_endpoint import _resolve_tool_categories
+        from frappe_assistant_core.utils.tool_category_detector import category_to_annotations
+
+        # What tools/list advertises: the category stored on the site's FAC Tool Configuration
+        # row (seeded at migrate), else the detected one.
+        categories = _resolve_tool_categories(["undo_import", "preview_import_undo"], self.registry)
+
+        self.assertEqual(
+            category_to_annotations(categories["undo_import"]),
+            {"readOnlyHint": False, "destructiveHint": True},
+        )
+        self.assertEqual(category_to_annotations(categories["preview_import_undo"]), {"readOnlyHint": True})
+
+    def test_the_patch_marks_an_existing_sites_undo_import_destructive(self):
+        from frappe_assistant_core.patches.v3_1 import recategorize_undo_import
+
+        # A site migrated before this change seeded undo_import's row as write.
+        frappe.db.set_value(
+            "FAC Tool Configuration",
+            "undo_import",
+            {"tool_category": "write", "auto_detected_category": "write", "category_override": 0},
+        )
+
+        recategorize_undo_import.execute()
+
+        self.assertEqual(
+            frappe.db.get_value("FAC Tool Configuration", "undo_import", "tool_category"), "privileged"
+        )
+
+    def test_the_patch_keeps_an_administrators_own_category(self):
+        from frappe_assistant_core.patches.v3_1 import recategorize_undo_import
+
+        frappe.db.set_value(
+            "FAC Tool Configuration", "undo_import", {"tool_category": "write", "category_override": 1}
+        )
+
+        recategorize_undo_import.execute()
+
+        self.assertEqual(
+            frappe.db.get_value("FAC Tool Configuration", "undo_import", "tool_category"), "write"
+        )
 
     def test_the_descriptions_carry_the_guidance(self):
         preview = self.registry.get_tool("preview_import_undo").description
@@ -838,3 +882,78 @@ class TestUndoneSession(UndoToolsCase):
         self.assertEqual(reply["result"]["session"], session)
         doc = self._doc(session)
         self.assertEqual((doc.status, doc.template_options), ("Undoing", before))
+
+
+class TestCodeReviewFindings(UndoToolsCase):
+    """The code review's findings on the undo tools, each pinned by a test that failed first."""
+
+    def _mcp(self, tool_name, arguments):
+        """The tool's result as the model reads it: through the MCP server."""
+        import json
+
+        from frappe_assistant_core.mcp.server import MCPServer
+        from frappe_assistant_core.mcp.tool_adapter import build_tool_dict
+
+        tool = self.registry.get_tool(tool_name)
+        response = MCPServer("test")._handle_tools_call(
+            {"name": tool_name, "arguments": arguments}, {tool_name: build_tool_dict(tool)}
+        )
+        return json.loads(response["content"][0]["text"])
+
+    def test_record_names_from_the_file_reach_the_model_fenced(self):
+        from frappe_assistant_core.tests.test_import_guardrails import INJECTION, _strings
+        from frappe_assistant_core.utils.untrusted_output import FENCE
+
+        session, _names = self._session_with_groups(1)
+        # A Customer Group named as the user's file named it, kept by a Customer outside the set.
+        group = (
+            frappe.get_doc(
+                {
+                    "doctype": "Customer Group",
+                    "customer_group_name": f"{INJECTION} {self.tag}",
+                    "parent_customer_group": "All Customer Groups",
+                }
+            )
+            .insert()
+            .name
+        )
+        self._add(session, "Customer Group", group, "All Customer Groups")
+        self._outside_customer(group)
+
+        preview = self._mcp("preview_import_undo", {"session": session})
+        undone = self._mcp(
+            "undo_import",
+            {
+                "session": session,
+                "records": preview["records"],
+                "blocked": preview["blocked"],
+                "mode": "unblocked",
+            },
+        )
+
+        for payload in (preview, undone):
+            found = [s for s in _strings(payload) if INJECTION in s]
+            self.assertTrue(found, payload)
+            for text in found:
+                self.assertIn(f"<{FENCE}>", text)
+
+    def test_a_missing_session_is_told_in_the_users_language(self):
+        from frappe_assistant_core.plugins.core.tools import (
+            dry_run_import,
+            preview_import_undo,
+            start_import,
+            undo_import,
+        )
+
+        for module, tool_name in (
+            (undo_import, "undo_import"),
+            (preview_import_undo, "preview_import_undo"),
+            (start_import, "start_import"),
+            (dry_run_import, "dry_run_import"),
+        ):
+            arguments = {"session": "FAC-IMPORT-NOT-THERE", "records": 0, "blocked": 0, "mode": "all"}
+            arguments.update({"doctype": "Customer", "rows": 1, "import_type": "Insert New Records"})
+            with patch.object(module, "_", side_effect=lambda text: f"translated: {text}"):
+                reply = self.registry.get_tool(tool_name).execute(arguments)
+            self.assertFalse(reply["success"], reply)
+            self.assertTrue(reply["error"].startswith("translated: "), (tool_name, reply))

@@ -9,7 +9,7 @@
 """Migration Sign-off (#33999): what a data migration brought in, for the business to sign off.
 The numbers are counted in import_signoff, from the files and from ERPNext."""
 
-from frappe_assistant_core.plugins.core import import_signoff
+from frappe_assistant_core.utils import import_signoff
 
 
 def execute(filters=None):

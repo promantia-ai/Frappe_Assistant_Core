@@ -30,6 +30,7 @@ import difflib
 from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
+from frappe import _
 from frappe.model import display_fieldtypes, no_value_fields
 
 DONT_IMPORT = "Don't Import"
@@ -303,9 +304,19 @@ def _table_title(table: Dict[str, Any]) -> str:
 
 def load_session(name: str):
     """The session, if this user may change it. Raises DoesNotExistError or PermissionError."""
+    from frappe_assistant_core.utils import import_plan
+
     doc = frappe.get_doc(SESSION_DOCTYPE, name)
     if not frappe.has_permission(SESSION_DOCTYPE, "write", doc=doc):
         raise frappe.PermissionError(f"You can't change import session {name}.")
+    plan = doc.get("migration_plan")
+    if plan and import_plan.plan_status(plan) == "Running":
+        raise frappe.PermissionError(
+            _(
+                "Import session {0} is being imported by migration plan {1}: it can't change until the "
+                "plan ends. Stop it with stop_migration_plan."
+            ).format(name, plan)
+        )
     return doc
 
 

@@ -1,4 +1,4 @@
-# frappe_assistant_core/plugins/core/import_opening_balances.py
+# frappe_assistant_core/utils/import_opening_balances.py
 # Frappe Assistant Core - AI Assistant integration for Frappe Framework
 # Copyright (C) 2025 Paul Clinton
 #
@@ -27,10 +27,10 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt, getdate
 
-from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
-from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
-from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
-from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils import import_opening_invoices as opening_invoices
+from frappe_assistant_core.utils import import_opening_stock as opening_stock
+from frappe_assistant_core.utils.import_mapping import save_mapping, session_headers
+from frappe_assistant_core.utils.import_session import read_sheet_rows, readable_session_file
 
 TARGET = "Journal Entry"
 VOUCHER_TYPE = "Opening Entry"
@@ -252,7 +252,7 @@ def setup(
 
 
 def check_can_run(session) -> None:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     dry_run.check_status(session)
     balances = settings(session)
@@ -306,8 +306,8 @@ def is_totals_row(cells: Dict[str, str]) -> bool:
 
 def read_lines(session) -> List[opening_stock.Line]:
     """Every non-blank row of the session's sheet, as field -> text, with value maps applied."""
-    from frappe_assistant_core.plugins.core.import_dry_run import column_to_field_map
-    from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
+    from frappe_assistant_core.utils.import_dry_run import column_to_field_map
+    from frappe_assistant_core.utils.import_fixes import apply_value_maps
 
     file_doc = readable_session_file(session)
     rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
@@ -426,7 +426,7 @@ def _precision() -> int:
 
 
 def _problem(cause: str, field: str, value: str, message: str):
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     by_value = cause in BY_VALUE or cause == dry_run.CAUSE_MISSING_LINK
     key = (cause, CHILD, field) + ((value,) if by_value else ())
@@ -444,7 +444,7 @@ def _problem(cause: str, field: str, value: str, message: str):
 def _line_problem(line: opening_stock.Line, balances: Dict[str, Any], find, seen: Dict[str, int]):
     """The line's problem as (key, info), or the Ready line. ``seen`` holds the accounts of the
     rows before it, as account -> row."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     cells = line.cells
     if is_totals_row(cells):
@@ -560,7 +560,7 @@ def _line_problem(line: opening_stock.Line, balances: Dict[str, Any], find, seen
 def _check_lines(
     session, checker: _AccountChecker, lines: Optional[List[opening_stock.Line]] = None
 ) -> List[Ready]:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     balances, excluded = settings(session), dry_run._excluded_rows(session)
     ready, seen = [], {}
@@ -723,7 +723,7 @@ def _submit_now(entry) -> None:
 
 def _entry_error(balances: Dict[str, Any], ready: List[Ready]) -> Optional[Exception]:
     """None when ERPNext accepts the entry, inserted and submitted, else why not. Rolled back."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     frappe.clear_messages()
     with dry_run.held_back():
@@ -746,7 +746,7 @@ def _erpnext_check(
     """ERPNext's own validation of the entry as a whole, inside a savepoint that is rolled back.
     When it refuses, every ready row fails with its message. With no line to post (only covered
     rows) there is nothing to ask ERPNext."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     balances = balances or settings(session)
     if not ready or not entry_lines(balances, ready):
@@ -778,7 +778,7 @@ def _has_transactions(company: str) -> bool:
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """The dry run of an opening-balances session: the file's balance, every row checked, ERPNext's
     own validation of the entry, the result stored the dry run's way, with the totals."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     balances = settings(session)
@@ -904,7 +904,7 @@ def create(session) -> None:
     """Create and submit the one opening Journal Entry, all or nothing, in one savepoint. Done
     already (or running): nothing is created and the caller reports. Raises OpeningBalancesProblem
     when it isn't ready, or when ERPNext refuses (the session is then Failed and nothing is left)."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     if session.status in DONE or settings(session).get("created"):
         return
@@ -986,7 +986,7 @@ def create(session) -> None:
         )
         session.save()
     except Exception as e:
-        from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+        from frappe_assistant_core.utils import import_dry_run as dry_run
 
         frappe.db.rollback(save_point=CREATE_SAVEPOINT)
         for name, functions in callbacks.items():
@@ -1036,7 +1036,7 @@ def _erpnext_sums(company: str, cut_off: str, accounts: List[str]) -> Dict[str, 
 
 def _not_brought_in(session, precision: int) -> List[Dict[str, Any]]:
     """The rows left out, by reason, with the file's amounts when the sheet can be read."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     left_out = import_fixes.left_out(session)
     if not left_out:
@@ -1230,8 +1230,8 @@ def outcomes(session) -> List[Dict[str, Any]]:
     opening entry), left out (by the user, or a Receivable, Payable or Stock account the other
     opening imports bring in), failed (with why) or not imported yet, with its debit and credit
     as the file writes them. Writes nothing."""
-    from frappe_assistant_core.plugins.core import import_fixes
-    from frappe_assistant_core.plugins.core.import_signoff import NOT_IMPORTED
+    from frappe_assistant_core.utils import import_fixes
+    from frappe_assistant_core.utils.import_signoff import NOT_IMPORTED
 
     balances = settings(session)
     lines = read_lines(session)
@@ -1297,7 +1297,7 @@ def outcomes(session) -> List[Dict[str, Any]]:
 def summary(session) -> Dict[str, Any]:
     """The sign-off report's view of this session: its rows, debits and credits per status, and
     ERPNext's ledger at the cut-off against the file, account by account. Writes nothing."""
-    from frappe_assistant_core.plugins.core.import_signoff import tally
+    from frappe_assistant_core.utils.import_signoff import tally
 
     balances = settings(session)
     precision = _precision()

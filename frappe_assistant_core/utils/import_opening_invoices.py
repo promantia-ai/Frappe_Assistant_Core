@@ -1,4 +1,4 @@
-# frappe_assistant_core/plugins/core/import_opening_invoices.py
+# frappe_assistant_core/utils/import_opening_invoices.py
 # Frappe Assistant Core - AI Assistant integration for Frappe Framework
 # Copyright (C) 2025 Paul Clinton
 #
@@ -29,9 +29,10 @@ from dateutil import parser as date_parser
 from frappe import _
 from frappe.utils import cstr, flt, getdate
 
-from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
-from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
-from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils import import_opening_stock as opening_stock
+from frappe_assistant_core.utils.import_mapping import save_mapping, session_headers
+from frappe_assistant_core.utils.import_session import read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils.savepoint import open_savepoint, rollback_to_savepoint
 
 TOOL = "Opening Invoice Creation Tool"
 IMPORT_TOOL = "import_opening_invoices"
@@ -190,7 +191,7 @@ def setup(session, company: str, invoice_type: str, cut_off: str, columns: Dict[
 
 
 def check_can_run(session) -> None:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     dry_run.check_status(session)
     invoices = settings(session)
@@ -208,15 +209,20 @@ def check_can_run(session) -> None:
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """The dry run of an opening-invoices session: every row checked, ERPNext's own validation of
     the ready rows, the result stored the dry run's way, with the totals."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     invoices = settings(session)
     file_doc = readable_session_file(session)
     checker = _InvoiceChecker(invoices["doctype"])
-    ready = _erpnext_check(session, _check_lines(session, checker), checker, commit_progress)
+    ready = _check_lines(session, checker)
+    # ERPNext can't check an invoice whose party an earlier file of the plan brings until it is there.
+    waiting = [line for line in ready if line.after_file]
+    ready = _erpnext_check(session, [line for line in ready if not line.after_file], checker, commit_progress)
+    ready += waiting
     for line in ready:
-        checker.mark(line.row, "ready")
+        waits = {"after_files": [line.after_file], "needs": [line.party]} if line.after_file else {}
+        checker.mark(line.row, "ready", **waits)
     checker.rows.sort(key=lambda r: r["row"])
     summary = dry_run._store(session_name, file_doc, checker, len(checker.rows))
     summary["opening_invoices"] = _totals(invoices, ready)
@@ -272,8 +278,8 @@ def invoice_key(invoices: Dict[str, Any], cells: Dict[str, str]) -> str:
 
 def read_lines(session) -> List[opening_stock.Line]:
     """Every non-blank row of the session's sheet, as field -> text, with value maps applied."""
-    from frappe_assistant_core.plugins.core.import_dry_run import column_to_field_map
-    from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
+    from frappe_assistant_core.utils.import_dry_run import column_to_field_map
+    from frappe_assistant_core.utils.import_fixes import apply_value_maps
 
     invoices = settings(session)
     party_field = PARTY_FIELDS[invoices["party_type"]]
@@ -337,6 +343,7 @@ class Ready:
     item_name: str = ""
     original_date: str = ""  # the file's date, when the invoice is posted at the cut-off
     key: str = ""
+    after_file: str = ""  # in a migration plan: the earlier file that brings its party
 
 
 class _InvoiceChecker(opening_stock._StockChecker):
@@ -352,7 +359,7 @@ def _precision(invoices: Dict[str, Any]) -> int:
 
 
 def _problem(invoices: Dict[str, Any], cause: str, field: str, value: str, message: str):
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     by_value = cause in BY_VALUE or cause == dry_run.CAUSE_MISSING_LINK
     party_type = invoices["party_type"]
@@ -394,9 +401,12 @@ def _fiscal_years(company: str):
     return has_year
 
 
-def _line_problem(line: opening_stock.Line, invoices: Dict[str, Any], post_at_cutoff: bool, has_year):
-    """The line's problem as (key, info), or the Ready line."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+def _line_problem(
+    line: opening_stock.Line, invoices: Dict[str, Any], post_at_cutoff: bool, has_year, coming=None
+):
+    """The line's problem as (key, info), or the Ready line. ``coming``: in a migration plan, the
+    records its earlier files bring (import_plan.planned_names)."""
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     cells = line.cells
     if is_totals_row(cells):
@@ -430,6 +440,13 @@ def _line_problem(line: opening_stock.Line, invoices: Dict[str, Any], post_at_cu
 
     party_type, given = invoices["party_type"], cells.get("party", "")
     party = find_party(party_type, given)
+    brought = (
+        (coming or {}).get(party_type, {}).get(given.strip().casefold()) if given and not party else None
+    )
+    if brought:
+        # An earlier file of the plan creates it: the line is checked without it now, and again in
+        # full just before its file is imported, as the plan checks every file then.
+        party = frappe._dict(name=given, brought_by=brought)
     if not party:
         return _problem(
             invoices,
@@ -504,6 +521,7 @@ def _line_problem(line: opening_stock.Line, invoices: Dict[str, Any], post_at_cu
         cells.get("invoice_number", ""),
         cells.get("item_name", ""),
         original,
+        after_file=party.brought_by or "",
     )
 
 
@@ -556,9 +574,14 @@ def _post_at_cutoff(session) -> bool:
 def _check_lines(
     session, checker: _InvoiceChecker, lines: Optional[List[opening_stock.Line]] = None
 ) -> List[Ready]:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_plan
 
-    invoices, excluded = settings(session), dry_run._excluded_rows(session)
+    invoices, excluded, coming = (
+        settings(session),
+        dry_run._excluded_rows(session),
+        import_plan.planned_names(session),
+    )
     post, has_year, imported = (
         _post_at_cutoff(session),
         _fiscal_years(invoices["company"]),
@@ -578,7 +601,7 @@ def _check_lines(
             checker.mark(line.row, "imported")
             continue
         first = first_of.setdefault(key, line.row) if numbered else line.row
-        outcome = _line_problem(line, invoices, post, has_year)
+        outcome = _line_problem(line, invoices, post, has_year, coming)
         if not isinstance(outcome, Ready):
             checker.fail(line.row, *outcome)
             continue
@@ -710,7 +733,7 @@ SAVEPOINT = "fac_opening_invoice_check"
 
 def _invoice_error(invoices: Dict[str, Any], line: Ready) -> Optional[Exception]:
     """None when ERPNext accepts ``line``'s invoice, inserted and submitted, else why not. Rolled back."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     frappe.clear_messages()
     with dry_run.held_back():
@@ -730,7 +753,7 @@ def _erpnext_check(
 ) -> List[Ready]:
     """Each ready row's invoice, inserted and submitted inside a savepoint and rolled back:
     ERPNext's own validation, GL entries included. One group per message ERPNext gives."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     invoices, passed, total = settings(session), [], len(ready)
     for done, line in enumerate(ready, start=1):
@@ -852,7 +875,7 @@ def check_card(session, company, invoice_type, rows, total_amount) -> None:
 
 
 def _message_of_create(e: Exception) -> str:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     return _("ERPNext refused the invoice: {0}").format(dry_run._message_of(e))
 
@@ -873,7 +896,7 @@ def create(session) -> None:
     """Create and submit the ready rows' invoices, each all or nothing: in this request up to
     REQUEST_LIMIT, else in a background job. Rows an earlier import made are already left out by
     the check, so calling again never duplicates."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     if session.status in DONE:
         return  # running, or done: the caller reports
@@ -923,16 +946,17 @@ def _commits() -> bool:
 
 def create_job(session_name: str, user: str) -> None:
     """Background job: the invoices, as the user who approved them."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_fixes
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the import
     try:
         session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
         lines = ready_lines(session)
-        # The count, not the fingerprint: create() has since reset this import's failures, which the
-        # fingerprint covers through the options, so a retry after failures would never match.
+        # What the user approved is what the last check found: the same rows, and nothing the
+        # check depends on changed since (the fingerprint leaves out the failures create() reset).
         approved = (frappe.parse_json(session.validation_summary or "{}") or {}).get("ready")
-        if len(lines) != approved:
+        if len(lines) != approved or not import_fixes.checked_as_is(session):
             _stopped(session_name, _("the sheet changed after it was approved; check it again."))
             if _commits():
                 frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
@@ -945,11 +969,15 @@ def create_job(session_name: str, user: str) -> None:
         _stopped(session_name, _message_of_create(e))
         frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
         frappe.log_error(title=_("FAC opening invoices import failed"), message=frappe.get_traceback())
+    finally:
+        from frappe_assistant_core.utils import import_plan
+
+        import_plan.child_finished(session_name)  # in a migration plan, its next file
 
 
 def _record(session_name: str, position: int, doctype: str, name: str) -> None:
     """List an invoice on the session (Created Records) without saving the whole session again."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     frappe.get_doc(
         {
@@ -966,7 +994,7 @@ def _record(session_name: str, position: int, doctype: str, name: str) -> None:
 
 def _keep(session_name: str, created: Dict[str, Any], failed: Dict[str, Any], done: int, total: int) -> None:
     """What this import made and refused so far, on the session, in the same transaction as the invoices."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     options = frappe.parse_json(
         frappe.db.get_value(dry_run.SESSION_DOCTYPE, session_name, "template_options")
@@ -982,21 +1010,22 @@ def _keep(session_name: str, created: Dict[str, Any], failed: Dict[str, Any], do
 
 
 def _import(session_name: str, lines: List[Ready], commit: bool) -> None:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     invoices = settings(session)
     created, failed = dict(invoices.get("created") or {}), {}
     position, total = len(session.created_records), len(lines)
     for done, line in enumerate(lines, start=1):
-        frappe.db.savepoint(CREATE_SAVEPOINT)
+        # What the insert or submit queued for the commit goes with a refused invoice.
+        marks = open_savepoint(CREATE_SAVEPOINT)
         try:
             doc = make_invoice(invoices, line)
             position += 1
             _record(session_name, position, invoices["doctype"], doc.name)
             created[doc.name] = {"row": line.row, "key": line.key, "amount": line.amount, "party": line.party}
         except Exception as e:
-            frappe.db.rollback(save_point=CREATE_SAVEPOINT)
+            rollback_to_savepoint(CREATE_SAVEPOINT, marks, invoices["doctype"], None)
             failed[str(line.row)] = {
                 "message": _message_of_create(e),
                 "error": type(e).__name__,
@@ -1015,7 +1044,7 @@ def _import(session_name: str, lines: List[Ready], commit: bool) -> None:
 
 
 def _finish(session_name: str, total: int, failed: Dict[str, Any]) -> None:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     made = total - len(failed)
@@ -1036,7 +1065,7 @@ def _finish(session_name: str, total: int, failed: Dict[str, Any]) -> None:
 
 def _stopped(session_name: str, reason: str) -> None:
     """A background import that stopped before its end: what it committed is in."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     if frappe.db.get_value(dry_run.SESSION_DOCTYPE, session_name, "status") != "Importing":
         return  # it finished (or was stopped already) in the meantime
@@ -1081,7 +1110,7 @@ def _settle(session) -> None:
 
 
 def _failed_groups(failed: Dict[str, Any], precision: int) -> List[Dict[str, Any]]:
-    from frappe_assistant_core.plugins.core.import_fixes import row_ranges
+    from frappe_assistant_core.utils.import_fixes import row_ranges
 
     groups: Dict[str, Dict[str, Any]] = {}
     for row, entry in sorted(failed.items(), key=lambda item: int(item[0])):
@@ -1100,8 +1129,8 @@ def _failed_groups(failed: Dict[str, Any], precision: int) -> List[Dict[str, Any
 def _file_amounts(session, precision: int) -> Optional[Dict[str, float]]:
     """The file's total over every invoice row, and over the rows imported, read from the file
     now; None when it can't be read."""
-    from frappe_assistant_core.plugins.core.import_session import FileProblem
-    from frappe_assistant_core.plugins.core.import_signoff import tally
+    from frappe_assistant_core.utils.import_session import FileProblem
+    from frappe_assistant_core.utils.import_signoff import tally
 
     try:
         return tally(outcomes(session), ("amount",), precision)["amount"]
@@ -1114,8 +1143,8 @@ def report(session) -> Dict[str, Any]:
     imported and for the whole file, and each invoice that differs from its row; the rows refused
     and left out. An invoice's total is its grand total: a payment after go-live lowers what is
     outstanding, not what was brought in."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-    from frappe_assistant_core.plugins.core.import_fixes import left_out_report
+    from frappe_assistant_core.utils import import_dry_run as dry_run
+    from frappe_assistant_core.utils.import_fixes import left_out_report
 
     _settle(session)
     invoices = settings(session)
@@ -1236,8 +1265,8 @@ def outcomes(session) -> List[Dict[str, Any]]:
     """Every row of the file and where it stands now: imported (its invoice is submitted), left
     out, failed (the check or ERPNext refused it, with why) or not imported yet, with its amount
     as the file writes it. Writes nothing."""
-    from frappe_assistant_core.plugins.core import import_fixes
-    from frappe_assistant_core.plugins.core.import_signoff import NOT_IMPORTED
+    from frappe_assistant_core.utils import import_fixes
+    from frappe_assistant_core.utils.import_signoff import NOT_IMPORTED
 
     invoices = settings(session)
     lines = read_lines(session)
@@ -1302,7 +1331,7 @@ def erpnext_side(session) -> Dict[str, Any]:
 def summary(session) -> Dict[str, Any]:
     """The sign-off report's view of this session: its rows and amounts per status, and ERPNext's
     total against the file's amount for the rows imported. Writes nothing."""
-    from frappe_assistant_core.plugins.core.import_signoff import tally
+    from frappe_assistant_core.utils.import_signoff import tally
 
     invoices = settings(session)
     precision = _precision(invoices)

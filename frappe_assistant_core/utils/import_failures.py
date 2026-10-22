@@ -31,9 +31,9 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, get_url, strip_html
 
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_fixes
-from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_fixes
+from frappe_assistant_core.utils.import_session import read_sheet_rows, readable_session_file
 
 #: The columns the failed-rows file adds after the user's own. A file sent back with them is
 #: the same file: they are not imported.

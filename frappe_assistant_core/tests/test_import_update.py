@@ -17,10 +17,9 @@ import unittest.mock
 
 import frappe
 
-from frappe_assistant_core.plugins.core import import_update
-
 # The module, not its class: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_run as run_tests
+from frappe_assistant_core.utils import import_update
 
 UPDATE = "Update Existing Records"
 KEYED = {"Tax ID": "tax_id", "Customer Group": "customer_group", "Website": "website"}
@@ -119,7 +118,7 @@ class TestUpdateMapping(UpdateCase):
     def test_changing_the_match_fields_makes_the_last_check_stale(self):
         session, _mapped = self._session([f"TAX-A-{self.tag},{self.group},https://new.example"])
         doc = self._doc(session)
-        from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+        from frappe_assistant_core.utils import import_dry_run as dry_run
 
         before = dry_run.fingerprint(doc, frappe.get_doc("File", doc.source_file))
         doc.match_key = "customer_group"
@@ -129,7 +128,7 @@ class TestUpdateMapping(UpdateCase):
 
 class TestUpdatePermission(UpdateCase):
     def test_updating_needs_write_not_create(self):
-        from frappe_assistant_core.plugins.core.import_session import import_target_problem
+        from frappe_assistant_core.utils.import_session import import_target_problem
 
         def has_permission(doctype, ptype="read", *args, **kwargs):
             return ptype != "create"  # can write and import, can't create
@@ -139,7 +138,7 @@ class TestUpdatePermission(UpdateCase):
             self.assertIsNotNone(import_target_problem("Customer"))
 
     def test_updating_without_write_is_refused_before_any_work(self):
-        from frappe_assistant_core.plugins.core.import_session import import_target_problem
+        from frappe_assistant_core.utils.import_session import import_target_problem
 
         def has_permission(doctype, ptype="read", *args, **kwargs):
             return ptype != "write"
@@ -153,7 +152,10 @@ class TestMatching(UpdateCase):
         session, mapped = self._session(lines, mapping=mapping, match_on=match_on, header=header)
         self.assertTrue(mapped["success"], mapped)
         doc = self._doc(session)
-        from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+        from frappe_assistant_core.utils.import_session import (
+            read_sheet_rows,
+            readable_session_file,
+        )
 
         rows = read_sheet_rows(readable_session_file(doc), doc.sheet or None)
         return doc, rows, import_update.match_records(doc, rows)
@@ -204,7 +206,10 @@ class TestMatching(UpdateCase):
 
         session, mapped = self._session([f"TAX-A-{self.tag},{self.group},x"])
         doc = self._doc(session)
-        from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+        from frappe_assistant_core.utils.import_session import (
+            read_sheet_rows,
+            readable_session_file,
+        )
 
         rows = read_sheet_rows(readable_session_file(doc), doc.sheet or None)
         with unittest.mock.patch.object(frappe, "get_list", side_effect=get_list):

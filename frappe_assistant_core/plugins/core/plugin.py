@@ -83,6 +83,10 @@ class CorePlugin(BasePlugin):
             "import_opening_balances",
             "preview_import_undo",
             "undo_import",
+            "plan_migration",
+            "plan_questions",
+            "run_migration_plan",
+            "stop_migration_plan",
         ]
 
     def validate_environment(self):

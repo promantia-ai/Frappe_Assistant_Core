@@ -22,8 +22,8 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run, import_fixes
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run, import_fixes
 
 MAPPING = {
     "Customer Name": "customer_name",
@@ -581,6 +581,15 @@ class TestRowRanges(BaseAssistantTest):
         self.assertLess(len(text), 300, text)
         self.assertTrue(text.startswith("2, 4, 6"), text)
         self.assertTrue(text.endswith("and 19980 more rows"), text)
+
+
+class TestCurrencyWords(BaseAssistantTest):
+    def test_a_currency_written_as_a_word_or_symbol_is_offered_first(self):
+        # "RS" isn't close to "INR" by spelling, so a file's Rs would be left out instead of mapped.
+        if not frappe.db.get_value("Currency", "INR", "enabled"):
+            self.skipTest("INR is switched off on this site")
+        for written in ("RS", "Rs.", "Rupees", "₹"):
+            self.assertEqual(import_fixes.closest_names("Currency", written)[:1], ["INR"], written)
 
 
 class TestSwitchedOffRecords(BaseAssistantTest):

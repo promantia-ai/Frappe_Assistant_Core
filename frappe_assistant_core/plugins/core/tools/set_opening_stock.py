@@ -11,10 +11,11 @@
 from typing import Any, Dict
 
 import frappe
+from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
-from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.utils import import_opening_stock as opening_stock
+from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
 
 
 class SetOpeningStock(BaseTool):
@@ -27,7 +28,8 @@ class SetOpeningStock(BaseTool):
             "Make an import session's file the user's opening stock: closing quantities and values "
             "from the old system, brought in as a Stock Reconciliation with purpose Opening Stock "
             "(never a Stock Entry). Use it instead of set_column_mapping for a stock sheet. Ask the "
-            "user for the company and the cut-off date (the last day in the old system); the posting "
+            "user for the company and the cut-off date (the last day in the old system; in a migration "
+            "plan, plan_migration's opening_setup gives both); the posting "
             "time defaults to the end of that day. The difference account defaults to the company's "
             "Temporary Opening account. Map each column to one of: item_code, warehouse, qty, "
             "valuation_rate, amount (the stock value; the rate is worked out from it), uom (the "
@@ -63,7 +65,7 @@ class SetOpeningStock(BaseTool):
         try:
             session = load_session(name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=name)
         try:

@@ -35,9 +35,9 @@ from frappe.utils import cstr, strip_html
 from frappe.utils.background_jobs import enqueue, is_job_enqueued
 from frappe.utils.scheduler import is_scheduler_inactive
 
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes, import_update
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_failures, import_fixes, import_update
+from frappe_assistant_core.utils.import_session import (
     import_target_problem,
     read_sheet_rows,
     readable_session_file,
@@ -125,11 +125,27 @@ def start(session) -> str:
             )
         )
     earlier = import_failures.imports_of_this_file(session)
+    # A tree's rows whose parent rows aren't in ERPNext yet wait for a later Data Import.
+    waiting = _waiting(_checked_rows(session), import_failures.imported_rows(session))
+    name = _new_import(session, "Retry" if earlier else "Import", earlier, waiting=waiting)
+    # Run in this request (tests, developer mode), the next levels have been imported too.
+    return _latest_import(session.name) or name
 
+
+def _new_import(
+    session,
+    purpose: str,
+    earlier: List[str],
+    only: Optional[set] = None,
+    waiting: set = frozenset(),
+    message: Optional[str] = None,
+) -> str:
+    """A Data Import of the session's cleaned file (only the rows in ``only`` when given, never
+    the ``waiting`` ones), recorded on the session and started."""
     frappe.db.savepoint(START_SAVEPOINT)
     file_doc = None
     try:
-        file_doc, column_map = _cleaned_file(session, earlier)
+        file_doc, column_map = _cleaned_file(session, earlier, only=only, waiting=waiting)
         # Saving it attaches the file to it, as Frappe does for an Attach field.
         data_import = frappe.get_doc(
             {
@@ -142,7 +158,7 @@ def start(session) -> str:
                 "submit_after_import": session.submit_after_import,
             }
         ).insert()
-        _record_start(session, data_import.name, "Retry" if earlier else "Import", session.source_file)
+        _record_start(session, data_import.name, purpose, session.source_file, message)
     except Exception:
         # Nothing half made stays behind: no Data Import without its session's record of it.
         frappe.db.rollback(save_point=START_SAVEPOINT)
@@ -169,25 +185,34 @@ def resume(session) -> Tuple[str, str]:
     ended = di.status in FINISHED_STATUS and _log_count(name) >= (di.payload_count or 0)
     if di.status == "Success" or (ended and session.status == IMPORTING):
         # Run to its end from Desk, or its result never recorded: record it, don't run again.
+        from frappe_assistant_core.utils import import_plan
+
         record_result(session.name, name)
+        if not _next_level(session.name, name):
+            import_plan.child_finished(session.name)
         return name, "finished"
     _record_start(session, name, "Continue", session.data_imports[-1].source_file)
     _launch(session, name)
     return name, "continued"
 
 
-def _record_start(session, data_import: str, purpose: str, source_file: Optional[str]) -> None:
+def _record_start(
+    session, data_import: str, purpose: str, source_file: Optional[str], message: Optional[str] = None
+) -> None:
     session.append(
         "data_imports",
         {"data_import": data_import, "purpose": purpose, "status": "Pending", "source_file": source_file},
     )
     session.status = IMPORTING
     session.progress = frappe.as_json({"step": "Import", "state": "running", "data_import": data_import})
-    message = {
-        "Import": _("Started Data Import {0}."),
-        "Retry": _("Started Data Import {0}, for the rows not imported yet."),
-        "Continue": _("Continued Data Import {0}."),
-    }[purpose].format(data_import)
+    message = (
+        message
+        or {
+            "Import": _("Started Data Import {0}."),
+            "Retry": _("Started Data Import {0}, for the rows not imported yet."),
+            "Continue": _("Continued Data Import {0}."),
+        }[purpose]
+    ).format(data_import)
     session.log_step("Import", "Success", message)
     session.save()
 
@@ -199,7 +224,7 @@ def _launch(session, data_import: str) -> None:
         # rollback: what this request wrote must be saved first, as Desk's Start Import has it.
         frappe.db.commit()  # nosemgrep: frappe-manual-commit — see the comment above
     enqueue(
-        "frappe_assistant_core.plugins.core.import_run.run_job",
+        "frappe_assistant_core.utils.import_run.run_job",
         queue="default",
         timeout=10000,
         event="data_import",
@@ -219,8 +244,12 @@ def run_job(data_import: str, session_name: str) -> None:
     """Background job: Data Import's own run, then its result recorded on the session."""
     from frappe.core.doctype.data_import.data_import import start_import
 
+    from frappe_assistant_core.utils import import_plan
+
     start_import(data_import)
     record_result(session_name, data_import)
+    if not _next_level(session_name, data_import):
+        import_plan.child_finished(session_name)  # in a migration plan, its next file
     frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
 
 
@@ -238,7 +267,7 @@ def _remove_from_disk(file_doc) -> None:
 # -- the cleaned file -----------------------------------------------------------------------
 
 
-def _cleaned_file(session, earlier: List[str]):
+def _cleaned_file(session, earlier: List[str], only: Optional[set] = None, waiting: set = frozenset()):
     """The session's sheet as a private CSV: value maps applied, records left out or already
     imported blanked (every row of them, so no child row is left to join another record). It
     is saved unattached, for the Data Import made from it to take. Returns it with the column
@@ -263,7 +292,8 @@ def _cleaned_file(session, earlier: List[str]):
     payloads = dry_run._parse(session, source, rows, column_map).get_payloads_for_import()
     for payload in payloads:
         numbers = {row.row_number for row in payload.rows}
-        if numbers & (excluded | imported):
+        first = payload.rows[0].row_number
+        if numbers & (excluded | imported) or first in waiting or (only is not None and first not in only):
             left_out |= numbers
     if all({row.row_number for row in payload.rows} <= left_out for payload in payloads):
         # Every row is in or left out (a Desk retry since the check, say): never import again.
@@ -310,6 +340,88 @@ def _warning_text(warning: Dict[str, Any]) -> str:
     text = " ".join(strip_html(cstr(warning.get("message"))).split())
     row = warning.get("row")
     return _("row {0}: {1}").format(row, text) if row else text
+
+
+# -- a tree, a level at a time ----------------------------------------------------------------
+#
+# Data Import refuses a whole file when a row links to a record not in ERPNext yet, as a tree's
+# child row does to its parent row higher up the file. The dry run marks such a row with the rows
+# it needs ("after"). Those go in first, and each Data Import that ends starts the next one with
+# the rows whose parent rows it brought in.
+
+
+def _checked_rows(session) -> List[Dict[str, Any]]:
+    """The rows of the session's last check, as its result file has them."""
+    file_doc = dry_run._results_file(session)
+    content = (frappe.parse_json(file_doc.get_content()) or {}) if file_doc else {}
+    return content.get("rows") or []
+
+
+def _waiting(rows: List[Dict[str, Any]], imported: set) -> set:
+    """Rows not imported yet whose parent rows aren't all in ERPNext."""
+    return {
+        row["row"]
+        for row in rows
+        if row.get("after") and row["row"] not in imported and not set(row["after"]) <= imported
+    }
+
+
+def _latest_import(session_name: str) -> Optional[str]:
+    names = frappe.get_all(
+        "FAC Import Session Data Import",
+        filters={"parent": session_name, "parenttype": dry_run.SESSION_DOCTYPE},
+        order_by="idx desc",
+        limit=1,
+        pluck="data_import",
+    )
+    return names[0] if names else None
+
+
+def _next_level(session_name: str, data_import: str) -> bool:
+    """Once a Data Import of the session ended: the rows whose parent rows it imported, in a new
+    Data Import. When none is left, a ready row still not imported makes the import partial.
+    Returns whether a next level started."""
+    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    rows = _checked_rows(session)
+    if session.status not in FINISHED_STATUS.values() or not any(row.get("after") for row in rows):
+        return False
+    imported = import_failures.imported_rows(session)
+    brought = import_failures._success_rows([data_import])
+    level = {
+        row["row"]
+        for row in rows
+        if row.get("after")
+        and row["row"] not in imported
+        and set(row["after"]) <= imported
+        and set(row["after"]) & brought
+    }
+    if level:
+        try:
+            _new_import(
+                session,
+                "Import",
+                import_failures.imports_of_this_file(session),
+                only=level,
+                message=_("Started Data Import {0}, for the rows whose parent rows are now imported."),
+            )
+            return True
+        except ImportProblem as e:
+            session.reload()
+            session.log_step("Import", "Failed", str(e))
+    left = sorted({row["row"] for row in rows if row.get("status") == "ready"} - imported)
+    # The latest level's Data Import alone sets the status: one whose every row failed says Failed,
+    # though the levels before it brought rows in.
+    if left and imported and session.status in ("Completed", "Failed"):
+        session.status = "Partially Completed"
+        waiting = sorted(_waiting(rows, imported))
+        message = (
+            _("{0} not imported: the parent rows they need weren't.").format(_rows_text(waiting))
+            if waiting
+            else _("{0} not imported.").format(_rows_text(left))
+        )
+        session.log_step("Import", "Warning", message)
+    session.save()
+    return False
 
 
 # -- the result ------------------------------------------------------------------------------

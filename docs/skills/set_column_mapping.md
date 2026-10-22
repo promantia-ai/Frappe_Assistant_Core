@@ -71,3 +71,8 @@ While the session's import is running (**Importing**) the mapping is kept: wait 
 ## Next
 
 Once the user agrees the mapping, call `dry_run_import(session)` to check every row before anything is imported.
+
+## In a migration plan
+
+When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
+`plan_questions` gathers every question of the plan into one list. Map the columns you are sure of; leave the unsure ones for that list.

@@ -108,7 +108,7 @@ def _conversation_files(session_id: str, user: str) -> list:
 
 
 def _import_session(file_name: str):
-    from frappe_assistant_core.plugins.core.import_session import holding_session
+    from frappe_assistant_core.utils.import_session import holding_session
 
     return holding_session(file_name)
 

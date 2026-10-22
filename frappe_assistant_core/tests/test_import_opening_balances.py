@@ -12,11 +12,11 @@ import frappe
 from frappe.utils import nowdate
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
-from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
-from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_opening_balances as opening_balances
+from frappe_assistant_core.utils import import_opening_invoices as opening_invoices
+from frappe_assistant_core.utils import import_opening_stock as opening_stock
 
 HEADER = "Account,Debit,Credit,Balance"
 COLUMNS = {"Account": "account", "Debit": "debit", "Credit": "credit"}
@@ -1097,14 +1097,14 @@ class TestFixes(OpeningBalancesCase):
         }
 
     def test_a_session_that_is_not_opening_balances_can_map_to_a_group_account(self):
-        from frappe_assistant_core.plugins.core import import_fixes
+        from frappe_assistant_core.utils import import_fixes
 
         plain = frappe._dict(template_options="{}")
         rules = import_fixes._map(plain, self._map_group(), {"to": self.equity_group}, [])
         self.assertEqual([(r["field"], r["to"]) for r in rules], [("parent_account", self.equity_group)])
 
     def test_an_opening_balances_session_still_cannot_map_to_a_group_account(self):
-        from frappe_assistant_core.plugins.core import import_fixes
+        from frappe_assistant_core.utils import import_fixes
 
         balances = frappe._dict(
             template_options=frappe.as_json({"opening_balances": {"company": self.company}})
@@ -1142,7 +1142,7 @@ class TestFixes(OpeningBalancesCase):
     # -- masters_plan never proposes an Account ----------------------------------------------
 
     def test_masters_plan_is_empty_for_a_missing_account(self):
-        from frappe_assistant_core.plugins.core import import_fixes as fixes
+        from frappe_assistant_core.utils import import_fixes as fixes
 
         session, group = self._missing()
         self.assertIn("ERPNext names it itself", fixes.cannot_create("Account", self._doc(session)))
@@ -1350,7 +1350,7 @@ class TestCreating(OpeningBalancesCase):
         before, gl = self._entries(), frappe.db.count("GL Entry")
 
         def refuse(*args, **kwargs):
-            frappe.throw("ERPNext says no for the test")
+            frappe.throw(frappe._("ERPNext says no for the test"))
 
         with patch.object(opening_balances, "build_entry", side_effect=refuse):
             reply = self._import(session, result)
@@ -1372,7 +1372,7 @@ class TestCreating(OpeningBalancesCase):
 
         def refuse(doc, *args, **kwargs):
             if doc.doctype == "Journal Entry":
-                frappe.throw("Refused at submit")
+                frappe.throw(frappe._("Refused at submit"))
             return real(doc, *args, **kwargs)
 
         with patch.object(frappe.model.document.Document, "_submit", refuse):
@@ -1408,7 +1408,7 @@ class TestCreating(OpeningBalancesCase):
                 frappe.db.after_commit.add(spy)
                 frappe.db.before_commit.add(spy)
                 frappe.local._webhook_queue = [frappe._dict(doc=doc, webhook=frappe._dict())]
-                frappe.throw("Refused at submit")
+                frappe.throw(frappe._("Refused at submit"))
             return real(doc, *args, **kwargs)
 
         with patch.object(frappe.model.document.Document, "_submit", refuse):
@@ -1440,7 +1440,9 @@ class TestCreating(OpeningBalancesCase):
 
     def test_importing_again_after_a_failure_is_refused_until_the_sheet_is_checked(self):
         session, result = self._ready()
-        with patch.object(opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw("No")):
+        with patch.object(
+            opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw(frappe._("No"))
+        ):
             self.assertFalse(self._import(session, result)["success"])
         before = self._entries()
         again = self._import(session, result)
@@ -1469,7 +1471,9 @@ class TestCreating(OpeningBalancesCase):
 
     def test_a_failed_session_can_be_checked_and_imported_again(self):
         session, result = self._ready()
-        with patch.object(opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw("No")):
+        with patch.object(
+            opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw(frappe._("No"))
+        ):
             self.assertFalse(self._import(session, result)["success"])
         again = self._run("dry_run_import", {"session": session})
         self.assertTrue(again["success"], again)
@@ -1597,7 +1601,9 @@ class TestCreating(OpeningBalancesCase):
                 )
 
         with (
-            patch.object(opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw("No")),
+            patch.object(
+                opening_balances, "build_entry", side_effect=lambda *a, **k: frappe.throw(frappe._("No"))
+            ),
             patch.object(frappe.db, "rollback", side_effect=rollback_then_complete),
         ):
             reply = self._import(session, result)

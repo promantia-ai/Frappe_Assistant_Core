@@ -18,11 +18,6 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 | `fixes` | array | No | The user's fixes for the last check's groups: `{group, action, to?, reason?}`. See **Fixing the groups**. |
 | `failed_rows_file` | boolean | No | `true` to get the rows still not imported (failed, or left out), with the reason for each, as a CSV to download. Nothing is checked. Send it on its own. |
 
-When `session` is a **migration plan** (the `plan_session` of several files), nothing is checked or
-written: the reply is the plan, its files in the order to import them with why, what each still
-needs and where each stands, and `next`. See the migrate-data skill, **Planning several files**.
-Fixes and files are refused for a plan: they go to each file's own session.
-
 ## Response Format
 
 ```json
@@ -303,3 +298,8 @@ messages and the like) arrive inside those tags too.
 - `groups` lists at most 30 kinds of failure (`groups_total` counts them all; `groups_not_shown` says
   how many more). Fix the ones listed and check again; the next ones then show. `masters_plan` lists at
   most 50 records (`masters_plan_total` when there are more).
+
+## In a migration plan
+
+When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
+`plan_questions` gathers every question of the plan into one list. The check counts the records the plan's earlier files will create, and a missing master is planned with the `create` fix (the plan creates it when it runs). A group `Comes from a later file` means the plan's order is wrong for that file.

@@ -29,8 +29,8 @@ from frappe.core.doctype.data_import.importer import Importer
 from rq.timeouts import JobTimeoutException
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run, import_failures, import_fixes, import_run
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run, import_failures, import_fixes, import_run
 
 MAPPING = {
     "Customer Name": "customer_name",
@@ -149,6 +149,7 @@ class ImportRunCase(BaseAssistantTest):
 
         def commit(*args, **kwargs):
             frappe.db.savepoint("fac_test_row")
+            frappe.db.value_cache.clear()  # as a commit does: a record committed is seen as there
 
         def rollback(*, save_point=None):
             real_rollback(save_point=save_point or "fac_test_row")
@@ -800,3 +801,82 @@ class TestRepeatedHeadings(ImportRunCase):
 
         details = frappe.db.get_value("Customer", {"customer_name": name}, "customer_details")
         self.assertEqual(details, "Call before noon")
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Item Group")
+class TestATreeFile(ImportRunCase):
+    def test_a_tree_whose_parents_are_rows_of_the_file_is_imported_a_level_at_a_time(self):
+        # Data Import refuses a whole file whose row links to a record not in ERPNext yet, as a
+        # child row does to its parent row higher up the file.
+        top, mid, leaf = (f"{level} {self.tag}" for level in ("Top", "Mid", "Leaf"))
+        content = (
+            "Item Group Name,Parent Item Group,Is Group\n"
+            f"{top},All Item Groups,1\n"  # row 2
+            f"{mid},{top},1\n"  # row 3: its parent is row 2
+            f"{leaf},{mid},0\n"  # row 4: its parent is row 3
+        ).encode()
+        started = self._run("start_import_session", {"file_url": self._file("groups.csv", content).file_url})
+        session = started["result"]["session_id"]
+        mapping = {
+            "Item Group Name": "item_group_name",
+            "Parent Item Group": "parent_item_group",
+            "Is Group": "is_group",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Item Group"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual((checked["ready"], checked["status"]), (3, "Ready to Import"), checked)
+
+        with self._each_row_commits():
+            response = self._import(session, checked, doctype="Item Group")
+
+        self.assertTrue(response["success"], response)
+        parents = dict(
+            frappe.get_all(
+                "Item Group",
+                filters={"name": ["in", [top, mid, leaf]]},
+                fields=["name", "parent_item_group"],
+                as_list=True,
+            )
+        )
+        self.assertEqual(parents, {top: "All Item Groups", mid: top, leaf: mid})
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Completed")
+        self.assertEqual(
+            [(link.purpose, link.success_count, link.failed_count) for link in doc.data_imports],
+            [("Import", 1, 0)] * 3,
+        )
+        self.assertEqual(response["result"]["created_in_all"], 3)
+
+    def test_a_tree_whose_last_level_fails_is_partly_imported(self):
+        top, leaf = f"Top {self.tag}", f"Leaf {self.tag}"
+        content = (
+            f"Item Group Name,Parent Item Group,Is Group\n{top},All Item Groups,1\n{leaf},{top},0\n".encode()
+        )
+        started = self._run("start_import_session", {"file_url": self._file("tree.csv", content).file_url})
+        session = started["result"]["session_id"]
+        mapping = {
+            "Item Group Name": "item_group_name",
+            "Parent Item Group": "parent_item_group",
+            "Is Group": "is_group",
+        }
+        self._run("set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Item Group"})
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        from erpnext.setup.doctype.item_group.item_group import ItemGroup
+
+        real = ItemGroup.validate
+
+        def leaf_refused(doc, *args, **kwargs):
+            if doc.name == leaf:
+                frappe.throw(frappe._("Leaf refused for the test"))
+            return real(doc, *args, **kwargs)
+
+        with self._each_row_commits(), patch.object(
+            ItemGroup, "validate", autospec=True, side_effect=leaf_refused
+        ):
+            self._import(session, checked, doctype="Item Group")
+
+        self.assertTrue(frappe.db.exists("Item Group", top))
+        self.assertEqual(self._doc(session).status, "Partially Completed")

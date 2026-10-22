@@ -17,14 +17,15 @@ Group", raised when the group is left empty and the default group is a group).
 """
 
 import json
+import threading
 import unittest
 from unittest.mock import patch
 
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run
 
 GROUP = "FAC Dry Run Group"
 MAPPING = {
@@ -218,6 +219,17 @@ class TestDryRunImport(BaseAssistantTest):
         existing = self._group(result, "Already in ERPNext")
         self.assertEqual([e["row"] for e in existing["examples"]], [7])
 
+    def test_a_duplicate_is_found_beside_its_first_rows_other_problem(self):
+        # The first row's own problem (a Customer Type typo) must not hide the duplicate below it:
+        # found only after the typo is fixed, it would be a second round of questions.
+        t = self.tag
+        session = self._session([[f"Ravi {t}", GROUP, "Compnay", ""], [f"Ravi {t}", GROUP, "Company", ""]])
+
+        result = self._check(session)
+
+        in_file = self._group(result, "Duplicate in the file")
+        self.assertEqual([e["row"] for e in in_file["examples"]], [3])
+
     # -- the session holds the result ----------------------------------------------------------
 
     def test_the_session_holds_the_summary_the_full_list_and_a_step(self):
@@ -292,6 +304,37 @@ class TestDryRunImport(BaseAssistantTest):
 
         self.assertEqual((result["ready"], result["failed"], result["excluded"]), (1, 4, 2))
 
+    # -- references between rows of the same file ---------------------------------------------
+
+    def test_a_tree_row_whose_parent_is_an_earlier_row_of_the_file_is_ready(self):
+        # The import inserts row 2 before row 3, so row 3's parent exists by then. The check
+        # rolls each row back, and must not report the parent as missing.
+        parent, child = f"Parent {self.tag}", f"Child {self.tag}"
+        content = (
+            "Item Group Name,Parent Item Group,Is Group\n"
+            f"{parent},All Item Groups,1\n"  # row 2
+            f"{child},{parent},0\n"  # row 3: its parent is row 2
+        ).encode()
+        file_doc = frappe.get_doc(
+            {"doctype": "File", "file_name": "item_groups.csv", "content": content, "is_private": 1}
+        ).insert()
+        started = self._run("start_import_session", {"file_url": file_doc.file_url})
+        self.assertTrue(started["success"], started)
+        session = started["result"]["session_id"]
+        mapping = {
+            "Item Group Name": "item_group_name",
+            "Parent Item Group": "parent_item_group",
+            "Is Group": "is_group",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Item Group"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result.get("groups"))
+
     # -- criterion 4: large files run in the background -------------------------------------------
 
     def test_a_large_file_is_checked_in_the_background(self):
@@ -305,9 +348,7 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(again["state"], "running")
         enqueue.assert_called_once()
         self.assertEqual(enqueue.call_args.kwargs["session_name"], session)
-        self.assertEqual(
-            enqueue.call_args.args[0], "frappe_assistant_core.plugins.core.import_dry_run.run_job"
-        )
+        self.assertEqual(enqueue.call_args.args[0], "frappe_assistant_core.utils.import_dry_run.run_job")
         progress = json.loads(frappe.db.get_value("FAC Import Session", session, "progress"))
         self.assertEqual((progress["state"], progress["total"]), ("queued", 7))
 
@@ -359,13 +400,16 @@ class TestDryRunImport(BaseAssistantTest):
                 self.assertTrue(frappe.flags.mute_emails and frappe.flags.in_import)
                 frappe.enqueue("frappe.ping")
                 frappe.utils.background_jobs.enqueue("frappe.ping")
+                # nosemgrep: frappe-realtime-pick-room — mocked: the test checks it is held back
                 frappe.publish_realtime("x")
+                # nosemgrep: frappe-manual-commit — mocked: the test checks it is held back
                 frappe.db.commit()
                 frappe.db.after_commit.add(len)  # a row's callback must not outlive the row
 
             for real in (real_commit, real_enqueue, real_bg_enqueue, real_publish):
                 real.assert_not_called()
             # Restored afterwards.
+            # nosemgrep: frappe-manual-commit — mocked: the test checks it goes out again
             frappe.db.commit()
             frappe.enqueue("frappe.ping")
             real_commit.assert_called_once()
@@ -374,6 +418,32 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(list(frappe.db.after_commit._functions)[-1], print)
         frappe.db.after_commit._functions.pop()
         self.assertFalse(frappe.flags.in_import)
+
+    def test_held_back_holds_back_only_its_own_request(self):
+        # A web worker with threads (frappe_docker runs gunicorn --threads=4) serves other
+        # requests while a small file is checked inline: their jobs and events still go out.
+        with (
+            patch("frappe.enqueue") as real_enqueue,
+            patch("frappe.utils.background_jobs.enqueue") as real_bg_enqueue,
+            patch("frappe.publish_realtime") as real_publish,
+            patch("frappe.realtime.publish_realtime") as real_realtime_publish,
+        ):
+            with import_dry_run.held_back():
+                other_request = threading.Thread(
+                    target=lambda: (
+                        frappe.enqueue("frappe.ping"),
+                        frappe.utils.background_jobs.enqueue("frappe.ping"),
+                        # nosemgrep: frappe-realtime-pick-room — mocked: another request's event
+                        frappe.publish_realtime("x"),
+                        frappe.realtime.publish_realtime("x"),
+                    )
+                )
+                other_request.start()
+                other_request.join()
+                frappe.enqueue("frappe.ping")  # this request's own: held back
+
+            for real in (real_enqueue, real_bg_enqueue, real_publish, real_realtime_publish):
+                real.assert_called_once()
 
     # -- when it can't run ---------------------------------------------------------------------------
 
@@ -469,11 +539,13 @@ class TestDryRunImport(BaseAssistantTest):
 
         self.assertEqual(unknown["error"], folder["error"])
 
-    def test_file_id_and_file_url_together_are_refused(self):
+    def test_file_id_and_file_url_of_different_files_are_refused(self):
+        # Both of the same file are taken (test_import_session); two different files are not.
         session = self._chat_session()
         file_doc = self._upload([[f"Both {self.tag}", GROUP, "Company", ""]])
+        other = self._upload([[f"Other {self.tag}", GROUP, "Company", ""]])
 
-        self._check_fails(session, "not both", file_id=file_doc.name, file_url=file_doc.file_url)
+        self._check_fails(session, "different files", file_id=file_doc.name, file_url=other.file_url)
 
         self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
 

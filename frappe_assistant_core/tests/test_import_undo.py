@@ -24,11 +24,11 @@ from frappe.utils import add_days, add_to_date, get_datetime, getdate, now_datet
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import (
     FACImportSession,
 )
-from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.tests.test_import_opening_balances import OpeningBalancesCase
 from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
 from frappe_assistant_core.tests.test_import_opening_stock import OpeningStockCase
 from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase
+from frappe_assistant_core.utils import import_undo
 
 
 @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
@@ -1158,7 +1158,7 @@ class TestRun(BlockerCase):
 
         def refuse(doctype=None, name=None, *args, **kwargs):
             if name == n["alpha"]:
-                frappe.throw("Alpha is refused")
+                frappe.throw(frappe._("Alpha is refused"))
             if name == n["gamma"]:  # deleted, then refused: the savepoint brings it back
                 real(doctype, name, *args, **kwargs)
                 raise frappe.ValidationError("Gamma is refused after its delete")
@@ -1690,7 +1690,7 @@ def refusing(*names):
 
     def delete_doc(doctype=None, name=None, *args, **kwargs):
         if name in names:
-            frappe.throw("Refused for the test")
+            frappe.throw(frappe._("Refused for the test"))
         return real(doctype, name, *args, **kwargs)
 
     return delete_doc
@@ -1886,3 +1886,76 @@ class TestRunSubmittedStock(OpeningStockCase):
         )
         self.assertEqual(result["kept"], 1)  # the batch, which the reconciliation needs
         self.assertEqual(doc.status, "Partially Undone")
+
+
+class TestReviewFindings(BlockerCase):
+    """The code review's findings on undo, each pinned by a test that failed first."""
+
+    def test_a_record_that_fails_to_delete_leaves_no_commit_work_behind(self):
+        # A cancel or a delete registers work for the commit (ERPNext's queued GL and repost
+        # jobs, realtime events); when the record is then refused and rolled back, that work
+        # must go with it, or it runs at the batch's commit for a record still there.
+        session = self._session_with_customers()
+        n = self._names()
+        queued = []
+
+        def refuse(doctype=None, name=None, *args, **kwargs):
+            for manager in (frappe.db.before_commit, frappe.db.after_commit):
+                callback = lambda: None  # noqa: E731
+                queued.append(callback)
+                manager.add(callback)
+            raise frappe.ValidationError("Refused after queuing commit work")
+
+        with patch.object(import_undo.frappe, "delete_doc", side_effect=refuse):
+            error = import_undo._remove(self._doc(session), import_undo.Record("Customer", n["alpha"]))
+
+        self.assertIn("Refused after queuing commit work", error)
+        left = list(frappe.db.before_commit._functions) + list(frappe.db.after_commit._functions)
+        self.assertEqual(len(queued), 2)
+        self.assertFalse([c for c in queued if c in left])
+        self.assertTrue(frappe.db.exists("Customer", n["alpha"]))
+
+    def test_a_linking_document_the_user_cant_read_is_not_named(self):
+        session, names = self._session_with_groups(1)
+        hidden = self._outside_customer(names[0])
+        allowed = (
+            frappe.get_doc(
+                {"doctype": "Customer", "customer_name": f"Allowed {self.tag}", "customer_group": self.group}
+            )
+            .insert()
+            .name
+        )
+        user = self.make_throwaway_user("undo", roles=("Sales User",))
+        # A User Permission is how production keeps a Sales User to some Customers only.
+        frappe.get_doc(
+            {"doctype": "User Permission", "user": user, "allow": "Customer", "for_value": allowed}
+        ).insert(ignore_permissions=True)
+        frappe.set_user(user)
+        self.assertFalse(frappe.has_permission("Customer", "read", doc=hidden))
+
+        blocker = self._blocked(self._plan(session))[("Customer Group", names[0])]
+
+        self.assertEqual(blocker.reason, "linked")
+        self.assertNotIn(hidden, blocker.detail)
+        self.assertIsNone(blocker.blocked_by)
+
+    def test_a_readable_linking_document_is_still_named(self):
+        session, names = self._session_with_groups(1)
+        outside = self._outside_customer(names[0])
+
+        blocker = self._blocked(self._plan(session))[("Customer Group", names[0])]
+
+        self.assertEqual(blocker.blocked_by, f"Customer {outside}")
+
+    def test_previewing_an_undo_leaves_the_last_check_standing(self):
+        # preview_import_undo keeps the plan's fingerprint in template_options; the file, its
+        # mapping and its fixes are unchanged, so the session is still checked as it is.
+        session, _checked = self._ready_session()
+        doc = self._doc(session)
+        from frappe_assistant_core.utils import import_fixes
+
+        self.assertTrue(import_fixes.checked_as_is(doc))
+
+        import_undo.remember_fingerprint(doc, "a plan the user was shown")
+
+        self.assertTrue(import_fixes.checked_as_is(self._doc(session)))
