@@ -480,13 +480,14 @@ class TestImportFailures(ImportRunCase):
             "Address Type": "address_type",
             "Address Line 1": "address_line1",
             "City": "city",
+            "State": "state",  # India Compliance refuses an Indian address without one
             "Country": "country",
         }
         rows = [
             list(mapping),
-            [f"Head {t}", "Billing", "1 Main Rd", "Pune", "India"],
-            [f"Store {t}", "Shipping", "2 Mall Rd", "", "India"],  # row 3: no city
-            [f"Depot {t}", "Shipping", "3 Port Rd", "Mumbai", "India"],
+            [f"Head {t}", "Billing", "1 Main Rd", "Pune", "Maharashtra", "India"],
+            [f"Store {t}", "Shipping", "2 Mall Rd", "", "Maharashtra", "India"],  # row 3: no city
+            [f"Depot {t}", "Shipping", "3 Port Rd", "Mumbai", "Maharashtra", "India"],
         ]
         session = self._run("start_import_session", {"file_url": self._csv("addresses.csv", rows).file_url})
         session = session["result"]["session_id"]

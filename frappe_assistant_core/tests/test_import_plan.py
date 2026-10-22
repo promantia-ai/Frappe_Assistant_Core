@@ -8,6 +8,7 @@
 
 """Migration plans (#33995): several import sessions ordered, checked and run as one."""
 
+import copy
 from unittest.mock import patch
 
 import frappe
@@ -80,6 +81,12 @@ class ImportPlanCase(BaseAssistantTest):
                 {"doctype": "User", "email": email, "first_name": "Plan", "user_type": "System User"}
             ).insert(ignore_permissions=True)
         return email
+
+
+def refuse_an_item_without_hsn(doc, method=None):
+    """A validate hook like India Compliance's, which refuses an Item without an HSN code even
+    when mandatory fields are ignored. This one refuses every Item."""
+    raise frappe.MandatoryError("HSN/SAC Code is required")
 
 
 def set_plan(plan_name, **fields):
@@ -693,6 +700,38 @@ class TestWhatTheReviewFound(ImportPlanCase):
 
         fixes = [(q["file_name"], q["message"]) for q in result["questions"] if q["kind"] == "fix"]
         self.assertEqual(fixes, [("items.csv", f"Brand 'B {self.tag}' doesn't exist.")])
+
+    def test_a_stand_in_is_made_when_its_doctype_refuses_a_bare_record(self):
+        # India Compliance's Item validate hook refuses an Item without an HSN code, mandatory
+        # fields ignored or not, so the bare Item standing in for the one items.csv brings was
+        # refused (#34395). A validate hook of the same kind stands for it on any site.
+        hooks = copy.deepcopy(frappe.get_doc_hooks())
+        hooks.setdefault("Item", {}).setdefault("validate", []).append(
+            "frappe_assistant_core.tests.test_import_plan.refuse_an_item_without_hsn"
+        )
+
+        group = f"G {self.tag}"
+        frappe.get_doc(
+            {"doctype": "Item Group", "item_group_name": group, "parent_item_group": "All Item Groups"}
+        ).insert()
+        items = self._item_file(group)
+        prices = self._session(
+            "prices.csv",
+            ["Item", "Price List", "Rate"],
+            [[f"I {self.tag}", "Standard Selling", "10"]],
+            "Item Price",
+            {"Item": "item_code", "Price List": "price_list", "Rate": "price_list_rate"},
+        )
+        self._run("plan_migration", {"sessions": [prices, items]})
+
+        with patch.object(frappe, "get_doc_hooks", autospec=True, return_value=hooks):
+            self._run("dry_run_import", {"session": items})  # its row fails, and still counts as coming
+            response = self._run("dry_run_import", {"session": prices})
+
+        self.assertTrue(response["success"], response)
+        result = response["result"]
+        self.assertEqual((result["ready"], result["failed"]), (1, 0), result.get("groups"))
+        self.assertFalse(frappe.db.exists("Item", f"I {self.tag}"))
 
     def test_an_item_file_has_an_hsn_column_when_india_compliance_is_installed(self):
         items = self._item_file(f"G {self.tag}")

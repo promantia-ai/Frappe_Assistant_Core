@@ -241,6 +241,77 @@ class TestImportFixes(BaseAssistantTest):
 
         self.assertNotIn("Not an allowed option", [g["cause"] for g in fixed["groups"]])
 
+    def test_unknown_groups_territories_and_customer_type_each_get_their_fixes(self):
+        # #34395's file (migtest_customers_clean.csv): groups, regions and a customer type ERPNext
+        # doesn't have. On Frappe 16 each was hidden behind the same error on every row.
+        t = self.tag
+        region = f"Bengaluru {t}"
+        frappe.get_doc(
+            {"doctype": "Territory", "territory_name": region, "parent_territory": "All Territories"}
+        ).insert()
+        retail, wholesale, karnataka, maharashtra = (
+            f"{n} {t}" for n in ("Retail", "Wholesale", "Karnataka", "Maharashtra")
+        )
+        lines = [
+            "Cust Name,Party Group,Region,Customer Type",
+            f"Alpha {t},{self.existing_group},{region},Company",  # row 2: ready
+            f"Beta {t},{retail},{karnataka},Company",  # row 3
+            f"Gamma {t},{wholesale},{region},Company",  # row 4
+            f"Delta {t},{self.existing_group},{maharashtra},Pvt Ltd",  # row 5
+            f"Eps {t},{self.existing_group},{region},Pvt Ltd",  # row 6
+            f"Zeta {t},{self.existing_group},{region},Individual",  # row 7: ready
+        ]
+        file_doc = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "migtest_customers_clean.csv",
+                "content": ("\n".join(lines) + "\n").encode(),
+                "is_private": 1,
+            }
+        ).insert()
+        session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
+        mapping = {
+            "Cust Name": "customer_name",
+            "Party Group": "customer_group",
+            "Region": "territory",
+            "Customer Type": "customer_type",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+
+        result = self._fix(session)
+
+        self.assertNotIn("SimpleNamespace", frappe.as_json(result))
+        self.assertEqual((result["ready"], result["failed"]), (2, 4), result["groups"])
+        found = {
+            (g["cause"], g["field"], g["value"]): (
+                [e["row"] for e in g["examples"]],
+                [f["action"] for f in g["fixes"]],
+            )
+            for g in result["groups"]
+        }
+        link_fixes = ["map", "create", "leave_out"]
+        self.assertEqual(
+            found,
+            {
+                ("Missing link", "customer_group", retail): ([3], link_fixes),
+                ("Missing link", "customer_group", wholesale): ([4], link_fixes),
+                ("Missing link", "territory", karnataka): ([3], link_fixes),
+                ("Missing link", "territory", maharashtra): ([5], link_fixes),
+                ("Not an allowed option", "customer_type", "Pvt Ltd"): ([5, 6], ["map", "leave_out"]),
+            },
+        )
+        option = self._group(result, "Not an allowed option")
+        self.assertIn("Company", option["fixes"][0]["closest"])
+
+        fixed = self._fix(session, {"group": option["id"], "action": "map", "to": "Company"})
+
+        self.assertNotIn("Not an allowed option", [g["cause"] for g in fixed["groups"]])
+        # row 6 is ready now; row 5 still has its region
+        self.assertEqual((fixed["ready"], fixed["failed"]), (3, 3))
+
     def test_mapping_to_a_name_that_does_not_exist_is_refused_and_nothing_is_saved(self):
         session, result = self._session()
         link = self._group(result, "Missing link")

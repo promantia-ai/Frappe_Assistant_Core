@@ -10,11 +10,11 @@
 The dry run (#33990): every row of an import session's file checked exactly the way
 Data Import would import it, with nothing written.
 
-Rows are parsed by Data Import's own ImportFile and inserted by its own
-Importer.insert_record (or update_record), each inside a savepoint that is rolled
-back. That runs mandatory, link, duplicate and controller checks, which Data Import's
-preview does not. Emails, background jobs, realtime events, commits and commit
-callbacks are held back while a row is tried.
+Rows are parsed by Data Import's own ImportFile and tried by its own Importer.process_doc
+(an insert or an update, or the DocType's import provider on Frappe 16), each inside a
+savepoint that is rolled back. That runs mandatory, link, duplicate and controller checks,
+which Data Import's preview does not. Emails, background jobs, realtime events, commits and
+commit callbacks are held back while a row is tried.
 
 The full per-row list is attached to the session as a file; the model gets only the
 grouped summary.
@@ -27,7 +27,6 @@ import json
 import re
 import threading
 from contextlib import contextmanager
-from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
@@ -39,6 +38,7 @@ from frappe.core.doctype.data_import.importer import (
     INVALID_VALUES,
     Importer,
     ImportFile,
+    df_as_json,
     get_autoname_field,
 )
 from frappe.utils import cstr, now_datetime, strip_html
@@ -58,6 +58,7 @@ PROGRESS_EVERY = 100
 EXAMPLES_PER_GROUP = 3
 STALE_AFTER_SECONDS = 2 * 60 * 60  # a run this old without finishing is taken as dead
 SAVEPOINT = "fac_dry_run_row"
+STAND_IN_SAVEPOINT = "fac_dry_run_stand_in"
 SAMPLES_KEPT = 5  # records whose old and new values an update's check shows
 # After an import, what it didn't get in is checked again on its own (#33994): rows that failed,
 # or a corrected file of them, or of the rows left out of a completed one.
@@ -330,7 +331,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
 
     checker = _Checker(
         session,
-        import_file.header,
+        import_file,
         matches,
         coming=import_plan.planned_names(session),
         later=import_plan.later_names(session),
@@ -406,6 +407,105 @@ class _SessionRows(ImportFile):
         return self._rows
 
 
+class _SessionImporter(Importer):
+    """Data Import's own Importer, for the session's rows as _SessionRows parsed them, with a Data
+    Import that is never saved: its import type and submit-after-import are the session's."""
+
+    def __init__(self, session, import_file: ImportFile):
+        data_import = frappe.new_doc("Data Import")
+        data_import.update(
+            {
+                "reference_doctype": session.target_doctype,
+                "import_type": session.import_type or INSERT,
+                "submit_after_import": session.submit_after_import,
+                "mute_emails": 1,
+            }
+        )
+        # What Importer.__init__ sets, but with the rows already parsed: it would read the file
+        # again from disk, without the session's value maps.
+        self.doctype = session.target_doctype
+        self.console = False
+        self.use_sniffer = False
+        self.blocked_by_warnings = False
+        self.data_import = data_import
+        self.template_options = import_file.template_options
+        self.import_type = data_import.import_type
+        self.import_file = import_file
+        # Frappe's own setup for an import. On Frappe 16 it finds the DocType's import provider
+        # and a tree's parents named by their title, which process_doc reads. It also sets the
+        # import flags, which held_back() sets while a row is tried: they are put back here.
+        flags = {name: frappe.flags.get(name) for name in ("in_import", "mute_emails")}
+        try:
+            self.before_import()  # the Data Import is unsaved, so its db_set writes nothing
+        finally:
+            frappe.flags.update(flags)
+
+    def try_row(self, doc) -> Any:
+        """The record ``doc`` makes or changes, through Data Import's own process_doc: Frappe 15
+        returns it, Frappe 16 returns it with the action taken."""
+        result = self.process_doc(doc)
+        return result[0] if isinstance(result, tuple) else result
+
+
+def _value_warnings(header, doctype: str) -> Dict[int, List[Dict[str, Any]]]:
+    """Row number → the warnings Frappe 15 gives a row for a Link or Select value it can't use.
+    Frappe 16 gives them once per column instead, with its rows (Column.invalid_value_items), and
+    keeps the value in the parsed record. Empty on Frappe 15, whose rows carry their own."""
+    out: Dict[int, List[Dict[str, Any]]] = {}
+
+    def warn(row_number, column):
+        out.setdefault(row_number, []).append(
+            {"row": row_number, "field": df_as_json(column.df), "message": _("Value missing")}
+        )
+
+    # The names and titles of the file's own records (Frappe 16)
+    in_file = set()
+    for refs in (getattr(header, "import_ids", None), getattr(header, "import_aliases", None)):
+        in_file |= set(refs or ())
+    alias_field = getattr(header, "tree_alias_field", None)
+    for column in header.columns:
+        items = getattr(column, "invalid_value_items", None)
+        if not column.df or column.skip_import or items is None:
+            continue
+        for item in items:
+            for row_number in item["rows"]:
+                warn(row_number, column)
+        if column.df.options != doctype or not getattr(column, "import_refs", None):
+            continue
+        # A tree's parent named by a row of the same file isn't reported, as that row is imported
+        # first. Frappe 15 reports it, and the check passes it only once that row is ready: so here.
+        missing = {}
+        for value, row_number in zip(column.column_values, column.value_row_numbers):
+            value = cstr(value).strip()
+            if value in in_file:
+                missing.setdefault(value, []).append(row_number)
+        for value, row_numbers in missing.items():
+            if frappe.db.exists(doctype, value) or (
+                alias_field and frappe.db.exists(doctype, {alias_field: value})
+            ):
+                continue
+            for row_number in row_numbers:
+                warn(row_number, column)
+    return out
+
+
+def _field_key(warning: Dict[str, Any]) -> Tuple[Any, Any]:
+    field = warning["field"]
+    return field.get("fieldname"), field.get("parent")
+
+
+def _provider_warnings(importer, import_file) -> Dict[Optional[int], List[Dict[str, Any]]]:
+    """Row number (None for the whole file) → what the DocType's import provider (Frappe 16)
+    finds wrong with the file. Data Import refuses to start while any is not "info"."""
+    provider = getattr(importer, "provider", None)
+    out: Dict[Optional[int], List[Dict[str, Any]]] = {}
+    for warning in (provider.validate(import_file) or []) if provider else []:
+        if warning.get("type") != "info":
+            row = warning.get("row")
+            out.setdefault(int(row) if row else None, []).append(warning)
+    return out
+
+
 def _excluded_rows(session) -> set:
     value = frappe.parse_json(session.excluded_rows or "[]") or []
     return {int(row) for row in value if isinstance(row, (int, str)) and str(row).isdigit()}
@@ -414,20 +514,16 @@ def _excluded_rows(session) -> set:
 class _Checker:
     """Checks payloads one by one and collects the groups and the per-row list."""
 
-    def __init__(self, session, header, matches=None, coming=None, later=None):
+    def __init__(self, session, import_file, matches=None, coming=None, later=None):
         self.doctype = session.target_doctype
         self.import_type = session.import_type or INSERT
-        self.header = header
-        # Importer's insert_record and update_record read only these attributes.
-        self.importer = SimpleNamespace(
-            doctype=self.doctype,
-            import_type=self.import_type,
-            data_import=frappe._dict(
-                doctype=SESSION_DOCTYPE,
-                name=session.name,
-                submit_after_import=session.submit_after_import,
-            ),
-        )
+        header = self.header = import_file.header
+        self.importer = _SessionImporter(session, import_file)
+        self.value_warnings = _value_warnings(header, self.doctype)
+        self.provider_warnings = _provider_warnings(self.importer, import_file)
+        # Frappe 16 lets a tree's row name its parent by the parent's title (an Account's name
+        # without the company's abbreviation): None where Data Import doesn't.
+        self.alias_field = getattr(header, "tree_alias_field", None)
         self.key_df = _key_field(session, header)
         self.seen_keys: Dict[str, int] = {}
         self.groups: Dict[Tuple, Dict[str, Any]] = {}
@@ -437,7 +533,8 @@ class _Checker:
         # A row may link to a record a row higher up the file creates (a tree's parent): Data
         # Import is run a level at a time for such a file (import_run), so that link is no problem.
         self.self_links = _self_links(self.doctype) if self.import_type == INSERT and matches is None else []
-        self.planned: Dict[str, Dict[str, Any]] = {}  # casefolded name → the ready row that creates it
+        # Casefolded name (and title, where Data Import takes one) → the ready row that creates it
+        self.planned: Dict[str, Dict[str, Any]] = {}
         # In a migration plan: DocType → casefolded name → the earlier file (or the plan) that creates
         # it, and the same for the files imported after this one (import_plan).
         self.coming: Dict[str, Dict[str, str]] = coming or {}
@@ -491,12 +588,16 @@ class _Checker:
                 extra["name"] = created
             self.rows += [{"row": n, "status": "ready", **extra} for n in row_numbers]
             if created and self.self_links:
-                self.planned[created.casefold()] = {
+                entry = {
                     "row": row_numbers[0],
                     "name": created,
+                    "alias": self._alias(payload),
                     "doc": _with_links(payload.doc, needs),
                     "needs": needs,
                 }
+                self.planned[created.casefold()] = entry
+                if entry["alias"]:
+                    self.planned.setdefault(entry["alias"].casefold(), entry)
             if record:
                 self._add_to_preview(payload.rows[0].row_number, record, changed)
             return
@@ -554,9 +655,17 @@ class _Checker:
     # Data Import's own value checks, made while it parsed the rows.
     def _parse_problems(self, payload, needs=(), from_files=None) -> List[Tuple[Tuple, Dict]]:
         problems = []
-        planned = {entry["name"].casefold() for entry in needs}
+        planned = {entry[key].casefold() for entry in needs for key in ("name", "alias") if entry.get(key)}
+        # The import provider's warnings about the whole file, on the record's first row
+        warnings_of = {payload.rows[0].row_number: list(self.provider_warnings.get(None, []))}
         for row in payload.rows:
-            for warning in row.warnings:
+            warned = {_field_key(w) for w in row.warnings if w.get("field")}
+            warnings = list(row.warnings) + [
+                w for w in self.value_warnings.get(row.row_number, []) if _field_key(w) not in warned
+            ]
+            warnings += self.provider_warnings.get(row.row_number, [])
+            warnings += warnings_of.get(row.row_number, [])
+            for warning in warnings:
                 if (
                     warning.get("type") == "info"
                     or self._from_the_file(row, warning, planned)
@@ -613,6 +722,12 @@ class _Checker:
             and field.parent == self.doctype
             and self._value_of(row, field).casefold() in planned
         )
+
+    def _alias(self, payload) -> Optional[str]:
+        """The title a row of a tree may be named by in place of its name (Frappe 16), else None."""
+        if not self.alias_field:
+            return None
+        return cstr(payload.doc.get(self.alias_field)).strip() or None
 
     def _intended_name(self, payload) -> Optional[str]:
         """The name an insert of this row would give its record, when it is a field of the row."""
@@ -771,12 +886,12 @@ class _Checker:
             frappe.db.savepoint(SAVEPOINT)
             try:
                 if self.import_type != INSERT:
-                    Importer.update_record(self.importer, doc)
+                    self.importer.try_row(doc)
                     return [], None
                 # The records rows higher up the file create are in ERPNext when this row is
                 # imported: put them in first, inside the same savepoint.
                 for earlier in self._higher_up(list(needs)):
-                    Importer.insert_record(self.importer, frappe._dict(copy.deepcopy(earlier)))
+                    self.importer.insert_record(frappe._dict(copy.deepcopy(earlier)))
                 if from_files:
                     # Records an earlier file of the plan creates aren't in ERPNext yet: stand-ins
                     # take their place inside the savepoint, and the links Data Import's parse left
@@ -786,7 +901,7 @@ class _Checker:
                     self._put_back(payload, doc, from_files)
                     # The parse cached them as missing; the rollback clears this cache too.
                     frappe.db.value_cache.clear()
-                return [], Importer.insert_record(self.importer, doc).name
+                return [], self.importer.try_row(doc).name
             except Exception as e:
                 message = _message_of(e)
                 kind = type(e).__name__
@@ -832,6 +947,31 @@ def _stand_in(doctype: str, name: str) -> None:
     row's savepoint, which is rolled back."""
     if frappe.db.exists(doctype, name):
         return
+    frappe.db.savepoint(STAND_IN_SAVEPOINT)
+    messages = len(frappe.local.message_log or [])
+    try:
+        _bare(doctype, name).insert(
+            ignore_permissions=True, ignore_links=True, ignore_mandatory=True, set_name=name
+        )
+    except Exception:
+        # An app's validate hook refuses a bare record, mandatory fields ignored or not (India
+        # Compliance wants an Item's HSN code). The DocType's own controller still fills in what
+        # its records have (an Item's UOM row, which an Item Price checks): only the hooks are left out.
+        frappe.db.rollback(save_point=STAND_IN_SAVEPOINT)
+        if frappe.local.message_log:
+            del frappe.local.message_log[messages:]
+        doc = _bare(doctype, name)
+
+        def own_rules_only():
+            for method in ("before_validate", "validate", "before_save"):
+                getattr(doc, method, lambda: None)()
+
+        doc.run_before_save_methods = own_rules_only
+        doc.insert(ignore_permissions=True, ignore_links=True, ignore_mandatory=True, set_name=name)
+
+
+def _bare(doctype: str, name: str):
+    """A new ``doctype`` record with only its name, and its tree's default parent."""
     from frappe_assistant_core.utils import import_fixes
 
     meta = frappe.get_meta(doctype)
@@ -842,7 +982,7 @@ def _stand_in(doctype: str, name: str) -> None:
     parent_field = import_fixes._parent_field(meta)
     if parent_field and not doc.get(parent_field):
         doc.set(parent_field, import_fixes.default_parent(doctype))
-    doc.insert(ignore_permissions=True, ignore_links=True, ignore_mandatory=True, set_name=name)
+    return doc
 
 
 #: ERPNext names these in code, from a field, when its settings say so: not in the DocType's autoname.
