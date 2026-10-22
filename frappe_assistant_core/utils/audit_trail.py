@@ -108,7 +108,7 @@ def log_tool_execution(
         if isinstance(sanitized_arguments, dict):
             target_doctype = sanitized_arguments.get("doctype")
             target_name = sanitized_arguments.get("name")
-            if not target_doctype:
+            if not target_doctype and sanitized_arguments.get("documents"):
                 target_doctype, target_name = _list_target(sanitized_arguments.get("documents"))
 
         # Serialize output for storage, clamp oversized payloads

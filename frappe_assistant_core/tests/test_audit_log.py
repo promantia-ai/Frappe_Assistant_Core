@@ -326,6 +326,10 @@ class TestAuditTarget(BaseAssistantTest):
         )
         self.assertEqual(self._target({"doctype": "ToDo", "data": {}}), ("ToDo", None))
 
+    def test_a_name_only_call_still_records_its_name(self):
+        # Tools like get_insights_chart pass a name and no doctype or list.
+        self.assertEqual(self._target({"name": "X"}), (None, "X"))
+
 
 class TestSensitiveKeyMatcher(BaseAssistantTest):
     """_is_sensitive_key redacts credentials but preserves token-count metrics.
