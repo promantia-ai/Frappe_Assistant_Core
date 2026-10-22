@@ -30,6 +30,7 @@ import difflib
 from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
+from frappe import _
 from frappe.model import display_fieldtypes, no_value_fields
 
 DONT_IMPORT = "Don't Import"
@@ -174,9 +175,10 @@ def duplicate_targets(column_to_field_map: Dict[str, str], headers: List[str]) -
 
 
 def describe_mapping(
-    schema: Dict[str, Any], headers: List[str], column_to_field_map: Dict[str, str]
+    schema: Dict[str, Any], headers: List[str], column_to_field_map: Dict[str, str], update: bool = False
 ) -> Dict[str, Any]:
-    """The mapping as FACO shows it: parent and child table rows apart, gaps marked."""
+    """The mapping as FACO shows it: parent and child table rows apart, gaps marked. An
+    ``update`` changes only the fields mapped, so no required field is missing for it."""
     targets = _mapping_targets(schema)
     parent_rows: List[Dict[str, Any]] = []
     child_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -204,7 +206,7 @@ def describe_mapping(
 
     mapped_tables = {field.split(".", 1)[0] for field in mapped_fields if "." in field}
     missing_required = []
-    for field, target in targets.items():
+    for field, target in [] if update else targets.items():
         table = target["table"]
         if not target.get("required") or target.get("default") or field in mapped_fields:
             continue
@@ -302,9 +304,19 @@ def _table_title(table: Dict[str, Any]) -> str:
 
 def load_session(name: str):
     """The session, if this user may change it. Raises DoesNotExistError or PermissionError."""
+    from frappe_assistant_core.utils import import_plan
+
     doc = frappe.get_doc(SESSION_DOCTYPE, name)
     if not frappe.has_permission(SESSION_DOCTYPE, "write", doc=doc):
         raise frappe.PermissionError(f"You can't change import session {name}.")
+    plan = doc.get("migration_plan")
+    if plan and import_plan.plan_status(plan) == "Running":
+        raise frappe.PermissionError(
+            _(
+                "Import session {0} is being imported by migration plan {1}: it can't change until the "
+                "plan ends. Stop it with stop_migration_plan."
+            ).format(name, plan)
+        )
     return doc
 
 

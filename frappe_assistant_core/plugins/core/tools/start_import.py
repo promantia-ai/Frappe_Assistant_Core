@@ -19,9 +19,9 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_run
-from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
-from frappe_assistant_core.plugins.core.import_session import FileProblem
+from frappe_assistant_core.utils import import_plan, import_run
+from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.utils.import_session import FileProblem
 
 
 class StartImport(BaseTool):
@@ -45,9 +45,12 @@ class StartImport(BaseTool):
             "them, with what to do next: once the user has fixed the causes and asks to try those "
             "again, check them with dry_run_import (it checks only the rows not imported yet), "
             "then call this with its counts: a new Data Import imports just those rows, with the "
-            "fixes, and the session reports every run."
+            "fixes, and the session reports every run. Not for a session in a migration plan: "
+            "run_migration_plan imports the plan's files."
         )
         self.requires_permission = None  # checked on the session, the DocType and Data Import
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = ("failed_rows", "left_out", "message", "error")
 
         self.inputSchema = {
             "type": "object",
@@ -69,15 +72,32 @@ class StartImport(BaseTool):
         try:
             session = load_session(session_name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{session_name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
+        refused = import_plan.imported_by_its_plan(session)
+        if refused:
+            return {"success": False, "error": refused, "session": session_name}
+
+        from frappe_assistant_core.utils.import_dry_run import special_engine
+
+        engine = special_engine(session)
+        if engine:
+            return {
+                "success": False,
+                "error": _("This session is imported with {0}, not through Data Import.").format(
+                    engine.IMPORT_TOOL
+                ),
+                "session": session_name,
+            }
 
         try:
             import_run.check_card(
                 session, arguments.get("doctype"), arguments.get("rows"), arguments.get("import_type")
             )
-            problem = import_run.cannot_import(session.target_doctype)
+            problem = import_run.cannot_import(
+                session.target_doctype, session.import_type or "Insert New Records"
+            )
             if problem:
                 raise import_run.ImportProblem(problem)
             if session.status == "Completed":

@@ -30,6 +30,16 @@
     "content_file": "get_document.md"
   },
   {
+    "skill_id": "apply-import-preset-usage",
+    "title": "How to Use apply_import_preset",
+    "description": "Recognising an export from Tally Prime, Zoho Books, Busy, Marg or QuickBooks before mapping it: what each reply part means, unverified presets, targets that need a company or warehouse, opening reports, and what is not imported on a site without India Compliance",
+    "skill_type": "Tool Usage",
+    "linked_tool": "apply_import_preset",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "apply_import_preset.md"
+  },
+  {
     "skill_id": "start-import-session-usage",
     "title": "How to Use start_import_session",
     "description": "Opening an import session for an uploaded spreadsheet: sheets, columns, row counts, samples, and coming back to it later",
@@ -138,6 +148,134 @@
     "status": "Published",
     "visibility": "Public",
     "content_file": "start_import.md"
+  },
+  {
+    "skill_id": "set-opening-stock-usage",
+    "title": "How to Use set_opening_stock",
+    "description": "Bringing the old system's closing stock in as opening stock: the company, the cut-off date, the account and the columns of a stock sheet, as a Stock Reconciliation with purpose Opening Stock",
+    "skill_type": "Tool Usage",
+    "linked_tool": "set_opening_stock",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "set_opening_stock.md"
+  },
+  {
+    "skill_id": "import-opening-stock-usage",
+    "title": "How to Use import_opening_stock",
+    "description": "Creating and submitting checked opening stock with one approval: documents of up to 1,000 rows, the totals per warehouse against the file, background submits and reposting, continuing after a failed chunk",
+    "skill_type": "Tool Usage",
+    "linked_tool": "import_opening_stock",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "import_opening_stock.md"
+  },
+  {
+    "skill_id": "set-opening-invoices-usage",
+    "title": "How to Use set_opening_invoices",
+    "description": "Bringing the old system's unpaid customer invoices or supplier bills in as opening Sales or Purchase Invoices: the company, receivables or payables, the cut-off date and the columns",
+    "skill_type": "Tool Usage",
+    "linked_tool": "set_opening_invoices",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "set_opening_invoices.md"
+  },
+  {
+    "skill_id": "import-opening-invoices-usage",
+    "title": "How to Use import_opening_invoices",
+    "description": "Creating and submitting checked opening invoices with one approval: totals per party type against the file, rows that differ, refused rows, background imports above 100 invoices, importing the rest after a fix",
+    "skill_type": "Tool Usage",
+    "linked_tool": "import_opening_invoices",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "import_opening_invoices.md"
+  },
+  {
+    "skill_id": "set-opening-balances-usage",
+    "title": "How to Use set_opening_balances",
+    "description": "Bringing the old system's closing trial balance in as one opening Journal Entry: the company, cut-off date, Profit and Loss choice, retained-earnings account and columns, and why Receivable and Payable rows (and Stock rows, with perpetual inventory on) are left to the other opening imports",
+    "skill_type": "Tool Usage",
+    "linked_tool": "set_opening_balances",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "set_opening_balances.md"
+  },
+  {
+    "skill_id": "import-opening-balances-usage",
+    "title": "How to Use import_opening_balances",
+    "description": "Creating and submitting the checked opening Journal Entry with one approval: the Temporary Opening line, the account-by-account report, refusals, and the order with opening stock and invoices",
+    "skill_type": "Tool Usage",
+    "linked_tool": "import_opening_balances",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "import_opening_balances.md"
+  },
+  {
+    "skill_id": "preview-import-undo-usage",
+    "title": "How to Use preview_import_undo",
+    "description": "Showing what undoing an import would delete before anything is deleted: the counts by DocType, the blockers and what each is blocked by, the kept records, the time window, and which mode to ask the user for",
+    "skill_type": "Tool Usage",
+    "linked_tool": "preview_import_undo",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "preview_import_undo.md"
+  },
+  {
+    "skill_id": "undo-import-usage",
+    "title": "How to Use undo_import",
+    "description": "Undoing an import with one approval: passing the preview's figures and the mode (all or unblocked), following the background undo by calling again, and reporting what was removed, kept and blocked",
+    "skill_type": "Tool Usage",
+    "linked_tool": "undo_import",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "undo_import.md"
+  },
+  {
+    "skill_id": "plan-migration-usage",
+    "title": "How to Use plan_migration",
+    "description": "Grouping the import sessions of a migration of several files into one plan, ordered so each file comes after the files whose records it links to, for one approval at the end.",
+    "skill_type": "Tool Usage",
+    "linked_tool": "plan_migration",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "plan_migration.md"
+  },
+  {
+    "skill_id": "plan-questions-usage",
+    "title": "How to Use plan_questions",
+    "description": "Asking every open question of a migration plan at once (files to map, rows that would fail and their fixes, the failure rule) and applying the user's answers in one call.",
+    "skill_type": "Tool Usage",
+    "linked_tool": "plan_questions",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "plan_questions.md"
+  },
+  {
+    "skill_id": "run-migration-plan-usage",
+    "title": "How to Use run_migration_plan",
+    "description": "Running a migration plan after the user's one approval: masters first, then every file in order in the background, the failure rule applied, following it, stopping it.",
+    "skill_type": "Tool Usage",
+    "linked_tool": "run_migration_plan",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "run_migration_plan.md"
+  },
+  {
+    "skill_id": "migrate-data",
+    "title": "Migrate Data",
+    "description": "Use when the user wants to migrate data into ERPNext or import a file: \"migrate my data\", \"import my customers\", \"import my items\", \"bring my data from Tally\" or another system, \"load my opening stock\" or opening balances, or attaches a spreadsheet to import. Follow its workflow every time: session, mapping, cleaning, dry run, fixes, import, failed rows, report.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "migrate_data.md"
+  },
+  {
+    "skill_id": "migration-sign-off",
+    "title": "Migration Sign-off",
+    "description": "Use when asked what a data migration brought in, for a migration or sign-off report, whether the business can go live, or for a PDF of it: run the Migration Sign-off report over all of the user's sessions, relay its numbers as they are, and always make its PDF with generate_document.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "migration_sign_off.md"
   },
   {
     "skill_id": "run-database-query-usage",

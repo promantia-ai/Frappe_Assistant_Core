@@ -69,11 +69,24 @@ class CorePlugin(BasePlugin):
             # Email
             "send_email",
             # Data import
+            "apply_import_preset",
             "start_import_session",
             "get_import_schema",
             "set_column_mapping",
+            "set_opening_stock",
             "dry_run_import",
             "start_import",
+            "import_opening_stock",
+            "set_opening_invoices",
+            "import_opening_invoices",
+            "set_opening_balances",
+            "import_opening_balances",
+            "preview_import_undo",
+            "undo_import",
+            "plan_migration",
+            "plan_questions",
+            "run_migration_plan",
+            "stop_migration_plan",
         ]
 
     def validate_environment(self):

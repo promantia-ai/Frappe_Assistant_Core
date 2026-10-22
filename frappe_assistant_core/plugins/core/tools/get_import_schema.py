@@ -25,8 +25,8 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
-from frappe_assistant_core.plugins.core.import_mapping import build_import_schema
-from frappe_assistant_core.plugins.core.import_session import import_target_problem
+from frappe_assistant_core.utils.import_mapping import build_import_schema
+from frappe_assistant_core.utils.import_session import import_target_problem
 
 
 class GetImportSchema(BaseTool):

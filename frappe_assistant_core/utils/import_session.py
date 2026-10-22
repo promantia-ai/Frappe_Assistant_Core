@@ -17,15 +17,24 @@ row counts. No row of the file is saved.
 
 import datetime
 import io
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import frappe
+import requests
 from frappe import _
+from frappe.core.api.file import get_max_file_size
+from frappe.utils import cint
 
 SUPPORTED_EXTENSIONS = ("csv", "xlsx", "xls")
 SAMPLE_SIZE = 10
 MAX_FILE_SIZE = 50 * 1024 * 1024  # same ceiling as chat uploads
+# A Google Sheet's download: seconds to connect and between two pieces, and in all.
+DOWNLOAD_TIMEOUT = (10, 30)
+DOWNLOAD_SECONDS = 120
 
 
 @dataclass
@@ -68,6 +77,124 @@ def get_readable_file(file_url: str):
             return file_doc
     # One message for "missing" and "not yours", so file names cannot be probed.
     raise FileProblem(_("File not found, or you don't have access to it."))
+
+
+def get_readable_file_by_id(file_id: str):
+    """Return the File named ``file_id`` (its ID in File Manager), if the current user may read it."""
+    if frappe.db.exists("File", {"name": file_id, "is_folder": 0}):
+        file_doc = frappe.get_doc("File", file_id)
+        if frappe.has_permission("File", "read", doc=file_doc):
+            return file_doc
+    raise FileProblem(_("File not found, or you don't have access to it."))
+
+
+def find_site_file(file_id: str = "", file_url: str = ""):
+    """The File the current user may read, by its ID or its URL. Both may be given when they name
+    the same file, as a chat attachment gives them."""
+    if file_id:
+        file_doc = get_readable_file_by_id(file_id)
+        if file_url and file_doc.file_url != file_url:
+            raise FileProblem(_("file_id and file_url name different files: give one of them."))
+        return file_doc
+    return get_readable_file(file_url)
+
+
+def file_from_google_sheet(url: str):
+    """A private .csv copy, owned by the user, of the Google Sheets tab ``url`` links to (#34006).
+
+    The tab in the link is downloaded, else the first. The session works on the copy like on any
+    file of this site, so what the dry run checks is what gets imported, whatever is changed in
+    the sheet meanwhile.
+    """
+    from frappe.utils.csvutils import validate_google_sheets_url
+
+    url = (url or "").strip()
+    try:
+        validate_google_sheets_url(url)
+    except frappe.ValidationError:
+        frappe.clear_messages()  # Frappe's pop-up says the same, less helpfully
+        raise FileProblem(
+            _(
+                "This isn't a Google Sheets link. Open the sheet in Google Sheets and copy the link "
+                "from the browser's address bar."
+            )
+        )
+    try:
+        content = _download_sheet(url)
+    except (requests.ConnectionError, requests.Timeout):
+        raise FileProblem(_cant_reach_google())
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code >= 500:
+            raise FileProblem(_cant_reach_google())
+        raise FileProblem(_cant_open_sheet())  # a deleted or mistyped sheet (404), a wrong tab (400)
+    except requests.RequestException:
+        raise FileProblem(_cant_open_sheet())
+
+    sheet_id = re.sub(r"[^A-Za-z0-9_-]", "", urlparse(url).path.split("/d/", 1)[-1].split("/", 1)[0])
+    return frappe.get_doc(
+        {
+            "doctype": "File",
+            "file_name": f"google-sheet-{sheet_id[:8] or 'copy'}.csv",
+            "content": content,
+            "is_private": 1,
+        }
+    ).insert()
+
+
+def _download_sheet(url: str) -> bytes:
+    """The CSV export of the tab ``url`` links to, the way Frappe's
+    get_csv_content_from_google_sheets builds its link, but streamed: refused once it passes
+    MAX_FILE_SIZE or DOWNLOAD_SECONDS, so a huge or trickling sheet can't hold a worker."""
+    # The tab's number only: a "link to this range" adds "&range=…" after it
+    gid = re.search(r"gid=(\d+)", url)
+    export = url.split("/edit", 1)[0] + f"/export?format=csv&gid={gid.group(1) if gid else 0}"
+    deadline = time.monotonic() + DOWNLOAD_SECONDS
+    # Frappe's File refuses what passes System Settings' Max File Size (25 MB by default)
+    limit = min(MAX_FILE_SIZE, get_max_file_size())
+    too_large = _("The sheet is larger than {0} MB, the largest file this site takes.").format(
+        round(limit / (1024 * 1024), 1)
+    )
+
+    with requests.get(
+        export, headers={"Accept": "text/csv"}, stream=True, timeout=DOWNLOAD_TIMEOUT
+    ) as response:
+        response.raise_for_status()
+        if cint(response.headers.get("Content-Length")) > limit:
+            raise FileProblem(too_large)
+        content = bytearray()
+        # As the pieces arrive: a large piece trickling in would put off the time limit
+        for chunk in response.iter_content(chunk_size=None):
+            content += chunk
+            if len(content) > limit:
+                raise FileProblem(too_large)
+            if time.monotonic() > deadline:
+                raise FileProblem(_cant_reach_google())
+
+    # A sheet that isn't shared answers 200 with Google's sign-in page.
+    if bytes(content).strip().endswith(b"</html>"):
+        raise FileProblem(_cant_open_sheet())
+    return bytes(content)
+
+
+def discard_sheet_copy(file_doc) -> None:
+    """Delete a Google Sheet's copy no session uses. The disk file stays while another File
+    shares its content."""
+    if file_doc:
+        # made by this same call, for this user
+        frappe.delete_doc("File", file_doc.name, ignore_permissions=True)
+
+
+def _cant_open_sheet() -> str:
+    return _(
+        "I can't open this Google Sheet. Share it so anyone with the link can view it: in Google "
+        "Sheets click Share, under General access choose Anyone with the link (Viewer), then paste "
+        "the link again. If it is shared, open the tab to import and copy the link from the "
+        "browser's address bar."
+    )
+
+
+def _cant_reach_google() -> str:
+    return _("Google Sheets didn't answer. Please try again in a moment.")
 
 
 def readable_session_file(session):
@@ -129,7 +256,9 @@ def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
     except Exception as e:
         raise FileProblem(_("Could not read the file: {0}").format(_describe_read_error(e)))
     raise FileProblem(
-        _("Sheet '{0}' not found. Sheets in this file: {1}.").format(sheet, ", ".join(map(str, names)))
+        _("Sheet '{0}' not found. Sheets in this file: {1}.").format(
+            sheet, ", ".join(str(name) for name in names)
+        )
     )
 
 
@@ -258,14 +387,56 @@ def _as_text(value: Any) -> str:
     return str(value)
 
 
+# -- how many rows one import may have ----------------------------------------------
+
+DEFAULT_MAX_IMPORT_ROWS = 50000
+
+
+def holding_session(file_name: str) -> Optional[str]:
+    """The import session that holds File ``file_name``, or None (#34003). The import tools read
+    that file, showing the model its headers, samples and summaries only, never all its rows.
+    Frappe keeps identical bytes once, so a copy uploaded again (a new File with the same
+    file_url) is held too."""
+    file_url = frappe.db.get_value("File", file_name, "file_url")
+    copies = frappe.get_all("File", filters={"file_url": file_url}, pluck="name") if file_url else []
+    return frappe.db.get_value(
+        "FAC Import Session",
+        {"source_file": ["in", list({file_name, *copies})], "status": ["!=", "Cancelled"]},
+        "name",
+    )
+
+
+def max_import_rows() -> int:
+    """Assistant Core Settings' Max Rows per Import; 0 or blank is the default, never unlimited."""
+    try:
+        value = frappe.db.get_single_value("Assistant Core Settings", "max_import_rows")
+    except frappe.ValidationError:
+        # the code is newer than the site: `bench migrate` hasn't added the field yet
+        frappe.clear_messages()
+        value = None
+    return cint(value) or DEFAULT_MAX_IMPORT_ROWS
+
+
+def row_limit_problem(row_count: int) -> Optional[str]:
+    """Why a file of ``row_count`` rows can't be imported in one go, or None (#34003)."""
+    limit = max_import_rows()
+    if cint(row_count) <= limit:
+        return None
+    return _(
+        "The file has {0} rows, more than the {1} one import may have. Split it into files of at "
+        "most {1} rows and import them one after another. (The limit is Max Rows per Import in "
+        "Assistant Core Settings.)"
+    ).format(row_count, limit)
+
+
 # -- target DocType ----------------------------------------------------------------
 
 
-def import_target_problem(doctype: str) -> Optional[str]:
+def import_target_problem(doctype: str, import_type: str = "Insert New Records") -> Optional[str]:
     """Why the current user cannot import into ``doctype``, or None when they can.
 
     Data Import itself requires the DocType to allow import and the user to hold
-    Import permission on it; inserting each row also needs Create.
+    Import permission on it; inserting each row also needs Create, updating needs Write.
     """
     if not frappe.db.exists("DocType", doctype):
         return _("DocType {0} does not exist.").format(doctype)
@@ -277,7 +448,12 @@ def import_target_problem(doctype: str) -> Optional[str]:
         return _("{0} is a single settings record, not a list, so it can't be imported.").format(doctype)
     if not meta.allow_import:
         return _("{0} can't be imported: Allow Import is turned off for it.").format(doctype)
-    if not frappe.has_permission(doctype, "create"):
+    if import_type == "Update Existing Records":
+        if not frappe.has_permission(doctype, "write"):
+            return _("You don't have permission to change {0} records, so you can't update them.").format(
+                doctype
+            )
+    elif not frappe.has_permission(doctype, "create"):
         return _("You don't have permission to create {0} records, so you can't import them.").format(doctype)
     if not frappe.has_permission(doctype, "import"):
         return _(

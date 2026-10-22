@@ -11,6 +11,7 @@
   "started_on",
   "source_file",
   "file_source",
+  "source_url",
   "sheet",
   "column_break_source",
   "status",
@@ -29,6 +30,19 @@
   "template_options",
   "transformation_rules",
   "excluded_rows",
+  "plan_section",
+  "this_file_heading",
+  "migration_plan",
+  "plan_position",
+  "plan_reason",
+  "column_break_plan",
+  "whole_plan_heading",
+  "plan_status",
+  "plan_failure_rule",
+  "plan_cut_off",
+  "plan_stop_requested",
+  "plan_importing_now",
+  "plan_settings",
   "validation_section",
   "validation_summary",
   "validation_results",
@@ -49,12 +63,12 @@
    "label": "Source"
   },
   {
+   "description": "Name of the file the user attached.",
    "fieldname": "file_name",
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "File Name",
-   "read_only": 1,
-   "description": "Name of the file the user attached."
+   "read_only": 1
   },
   {
    "default": "Now",
@@ -66,7 +80,7 @@
    "read_only": 1
   },
   {
-   "description": "The file on this site, when the file was uploaded here (FAC Chat). Empty when the file stays in the chat.",
+   "description": "The file on this site, when the file was uploaded here (FAC Chat) or copied from a Google Sheets link. Empty when the file stays in the chat.",
    "fieldname": "source_file",
    "fieldtype": "Link",
    "label": "Source File",
@@ -74,12 +88,21 @@
    "read_only": 1
   },
   {
-   "description": "Where the file is: on this site, or only in the AI chat it was attached to. No copy is kept either way.",
+   "description": "Where the file is: on this site, only in the AI chat it was attached to, or a Google Sheet, copied privately to this site when the session started.",
    "fieldname": "file_source",
    "fieldtype": "Select",
    "in_standard_filter": 1,
    "label": "File Source",
-   "options": "Site File\nChat Attachment",
+   "options": "Site File\nChat Attachment\nGoogle Sheet",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.file_source=='Google Sheet'",
+   "description": "The Google Sheets link the file was copied from.",
+   "fieldname": "source_url",
+   "fieldtype": "Data",
+   "label": "Google Sheets Link",
+   "options": "URL",
    "read_only": 1
   },
   {
@@ -102,7 +125,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "File Read\nMapped\nDry Run Failed\nReady to Import\nImporting\nCompleted\nPartially Completed\nFailed\nCancelled",
+   "options": "File Read\nMapped\nDry Run Failed\nReady to Import\nImporting\nCompleted\nPartially Completed\nFailed\nCancelled\nUndoing\nUndone\nPartially Undone",
    "read_only": 1
   },
   {
@@ -214,6 +237,103 @@
   },
   {
    "collapsible": 1,
+   "depends_on": "eval:doc.migration_plan",
+   "fieldname": "plan_section",
+   "fieldtype": "Section Break",
+   "label": "Migration Plan"
+  },
+  {
+   "fieldname": "this_file_heading",
+   "fieldtype": "Heading",
+   "label": "This file in the plan"
+  },
+  {
+   "description": "The first file of this migration. It keeps the plan for all the files.",
+   "fieldname": "migration_plan",
+   "fieldtype": "Link",
+   "label": "Migration Plan (first file)",
+   "options": "FAC Import Session",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "description": "This file's turn in the import order (1 is imported first).",
+   "fieldname": "plan_position",
+   "fieldtype": "Int",
+   "label": "Plan Position",
+   "read_only": 1
+  },
+  {
+   "description": "Why this file is imported at this position.",
+   "fieldname": "plan_reason",
+   "fieldtype": "Small Text",
+   "label": "Plan Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_plan",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.plan_settings",
+   "fieldname": "whole_plan_heading",
+   "fieldtype": "Heading",
+   "label": "Whole migration (all files of this plan)"
+  },
+  {
+   "depends_on": "eval:doc.plan_settings",
+   "description": "Where the whole migration is now.",
+   "fieldname": "plan_status",
+   "fieldtype": "Select",
+   "label": "Plan Status (all files)",
+   "options": "\nPlanning\nReady to Run\nRunning\nCompleted\nPartially Completed\nStopped\nFailed",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.plan_settings",
+   "description": "If rows still fail during the import: leave_out skips those rows, with the reason, and goes on; stop stops the plan before that file.",
+   "fieldname": "plan_failure_rule",
+   "fieldtype": "Select",
+   "label": "Failure Rule (all files)",
+   "options": "\nleave_out\nstop",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.plan_settings",
+   "description": "The last day in the old system. Opening stock, invoices and balances are dated on it.",
+   "fieldname": "plan_cut_off",
+   "fieldtype": "Date",
+   "label": "Cut-off Date (all files)",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.plan_settings",
+   "description": "Ticked when the user asks to stop. The plan stops after the file importing now.",
+   "fieldname": "plan_stop_requested",
+   "fieldtype": "Check",
+   "label": "Stop Requested (all files)",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.plan_settings",
+   "description": "The file being imported right now.",
+   "fieldname": "plan_importing_now",
+   "fieldtype": "Link",
+   "label": "Importing Now",
+   "options": "FAC Import Session",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.plan_settings",
+   "description": "The full plan, for support: the records it creates first, its progress and its step log.",
+   "fieldname": "plan_settings",
+   "fieldtype": "JSON",
+   "label": "Plan (all files)",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
    "fieldname": "validation_section",
    "fieldtype": "Section Break",
    "label": "Validation"
@@ -291,7 +411,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-07 23:00:00.000000",
+ "modified": "2026-10-22 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Assistant Core",
  "name": "FAC Import Session",
@@ -313,6 +433,7 @@
   {
    "create": 1,
    "read": 1,
+   "report": 1,
    "role": "Desk User",
    "write": 1
   }

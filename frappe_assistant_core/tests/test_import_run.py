@@ -29,8 +29,8 @@ from frappe.core.doctype.data_import.importer import Importer
 from rq.timeouts import JobTimeoutException
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_failures, import_run
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run, import_failures, import_fixes, import_run
 
 MAPPING = {
     "Customer Name": "customer_name",
@@ -149,6 +149,7 @@ class ImportRunCase(BaseAssistantTest):
 
         def commit(*args, **kwargs):
             frappe.db.savepoint("fac_test_row")
+            frappe.db.value_cache.clear()  # as a commit does: a record committed is seen as there
 
         def rollback(*, save_point=None):
             real_rollback(save_point=save_point or "fac_test_row")
@@ -656,3 +657,226 @@ class TestImportRun(ImportRunCase):
         self.assertFalse(response["success"])
         frappe.set_user("Administrator")
         self.assertEqual(self._imported(), set())
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
+    """Review fixes: a column the user left unmapped is not imported (#33993), and the mapping
+    can't change under an import that runs or was undone (#33989)."""
+
+    def test_a_column_left_unmapped_is_not_imported(self):
+        territory = f"Unmapped {self.tag}"
+        frappe.get_doc(
+            {"doctype": "Territory", "territory_name": territory, "parent_territory": "All Territories"}
+        ).insert()
+        name = f"Alpha {self.tag}"
+        lines = [",".join([*MAPPING, "Territory"]), f"{name},{self.group},Company,{territory}"]
+        file_doc = self._file("customers.csv", ("\n".join(lines) + "\n").encode())
+        session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
+        self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+
+        imported = self._import(session, checked)
+
+        self.assertTrue(imported["success"], imported)
+        self.assertNotEqual(frappe.db.get_value("Customer", {"customer_name": name}, "territory"), territory)
+
+    def test_the_mapping_is_kept_while_an_import_runs_or_once_it_was_undone(self):
+        session, _checked = self._ready_session()
+        for status in ("Importing", "Cancelled", "Undoing", "Undone", "Partially Undone"):
+            with self.subTest(status):
+                # start_import leaves the session Importing while its Data Import is queued or
+                # running; the undo tools set the undo statuses.
+                frappe.db.set_value("FAC Import Session", session, "status", status)
+
+                reply = self._run(
+                    "set_column_mapping", {"session": session, "mapping": {"Customer Type": "customer_type"}}
+                )
+
+                self.assertFalse(reply["success"], reply)
+                self.assertEqual(self._doc(session).status, status)
+
+    def test_a_session_that_can_be_checked_again_can_be_remapped(self):
+        session, _checked = self._ready_session()
+
+        reply = self._run(
+            "set_column_mapping", {"session": session, "mapping": {"Customer Type": "customer_type"}}
+        )
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(self._doc(session).status, "Mapped")
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestWhileACheckRuns(ImportRunCase):
+    """A file of more than 500 rows is checked in a background job, which stores its result on
+    the session when it ends. Until then the mapping, the import and an undo wait."""
+
+    def _checking(self, session):
+        # Production: dry_run_import queues the check of a large file and marks the session so.
+        frappe.db.set_value(
+            "FAC Import Session", session, "progress", import_dry_run._progress("queued", 0, 600)
+        )
+
+    def test_mapping_importing_and_undoing_wait_for_the_check(self):
+        session, checked = self._ready_session()
+        self._checking(session)
+        for tool, arguments in (
+            ("set_column_mapping", {"session": session, "mapping": {"Customer Type": "customer_type"}}),
+            ("start_import", self._card(session, checked)),
+            ("undo_import", {"session": session, "mode": "all", "records": 0, "blocked": 0}),
+        ):
+            reply = self._run(tool, arguments)
+            self.assertFalse(reply["success"], (tool, reply))
+            self.assertIn("is being checked", json.dumps(reply), tool)
+        preview = self._run("preview_import_undo", {"session": session})["result"]
+        self.assertFalse(preview["can_undo"], preview)
+        self.assertIn("is being checked", preview["refused"])
+        doc = self._doc(session)
+        self.assertEqual((doc.status, len(doc.data_imports)), ("Ready to Import", 0))
+
+    def test_a_change_saved_while_the_check_runs_is_not_taken_as_checked(self):
+        session, _checked = self._ready_session()
+        real_check = import_dry_run._Checker.check
+
+        def check_while_remapped(checker, *args, **kwargs):
+            # Another request remaps a column while this check is running
+            doc = self._doc(session)
+            options = frappe.parse_json(doc.template_options)
+            options["column_to_field_map"]["2"] = "Don't Import"
+            frappe.db.set_value("FAC Import Session", session, "template_options", frappe.as_json(options))
+            return real_check(checker, *args, **kwargs)
+
+        with patch.object(import_dry_run._Checker, "check", autospec=True, side_effect=check_while_remapped):
+            import_dry_run.run(session)
+
+        self.assertFalse(import_fixes.checked_as_is(self._doc(session)))
+        self.assertFalse(self._import(session, {"ready": 3})["success"])
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestRemapAfterAnImport(ImportRunCase):
+    def test_rows_imported_as_one_doctype_keep_the_session_to_it(self):
+        session, checked = self._ready_session()
+        with self._each_row_commits():
+            self.assertTrue(self._import(session, checked)["success"])
+
+        # "These are suppliers": the rows already in are Customers, and are known as imported by
+        # their row numbers, so another DocType would skip them. That takes a new session.
+        for change in (
+            {"doctype": "Supplier", "mapping": {"Customer Name": "supplier_name"}},
+            {
+                "import_type": "Update Existing Records",
+                "mapping": {"Customer Type": "customer_type"},
+                "match_on": ["customer_name"],
+            },
+        ):
+            reply = self._run("set_column_mapping", {"session": session, **change})
+            self.assertFalse(reply["success"], (change, reply))
+            self.assertIn("start a new import session", reply["error"])
+        doc = self._doc(session)
+        self.assertEqual((doc.target_doctype, doc.import_type, doc.status), ("Customer", INSERT, "Completed"))
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestRepeatedHeadings(ImportRunCase):
+    def test_a_column_mapped_by_position_under_a_repeated_heading_is_imported(self):
+        # Exports often repeat a heading ("Name" for the customer and for the contact). Frappe's
+        # importer skips a column whose heading it has seen, even when it is mapped.
+        name = f"Rep {self.tag}"
+        content = f"Name,Group,Type,Name\n{name},{self.group},Company,Call before noon\n".encode()
+        session = self._run("start_import_session", {"file_url": self._file("rep.csv", content).file_url})
+        session = session["result"]["session_id"]
+        mapping = {"0": "customer_name", "1": "customer_group", "2": "customer_type", "3": "customer_details"}
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+
+        with self._each_row_commits():
+            self.assertTrue(self._import(session, checked)["success"])
+
+        details = frappe.db.get_value("Customer", {"customer_name": name}, "customer_details")
+        self.assertEqual(details, "Call before noon")
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Item Group")
+class TestATreeFile(ImportRunCase):
+    def test_a_tree_whose_parents_are_rows_of_the_file_is_imported_a_level_at_a_time(self):
+        # Data Import refuses a whole file whose row links to a record not in ERPNext yet, as a
+        # child row does to its parent row higher up the file.
+        top, mid, leaf = (f"{level} {self.tag}" for level in ("Top", "Mid", "Leaf"))
+        content = (
+            "Item Group Name,Parent Item Group,Is Group\n"
+            f"{top},All Item Groups,1\n"  # row 2
+            f"{mid},{top},1\n"  # row 3: its parent is row 2
+            f"{leaf},{mid},0\n"  # row 4: its parent is row 3
+        ).encode()
+        started = self._run("start_import_session", {"file_url": self._file("groups.csv", content).file_url})
+        session = started["result"]["session_id"]
+        mapping = {
+            "Item Group Name": "item_group_name",
+            "Parent Item Group": "parent_item_group",
+            "Is Group": "is_group",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Item Group"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual((checked["ready"], checked["status"]), (3, "Ready to Import"), checked)
+
+        with self._each_row_commits():
+            response = self._import(session, checked, doctype="Item Group")
+
+        self.assertTrue(response["success"], response)
+        parents = dict(
+            frappe.get_all(
+                "Item Group",
+                filters={"name": ["in", [top, mid, leaf]]},
+                fields=["name", "parent_item_group"],
+                as_list=True,
+            )
+        )
+        self.assertEqual(parents, {top: "All Item Groups", mid: top, leaf: mid})
+        doc = self._doc(session)
+        self.assertEqual(doc.status, "Completed")
+        self.assertEqual(
+            [(link.purpose, link.success_count, link.failed_count) for link in doc.data_imports],
+            [("Import", 1, 0)] * 3,
+        )
+        self.assertEqual(response["result"]["created_in_all"], 3)
+
+    def test_a_tree_whose_last_level_fails_is_partly_imported(self):
+        top, leaf = f"Top {self.tag}", f"Leaf {self.tag}"
+        content = (
+            f"Item Group Name,Parent Item Group,Is Group\n{top},All Item Groups,1\n{leaf},{top},0\n".encode()
+        )
+        started = self._run("start_import_session", {"file_url": self._file("tree.csv", content).file_url})
+        session = started["result"]["session_id"]
+        mapping = {
+            "Item Group Name": "item_group_name",
+            "Parent Item Group": "parent_item_group",
+            "Is Group": "is_group",
+        }
+        self._run("set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Item Group"})
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        from erpnext.setup.doctype.item_group.item_group import ItemGroup
+
+        real = ItemGroup.validate
+
+        def leaf_refused(doc, *args, **kwargs):
+            if doc.name == leaf:
+                frappe.throw(frappe._("Leaf refused for the test"))
+            return real(doc, *args, **kwargs)
+
+        with self._each_row_commits(), patch.object(
+            ItemGroup, "validate", autospec=True, side_effect=leaf_refused
+        ):
+            self._import(session, checked, doctype="Item Group")
+
+        self.assertTrue(frappe.db.exists("Item Group", top))
+        self.assertEqual(self._doc(session).status, "Partially Completed")

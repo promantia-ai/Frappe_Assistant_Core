@@ -265,7 +265,7 @@ class DocumentUpdate(BaseTool):
         if not doctype or not name or "data" not in arguments:
             return {
                 "success": False,
-                "error": "Pass doctype, name and data for one record, or documents for several.",
+                "error": _("Pass doctype, name and data for one record, or documents for several."),
             }
 
         data, rename_requested = _split_rename(name, data, arguments)

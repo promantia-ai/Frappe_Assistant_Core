@@ -20,10 +20,15 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes
-from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
-from frappe_assistant_core.plugins.core.import_session import FileProblem, get_readable_file
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_failures, import_fixes
+from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.utils.import_session import (
+    FileProblem,
+    discard_sheet_copy,
+    file_from_google_sheet,
+    find_site_file,
+)
 
 
 class DryRunImport(BaseTool):
@@ -41,9 +46,14 @@ class DryRunImport(BaseTool):
             f"more than {dry_run.BACKGROUND_ROWS} rows are checked in the background: say so, and "
             "read the session with get_document later (progress, then validation_summary, which "
             "holds this same reply). The file must be on this site: if the session's file is only "
-            "in the chat, ask the user to attach it in FAC Chat and pass its file_url. A different "
-            "file passed as file_url puts back the rows left out before. Each group comes with a plain "
-            "explanation and the fixes that fit it: explain it and offer only those fixes. Then "
+            "in the chat, ask the user to upload it in File Manager (or attach it in FAC Chat) and "
+            "pass its file_id; the user must be allowed to read it. A different file passed as "
+            "file_id or file_url puts back the rows left out before. Each group comes with a plain "
+            "explanation and the fixes that fit it: explain it and offer only those fixes. For an Update "
+            "Existing Records session the reply also has update: records_changing, fields_changing, "
+            "by_field (how many records change each field) and up to 5 samples with each field's old "
+            "and new value: show the user those as a table before asking to import. Rows that change "
+            "nothing are counted in unchanged and skipped. Then "
             "call again with the user's choices in fixes: they are saved on the session and every "
             "row is checked again. Per group: 'map' a value to an existing one ('to': one of the "
             "group's 'closest' names, or one the user gives; never invent one), or 'leave_out' "
@@ -55,19 +65,43 @@ class DryRunImport(BaseTool):
             "start_import then imports just those. failed_rows_file: true checks nothing; it gives "
             "the rows still not imported (failed, or left out) as a CSV with the reason for each, "
             "for the user to correct and upload: show its download_url. The corrected file comes "
-            "back as file_url, and is checked like any other."
+            "back as file_id (or file_url), and is checked like any other. When the user fixed "
+            "a Google Sheet the session came from, pass its google_sheets_url again: a fresh copy "
+            "is checked, and the mapping is kept. For a session in a migration plan, records the "
+            "plan's earlier files create count as there, and the user's questions go through "
+            "plan_questions, not here."
         )
         self.requires_permission = None  # checked on the session and the target DocType
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = (
+            "groups",
+            "masters_plan",
+            "left_out",
+            "problems",
+            "applied",
+            "update",
+            "error",
+        )
 
         self.inputSchema = {
             "type": "object",
             "properties": {
                 "session": {"type": "string", "description": "The import session id"},
+                "file_id": {
+                    "type": "string",
+                    "description": "When the session's file is just in the chat: the ID of the same "
+                    "file on this site (its name in File Manager). Or of the user's corrected file of "
+                    "failed rows. Its columns must match.",
+                },
                 "file_url": {
                     "type": "string",
-                    "description": "When the session's file is just in the chat: the same file on "
-                    "this site, e.g. a FAC Chat attachment. Or the user's corrected file of failed "
-                    "rows. Its columns must match.",
+                    "description": "Instead of file_id: the file's URL on this site, e.g. a FAC Chat "
+                    "attachment's.",
+                },
+                "google_sheets_url": {
+                    "type": "string",
+                    "description": "Instead of a file: a Google Sheets link, to check the sheet as it "
+                    "is now, e.g. after the user fixed it. Its columns must match.",
                 },
                 "failed_rows_file": {
                     "type": "boolean",
@@ -103,20 +137,28 @@ class DryRunImport(BaseTool):
         session_name = arguments.get("session")
         # Clients fill optional inputs in, so an empty list means no fixes, as a missing one does.
         fixes = arguments.get("fixes") or None
+        file_id = (arguments.get("file_id") or "").strip()
+        file_url = (arguments.get("file_url") or "").strip()
+        sheet_url = (arguments.get("google_sheets_url") or "").strip()
+        if sheet_url and (file_id or file_url):
+            return {
+                "success": False,
+                "error": _("Give only the Google Sheets link, or only a file: not both."),
+            }
         if fixes is not None and (not isinstance(fixes, list) or not all(isinstance(f, dict) for f in fixes)):
-            return {"success": False, "error": "fixes must be a list of {group, action, ...}."}
+            return {"success": False, "error": _("fixes must be a list of {group, action, ...}.")}
         try:
             session = load_session(session_name)
         except frappe.DoesNotExistError:
-            return {"success": False, "error": f"Import session '{session_name}' not found."}
+            return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
         except frappe.PermissionError as e:
             return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
 
         if arguments.get("failed_rows_file"):
-            if fixes or arguments.get("file_url"):
+            if fixes or file_id or file_url or sheet_url:
                 return {
                     "success": False,
-                    "error": "failed_rows_file is asked on its own, without fixes or file_url.",
+                    "error": _("failed_rows_file is asked on its own, without fixes or a file."),
                 }
             try:
                 return {"success": True, **import_failures.failed_rows_file(session)}
@@ -126,6 +168,7 @@ class DryRunImport(BaseTool):
                 frappe.log_error(title=_("Failed Rows File Error"), message=frappe.get_traceback())
                 return {"success": False, "error": str(e), "session": session_name}
 
+        copy = None  # a Google Sheet's fresh copy, deleted unless the session takes it
         try:
             if dry_run.is_running(session):
                 if fixes:
@@ -134,8 +177,13 @@ class DryRunImport(BaseTool):
                     )
                 return self._running(session)
             notice = None
+            if sheet_url:
+                new_file = copy = file_from_google_sheet(sheet_url)
+            else:
+                # Read access is checked here, before the file is compared or linked.
+                new_file = find_site_file(file_id=file_id, file_url=file_url) if file_id or file_url else None
             # The session's own file passed again (as a client may) is no new file: nothing to link.
-            if arguments.get("file_url") and not _is_sessions_file(session, arguments["file_url"]):
+            if new_file and not _is_sessions_file(session, new_file):
                 if fixes:
                     raise dry_run.DryRunProblem(
                         _(
@@ -145,12 +193,22 @@ class DryRunImport(BaseTool):
                     )
                 dry_run.check_status(session)  # a session that can't be checked keeps its file
                 before = session.source_file
-                dry_run.link_site_file(session, arguments["file_url"])
+                dry_run.link_site_file(session, new_file, sheet_url or None)
+                copy = None  # the session's file now
                 if before and not _same_content(before, session.source_file):
                     notice = import_fixes.forget_left_out(session)
             if fixes and session.status not in import_failures.AFTER_CHECK:
                 raise dry_run.DryRunProblem(
                     _("Check the file first, without fixes; fixes apply to the groups it finds.")
+                )
+            if fixes and not import_fixes.checked_as_is(session):
+                # The groups are the last check's: of another file (its check stopped), or of
+                # another mapping. Their rows aren't the session's rows now.
+                raise dry_run.DryRunProblem(
+                    _(
+                        "The file changed since its last check. Check it first, without fixes: "
+                        "fixes apply to the groups that check finds."
+                    )
                 )
             dry_run.check_can_run(session)
 
@@ -171,6 +229,8 @@ class DryRunImport(BaseTool):
         except Exception as e:
             frappe.log_error(title=_("Dry Run Import Error"), message=frappe.get_traceback())
             return {"success": False, "error": str(e), "session": session_name}
+        finally:
+            discard_sheet_copy(copy)
 
         result = {"success": True, **reply}
         if applied:
@@ -200,9 +260,9 @@ class DryRunImport(BaseTool):
         return result
 
 
-def _is_sessions_file(session, file_url: str) -> bool:
-    """Whether ``file_url`` is a file the user can read with the same bytes as the session's."""
-    return bool(session.source_file) and _same_content(session.source_file, get_readable_file(file_url).name)
+def _is_sessions_file(session, file_doc) -> bool:
+    """Whether ``file_doc`` holds the same bytes as the session's file."""
+    return bool(session.source_file) and _same_content(session.source_file, file_doc.name)
 
 
 def _same_content(file_a: str, file_b: str) -> bool:

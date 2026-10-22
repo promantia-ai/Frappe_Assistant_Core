@@ -23,8 +23,27 @@ from frappe.utils import now_datetime
 
 from frappe_assistant_core.chat.utils.permissions import _doc_owner_or_admin, _user_or_admin
 
+#: The migration plan's fields (#34351): written only by import_plan, with db.set_value.
+PLAN_FIELDS = (
+    "migration_plan",
+    "plan_position",
+    "plan_reason",
+    "plan_settings",
+    "plan_status",
+    "plan_failure_rule",
+    "plan_cut_off",
+    "plan_stop_requested",
+    "plan_importing_now",
+)
+
 
 class FACImportSession(Document):
+    def before_save(self):
+        # A plan's run saves a file's session it read before it moved the plan on: that copy must
+        # not write the plan's old values back.
+        if not self.is_new():
+            self.update(frappe.db.get_value(self.doctype, self.name, PLAN_FIELDS, as_dict=True) or {})
+
     def log_step(
         self,
         step: str,
@@ -41,6 +60,8 @@ class FACImportSession(Document):
                 "step": step,
                 "outcome": outcome,
                 "user": frappe.session.user,
+                # which file the step worked on: a corrected file later replaces source_file
+                "file": self.source_file or self.file_name,
                 "rows_ok": rows_ok,
                 "rows_failed": rows_failed,
                 "message": message,

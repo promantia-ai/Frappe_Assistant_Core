@@ -15,6 +15,8 @@ What goes in is exactly what was checked: the session's sheet, with the value ma
 | `rows` | integer | **Yes** | Rows to import: the last check's `ready` |
 | `import_type` | string | **Yes** | `Insert New Records` or `Update Existing Records`, as the last check said |
 
+For an update, `rows` is the check's `ready` (records that change). The update changes exactly the records the check matched, never a new match, and the result says "Updated N … records". Rows that change nothing were skipped at the check.
+
 The approval card shows `doctype`, `rows` and `import_type`, so the user sees what goes in. They must match the last check, or nothing is imported.
 
 ## Workflow
@@ -76,7 +78,7 @@ A session that is **Partially Completed** or **Failed** isn't imported again as 
 1. Call `dry_run_import`: it checks **only the rows not imported yet** (`imported` counts the rest).
 2. Call `start_import` with that check's `ready`. A **new Data Import** gets just those rows, with every fix made since, and the session's report covers every run. The records already in are never touched.
 
-Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with `failed_rows_file`), and their corrected file comes back through `dry_run_import` as `file_url`, checked before it is imported.
+Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with `failed_rows_file`), and their corrected file comes back through `dry_run_import` as `file_id` (or `file_url`), checked before it is imported.
 
 ## When it can't start
 
@@ -94,3 +96,8 @@ Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with
 - Importing without the user asking, or before the dry run said the file is ready.
 - Starting a new session to finish an interrupted import, or to try failed rows again: that would import the done rows again. Continue it, or check and import what is left, in the same session.
 - Re-importing the whole file after a partial success.
+
+## In a migration plan
+
+When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
+`plan_questions` gathers every question of the plan into one list. Don't call `start_import` for it: `run_migration_plan` imports every file of the plan. While the plan is open or running, `start_import` (and the opening import tools) refuse its files.

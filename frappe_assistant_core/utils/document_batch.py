@@ -147,6 +147,7 @@ def write_all(
             after(results)
     except Exception:
         frappe.db.rollback(save_point=SAVEPOINT)
+        _run_rollback_work(callbacks)
         _restore_commit_callbacks(callbacks)
         _restore_commit_queues(queues)
         raise
@@ -187,6 +188,17 @@ def _commit_callbacks() -> Dict[str, list]:
         name: list(getattr(frappe.db, name)._functions)
         for name in ("before_commit", "after_commit", "before_rollback", "after_rollback")
     }
+
+
+def _run_rollback_work(callbacks: Dict[str, list]) -> None:
+    """Run the after_rollback work the batch queued, as a full rollback would: a File made
+    public is moved back to private, a cached document is cleared."""
+    queue = frappe.db.after_rollback._functions
+    for callback in list(queue)[len(callbacks["after_rollback"]) :]:
+        try:
+            callback()
+        except Exception:
+            frappe.log_error(title=_("Document Rollback Error"), message=frappe.get_traceback())
 
 
 def _restore_commit_callbacks(callbacks: Dict[str, list]) -> None:

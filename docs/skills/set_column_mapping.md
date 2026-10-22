@@ -6,6 +6,8 @@ The `set_column_mapping` tool saves which column of the user's migration file go
 
 The session comes from `start_import_session`. Get the fields from `get_import_schema` first. Saving moves the session to **Mapped** and adds a "Map Columns" row to its step log.
 
+Sessions opened by `apply_import_preset` already have their mapping. Use this tool to change any column the user wants changed.
+
 ## Parameters
 
 | Parameter | Type | Required | Description |
@@ -13,6 +15,8 @@ The session comes from `start_import_session`. Get the fields from `get_import_s
 | `session` | string | **Yes** | The import session id |
 | `mapping` | object | **Yes** | Column → field. Only the columns to set or change. |
 | `doctype` | string | No | The target DocType. Needed the first time; changing it clears the mapping. |
+| `import_type` | string | No | `Insert New Records` or `Update Existing Records`. Default: keep the session's. |
+| `match_on` | array | For updates | The field(s) that find each row's record, e.g. `["tax_id"]`. |
 
 In `mapping`:
 - **A column** is its header exactly as in the file (`"Cust Name"`), or its 0-based position (`"3"`) when two columns share a header.
@@ -44,14 +48,31 @@ In `mapping`:
 
 If anything is wrong, **nothing is saved**. `problems` says what to fix, for example `'item_nme' is not an importable field of Item. Did you mean 'item_name' (Item Name)?`, and `columns` lists the file's headers. Fix those entries and call again.
 
+## Updating existing records
+
+Start the session with `import_type: "Update Existing Records"` (or pass it here). Pass `match_on`:
+the field(s) that find each row's record, mapped from the file's key column(s): `["tax_id"]`,
+`["customer_name"]`, `["item_code", "price_list"]` for Item Price. A column mapped to the ID
+(`name`) is the match on its own. The key columns are only used to find records; they are never
+written. Child-table columns can't be updated from a file: map them to "Don't Import".
+
+## When the mapping can't change
+
+While the session's import is running (**Importing**) the mapping is kept: wait for the import to finish, or continue it with `start_import`. A session that was cancelled or undone (fully or partly) keeps its mapping too: start a new session for the file.
+
 ## Best Practices
 
-1. **Show the result as a table**: *Your column → ERPNext field*. Show each child table in its own table under its title. Below, mark the **unmapped columns** and the **required fields with no column** clearly.
+1. **Show the result as a table**: *Your column → ERPNext field*. Show each child table in its own table under its title. Below, mark the **unmapped columns** and the **required fields with no column** clearly. An unmapped column is not imported, like one mapped to "Don't Import".
 2. **Don't guess.** When you aren't confident about a column, leave it out of the call and ask the user with a choice card (`ask_user`), offering the likely fields and "Don't import". Then save their answer.
 3. **Corrections are one call.** When the user says "that's the billing city, not the shipping city", send just that column with its new field. The other columns keep their mapping. Confirm the change in a sentence.
-4. **A required field with no column** needs a decision: map a column to it, rely on its default if it has one, or the user adds the column to the file.
+4. **A required field with no column** needs a decision: map a column to it, rely on its default if it has one, or the user adds the column to the file. An update (Update Existing Records) lists none: it changes only the fields mapped.
 5. **Changing the target DocType** clears the mapping, because the fields differ. Say so before you do it.
 
 ## Next
 
 Once the user agrees the mapping, call `dry_run_import(session)` to check every row before anything is imported.
+
+## In a migration plan
+
+When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
+`plan_questions` gathers every question of the plan into one list. Map the columns you are sure of; leave the unsure ones for that list.

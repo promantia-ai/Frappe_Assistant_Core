@@ -22,8 +22,8 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run, import_fixes
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run, import_fixes
 
 MAPPING = {
     "Customer Name": "customer_name",
@@ -111,6 +111,31 @@ class TestImportFixes(BaseAssistantTest):
 
     def _doc(self, session):
         return frappe.get_doc("FAC Import Session", session)
+
+    def test_fixes_wait_for_a_check_of_the_file_the_session_has_now(self):
+        # A corrected file is linked and its check, queued for a large file, fails: the session
+        # keeps the last check's groups, of the file before. Their row numbers aren't this file's.
+        session, result = self._session()
+        group = self._group(result, "Not an allowed option")
+        lines = [
+            "Customer Name,Customer Group,Customer Type,Notes",
+            f"Zeta {self.tag},{self.existing_group},Company,",
+        ]
+        corrected = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "again.csv",
+                "content": ("\n".join(lines) + "\n").encode(),
+                "is_private": 1,
+            }
+        ).insert()
+        doc = self._doc(session)
+        import_dry_run.link_site_file(doc, corrected)  # what dry_run_import does before queueing it
+
+        response = self._fix_fails(session, {"group": group["id"], "action": "leave_out", "reason": "x"})
+
+        self.assertIn("Check it first", response["error"])
+        self.assertIsNone(self._doc(session).excluded_rows)
 
     # -- registration ------------------------------------------------------------------
 
@@ -543,3 +568,52 @@ class TestImportFixes(BaseAssistantTest):
         self.assertFalse(response["success"])
         frappe.set_user("Administrator")
         self.assertFalse(self._doc(session).excluded_rows)
+
+
+class TestRowRanges(BaseAssistantTest):
+    def test_short_lists_are_given_in_full(self):
+        self.assertEqual(import_fixes.row_ranges([2, 3, 4, 9]), "2-4, 9")
+
+    def test_a_long_list_of_scattered_rows_is_capped(self):
+        # 20,000 rows left out every other row would otherwise send ~150 KB in every reply
+        rows = list(range(2, 40002, 2))
+        text = import_fixes.row_ranges(rows)
+        self.assertLess(len(text), 300, text)
+        self.assertTrue(text.startswith("2, 4, 6"), text)
+        self.assertTrue(text.endswith("and 19980 more rows"), text)
+
+
+class TestCurrencyWords(BaseAssistantTest):
+    def test_a_currency_written_as_a_word_or_symbol_is_offered_first(self):
+        # "RS" isn't close to "INR" by spelling, so a file's Rs would be left out instead of mapped.
+        if not frappe.db.get_value("Currency", "INR", "enabled"):
+            self.skipTest("INR is switched off on this site")
+        for written in ("RS", "Rs.", "Rupees", "₹"):
+            self.assertEqual(import_fixes.closest_names("Currency", written)[:1], ["INR"], written)
+
+
+class TestSwitchedOffRecords(BaseAssistantTest):
+    def test_a_record_switched_off_by_its_enabled_field_is_never_offered_or_taken(self):
+        # UOM and Currency are switched off by "enabled", not "disabled"
+        tag = frappe.generate_hash(length=6)
+        off = frappe.get_doc({"doctype": "UOM", "uom_name": f"Kilogram {tag}", "enabled": 0}).insert().name
+        on = frappe.get_doc({"doctype": "UOM", "uom_name": f"Kilogramme {tag}"}).insert().name
+        group = {
+            "cause": import_dry_run.CAUSE_MISSING_LINK,
+            "link_doctype": "UOM",
+            "label": "UOM",
+            "parent": "Item",
+            "field": "stock_uom",
+            "value": f"Kilogrm {tag}",
+        }
+
+        closest = import_fixes.closest_names("UOM", f"Kilogrm {tag}")
+        with self.assertRaises(import_fixes.FixProblem) as refused:
+            import_fixes._map(frappe._dict(template_options="{}"), group, {"to": off}, [])
+
+        self.assertIn(on, closest)
+        self.assertNotIn(off, closest)
+        self.assertIn("switched off", str(refused.exception))
+        self.assertEqual(
+            import_fixes._map(frappe._dict(template_options="{}"), group, {"to": on}, [])[0]["to"], on
+        )

@@ -105,6 +105,8 @@ class DocumentCreate(BaseTool):
         self.name = "create_document"
         self.description = "Create new Frappe documents with proper validation and child table support. Supports all DocTypes including those with child tables. WORKFLOW: First use get_doctype_info to understand the DocType structure, identify required fields and child tables, then create the document with proper field values. Child tables must be provided as arrays of objects; a Table MultiSelect field also accepts an array of its link values (e.g. ['user@example.com']). Referenced records (customers, items, warehouses, etc.) must already exist in the system. Use exact field names as shown in DocType metadata. Error responses include specific guidance for resolution. Common use cases: creating Sales Orders with line items, Purchase Orders with items and taxes, customer records, inventory transactions. SEVERAL RECORDS AT ONCE: instead of doctype and data, pass documents, a list of {doctype, data} (up to 100, any DocTypes): one approval for all, and all are created or none. Show the user the records as a table first; the approval card then lists each one. A failure names the record and why."
         self.requires_permission = None  # Permission checked dynamically per DocType
+        # With import_session, the records and errors carry names from the user's file (#34003).
+        self.untrusted_fields = ("error", "problems", "created", "documents")
 
         self.inputSchema = {
             "type": "object",
@@ -164,7 +166,7 @@ class DocumentCreate(BaseTool):
         if not doctype or "data" not in arguments:
             return {
                 "success": False,
-                "error": "Pass doctype and data for one record, or documents for several.",
+                "error": _("Pass doctype and data for one record, or documents for several."),
             }
         submit = arguments.get("submit", False)
         validate_only = arguments.get("validate_only", False)
@@ -528,8 +530,8 @@ class DocumentCreate(BaseTool):
     def _execute_many(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Create ``documents`` in one call: checked first, then all created or none. With
         ``import_session`` they must be that session's missing masters, and are listed on it."""
-        from frappe_assistant_core.plugins.core import import_fixes
-        from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
+        from frappe_assistant_core.utils import import_fixes
+        from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
 
         session_name = arguments.get("import_session")
         session = None
@@ -547,10 +549,9 @@ class DocumentCreate(BaseTool):
                 return self._validate_many(documents)
 
             def create_one(entry):
-                result = self.execute({"doctype": entry["doctype"], "data": dict(entry["data"])})
-                if session and result.get("success"):
-                    return import_fixes.kept_its_name(entry, result)
-                return result
+                if session:
+                    return import_fixes.create_master(entry)
+                return self.execute({"doctype": entry["doctype"], "data": dict(entry["data"])})
 
             after = (lambda results: import_fixes.link_created(session, results)) if session else None
             results = document_batch.write_all(documents, create_one, _("created"), after)
@@ -565,7 +566,7 @@ class DocumentCreate(BaseTool):
             return {"success": False, "error": str(e), "problems": e.problems}
         except frappe.DoesNotExistError as e:
             if session is None and document_batch.given(session_name):
-                return {"success": False, "error": f"Import session '{session_name}' not found."}
+                return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
             return {"success": False, "error": exception_message(e)}
         except frappe.PermissionError as e:
             if session is None and document_batch.given(session_name):

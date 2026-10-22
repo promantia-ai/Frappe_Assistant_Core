@@ -25,7 +25,8 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core.import_mapping import (
+from frappe_assistant_core.utils import import_update
+from frappe_assistant_core.utils.import_mapping import (
     DONT_IMPORT,
     SESSION_DOCTYPE,
     build_import_schema,
@@ -37,7 +38,7 @@ from frappe_assistant_core.plugins.core.import_mapping import (
     session_headers,
     session_mapping,
 )
-from frappe_assistant_core.plugins.core.import_session import import_target_problem
+from frappe_assistant_core.utils.import_session import import_target_problem
 
 
 class SetColumnMapping(BaseTool):
@@ -59,9 +60,21 @@ class SetColumnMapping(BaseTool):
             "the target (that clears the old mapping). The result is the full mapping to show the "
             "user: parent fields and each child table apart, with unmapped columns and required "
             "fields that have no column. Next, once the user agrees the mapping: dry_run_import to "
-            "check every row."
+            "check every row. For a session in a migration plan, don't ask the user here: map what "
+            "you are sure of, and plan_questions asks the rest with the plan's other questions."
         )
         self.requires_permission = None  # Checked on the session and the target DocType
+        # what the user's file says reaches the model fenced (#34003)
+        self.untrusted_fields = (
+            "mapping",
+            "child_tables",
+            "not_imported",
+            "unmapped_columns",
+            "summary",
+            "problems",
+            "columns",
+            "error",
+        )
 
         self.inputSchema = {
             "type": "object",
@@ -79,6 +92,18 @@ class SetColumnMapping(BaseTool):
                     "type": "string",
                     "description": "The target DocType. Needed the first time; changing it clears the mapping.",
                 },
+                "import_type": {
+                    "type": "string",
+                    "enum": ["Insert New Records", "Update Existing Records"],
+                    "description": "Change the session's import type. Default: keep it.",
+                },
+                "match_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For Update Existing Records: the field(s) that find each row's "
+                    "record, e.g. ['tax_id'] or ['item_code', 'price_list']. Each must be mapped from "
+                    "a column. Not needed when a column is mapped to the ID ('name').",
+                },
             },
             "required": ["session", "mapping"],
         }
@@ -88,46 +113,66 @@ class SetColumnMapping(BaseTool):
         mapping = arguments.get("mapping")
         try:
             if not isinstance(mapping, dict) or not mapping:
-                return {"success": False, "error": "mapping must be an object of column → field."}
+                return {"success": False, "error": _("mapping must be an object of column → field.")}
 
             try:
                 doc = load_session(session_name)
             except frappe.DoesNotExistError:
-                return {"success": False, "error": f"Import session '{session_name}' not found."}
+                return {"success": False, "error": _("Import session '{0}' not found.").format(session_name)}
             except frappe.PermissionError as e:
                 return permission_error_result(SESSION_DOCTYPE, exception_message(e), name=session_name)
+
+            # Mapping sets the session back to Mapped, for a check of the rows not imported yet: never
+            # while its import runs (a second import would take rows the first hasn't reached yet),
+            # nor once it was cancelled or undone.
+            refused = _mapping_refused(doc.status) or _check_running(doc)
+            if refused:
+                return {"success": False, "error": refused, "session": session_name}
 
             current_target = doc.target_doctype or None
             target = arguments.get("doctype") or current_target
             if not target:
                 return {
                     "success": False,
-                    "error": "This session has no target DocType yet. Pass doctype, e.g. 'Customer'.",
+                    "error": _("This session has no target DocType yet. Pass doctype, e.g. 'Customer'."),
                 }
 
+            import_type = arguments.get("import_type") or doc.import_type or "Insert New Records"
+            refused = _imported_as(doc, target, import_type)
+            if refused:
+                return {"success": False, "error": refused, "session": session_name}
             # Before any work: the user must be able to import into the target.
-            problem = import_target_problem(target)
+            problem = import_target_problem(target, import_type)
             if problem:
                 return {"success": False, "error": problem, "doctype": target}
 
             headers = session_headers(doc)
             if not headers:
-                return {"success": False, "error": "The session has no column headers for its sheet."}
+                return {"success": False, "error": _("The session has no column headers for its sheet.")}
 
             schema = build_import_schema(target)
             existing = session_mapping(doc) if target == current_target else {}
             resolved, problems = resolve_mapping(target, schema, headers, mapping)
             merged = {**existing, **resolved}
             problems += duplicate_targets(merged, headers)
+            match_key = ""
+            if import_type == import_update.UPDATE:
+                match_on, update_problems = import_update.mapping_problems(
+                    target, merged, headers, arguments.get("match_on") or []
+                )
+                problems += update_problems
+                match_key = ",".join(match_on)
             if problems:
                 return {
                     "success": False,
-                    "error": "The mapping was not saved. Fix these and call again.",
+                    "error": _("The mapping was not saved. Fix these and call again."),
                     "problems": problems,
                     "columns": headers,
                 }
 
-            described = describe_mapping(schema, headers, merged)
+            described = describe_mapping(schema, headers, merged, update=import_type == import_update.UPDATE)
+            doc.import_type = import_type
+            doc.match_key = match_key
             save_mapping(doc, target, merged, described["summary"])
             return {
                 "success": True,
@@ -146,3 +191,43 @@ class SetColumnMapping(BaseTool):
 
 # Make sure class name matches file name for discovery
 set_column_mapping = SetColumnMapping
+
+
+def _imported_as(doc, target: str, import_type: str):
+    """Rows a Data Import of the session brought in are known as imported by their row
+    numbers, whatever the DocType: another target or import type would skip them for good."""
+    current = doc.import_type or "Insert New Records"
+    if not doc.data_imports or (target, import_type) == (doc.target_doctype, current):
+        return None
+    return _(
+        "This session already imported rows as {0} ({1}), so it stays {0}. To import the file as "
+        "{2} ({3}), start a new import session."
+    ).format(_(doc.target_doctype), _(current), _(target), _(import_type))
+
+
+def _check_running(doc):
+    """A background check stores its result when it ends: a remap now would be stamped as checked."""
+    from frappe_assistant_core.utils import import_dry_run as dry_run
+
+    return dry_run.check_running() if dry_run.is_running(doc) else None
+
+
+def _mapping_refused(status: str):
+    """Why a session with ``status`` can't be remapped, or None."""
+    from frappe_assistant_core.utils.import_dry_run import RUNNABLE_STATUSES
+
+    if status in ("File Read", *RUNNABLE_STATUSES):
+        return None
+    if status == "Importing":
+        return _(
+            "This session's import is still running. Wait for it to finish, or continue it with "
+            "start_import, before changing the mapping."
+        )
+    if status in ("Undoing", "Undone"):
+        being = _("is being undone") if status == "Undoing" else _("was undone")
+        return _("This import session is {0}: the import {1}. Start a new import session.").format(
+            status, being
+        )
+    return _("This import session is {0}, so its mapping can't change. Start a new import session.").format(
+        status
+    )

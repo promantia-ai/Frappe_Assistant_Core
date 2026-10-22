@@ -17,14 +17,15 @@ Group", raised when the group is left empty and the default group is a group).
 """
 
 import json
+import threading
 import unittest
 from unittest.mock import patch
 
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run
 
 GROUP = "FAC Dry Run Group"
 MAPPING = {
@@ -117,6 +118,43 @@ class TestDryRunImport(BaseAssistantTest):
     def _group(result, cause):
         return next(g for g in result["groups"] if g["cause"] == cause)
 
+    # -- what a check must not leave behind -------------------------------------------
+
+    def test_a_check_adds_nothing_to_global_search(self):
+        # Saving a Customer queues its search entry in Redis, which no rollback undoes.
+        session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])
+        setting = frappe.local.conf.get("disable_global_search")
+
+        with patch("frappe.utils.global_search.sync_value_in_queue", autospec=True) as queued:
+            result = self._check(session)
+
+        self.assertEqual(result["ready"], 1, result)
+        # The check's own results file is kept, so its entry is right; the rows' are not.
+        queued_doctypes = [call.args[0]["doctype"] for call in queued.call_args_list]
+        self.assertNotIn("Customer", queued_doctypes)
+        self.assertEqual(frappe.local.conf.get("disable_global_search"), setting)
+
+    def test_the_rollback_work_a_row_registers_runs_after_its_rollback(self):
+        # A row's save registers work for a rollback, e.g. File.handle_is_private_changed moving
+        # the file back; a rollback to a savepoint doesn't run it, so the check must.
+        ran = []
+        frappe.db.after_rollback.add(lambda: ran.append("before the check"))
+        before = list(frappe.db.after_rollback._functions)
+
+        with import_dry_run.held_back():
+            frappe.db.savepoint("fac_test_held_back")
+            frappe.db.after_rollback.add(lambda: ran.append("the row's"))
+            frappe.db.rollback(save_point="fac_test_held_back")
+
+        self.assertEqual(ran, ["the row's"])
+        self.assertEqual(list(frappe.db.after_rollback._functions), before)
+        frappe.db.after_rollback._functions.clear()
+
+    def test_doctypes_whose_save_reaches_past_the_database_are_not_checked(self):
+        # A File's save can move it on disk; a Website Theme's deletes and writes its CSS files.
+        for doctype in ("File", "Website Theme"):
+            self.assertTrue(import_dry_run.unsafe_reason(doctype), doctype)
+
     # -- registration ------------------------------------------------------------------
 
     def test_tool_is_registered_and_raises_no_approval_card(self):
@@ -180,6 +218,17 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(([e["row"] for e in in_file["examples"]], in_file["field"]), ([6], "customer_name"))
         existing = self._group(result, "Already in ERPNext")
         self.assertEqual([e["row"] for e in existing["examples"]], [7])
+
+    def test_a_duplicate_is_found_beside_its_first_rows_other_problem(self):
+        # The first row's own problem (a Customer Type typo) must not hide the duplicate below it:
+        # found only after the typo is fixed, it would be a second round of questions.
+        t = self.tag
+        session = self._session([[f"Ravi {t}", GROUP, "Compnay", ""], [f"Ravi {t}", GROUP, "Company", ""]])
+
+        result = self._check(session)
+
+        in_file = self._group(result, "Duplicate in the file")
+        self.assertEqual([e["row"] for e in in_file["examples"]], [3])
 
     # -- the session holds the result ----------------------------------------------------------
 
@@ -255,6 +304,37 @@ class TestDryRunImport(BaseAssistantTest):
 
         self.assertEqual((result["ready"], result["failed"], result["excluded"]), (1, 4, 2))
 
+    # -- references between rows of the same file ---------------------------------------------
+
+    def test_a_tree_row_whose_parent_is_an_earlier_row_of_the_file_is_ready(self):
+        # The import inserts row 2 before row 3, so row 3's parent exists by then. The check
+        # rolls each row back, and must not report the parent as missing.
+        parent, child = f"Parent {self.tag}", f"Child {self.tag}"
+        content = (
+            "Item Group Name,Parent Item Group,Is Group\n"
+            f"{parent},All Item Groups,1\n"  # row 2
+            f"{child},{parent},0\n"  # row 3: its parent is row 2
+        ).encode()
+        file_doc = frappe.get_doc(
+            {"doctype": "File", "file_name": "item_groups.csv", "content": content, "is_private": 1}
+        ).insert()
+        started = self._run("start_import_session", {"file_url": file_doc.file_url})
+        self.assertTrue(started["success"], started)
+        session = started["result"]["session_id"]
+        mapping = {
+            "Item Group Name": "item_group_name",
+            "Parent Item Group": "parent_item_group",
+            "Is Group": "is_group",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Item Group"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result.get("groups"))
+
     # -- criterion 4: large files run in the background -------------------------------------------
 
     def test_a_large_file_is_checked_in_the_background(self):
@@ -268,9 +348,7 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(again["state"], "running")
         enqueue.assert_called_once()
         self.assertEqual(enqueue.call_args.kwargs["session_name"], session)
-        self.assertEqual(
-            enqueue.call_args.args[0], "frappe_assistant_core.plugins.core.import_dry_run.run_job"
-        )
+        self.assertEqual(enqueue.call_args.args[0], "frappe_assistant_core.utils.import_dry_run.run_job")
         progress = json.loads(frappe.db.get_value("FAC Import Session", session, "progress"))
         self.assertEqual((progress["state"], progress["total"]), ("queued", 7))
 
@@ -282,6 +360,33 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(json.loads(doc.validation_summary)["failed"], 6)
 
     # -- side effects are held back ------------------------------------------------------------------
+
+    def test_a_server_scripts_job_is_held_back(self):
+        # A Server Script's frappe.enqueue is safe_exec's own copy of enqueue
+        from frappe.utils import safe_exec
+
+        with patch.object(safe_exec, "enqueue", autospec=True) as real_enqueue:
+            with import_dry_run.held_back():
+                safe_exec.safe_enqueue("frappe.ping")
+            real_enqueue.assert_not_called()
+
+    def test_the_google_calendar_sync_of_a_row_is_held_back(self):
+        # Frappe's doc events call Google at once when an Event is saved, not at commit
+        from frappe.integrations.doctype.google_calendar import google_calendar
+
+        with patch.object(google_calendar, "insert_event_in_google_calendar", autospec=True) as sync:
+            with import_dry_run.held_back():
+                frappe.db.savepoint("fac_test_google")
+                frappe.get_doc(
+                    {
+                        "doctype": "Event",
+                        "subject": "Held back",
+                        "event_type": "Private",
+                        "starts_on": frappe.utils.now_datetime(),
+                    }
+                ).insert()
+                frappe.db.rollback(save_point="fac_test_google")
+            sync.assert_not_called()
 
     def test_held_back_swallows_commits_jobs_and_events_then_restores_them(self):
         frappe.db.after_commit.add(print)
@@ -295,13 +400,16 @@ class TestDryRunImport(BaseAssistantTest):
                 self.assertTrue(frappe.flags.mute_emails and frappe.flags.in_import)
                 frappe.enqueue("frappe.ping")
                 frappe.utils.background_jobs.enqueue("frappe.ping")
+                # nosemgrep: frappe-realtime-pick-room — mocked: the test checks it is held back
                 frappe.publish_realtime("x")
+                # nosemgrep: frappe-manual-commit — mocked: the test checks it is held back
                 frappe.db.commit()
                 frappe.db.after_commit.add(len)  # a row's callback must not outlive the row
 
             for real in (real_commit, real_enqueue, real_bg_enqueue, real_publish):
                 real.assert_not_called()
             # Restored afterwards.
+            # nosemgrep: frappe-manual-commit — mocked: the test checks it goes out again
             frappe.db.commit()
             frappe.enqueue("frappe.ping")
             real_commit.assert_called_once()
@@ -310,6 +418,32 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(list(frappe.db.after_commit._functions)[-1], print)
         frappe.db.after_commit._functions.pop()
         self.assertFalse(frappe.flags.in_import)
+
+    def test_held_back_holds_back_only_its_own_request(self):
+        # A web worker with threads (frappe_docker runs gunicorn --threads=4) serves other
+        # requests while a small file is checked inline: their jobs and events still go out.
+        with (
+            patch("frappe.enqueue") as real_enqueue,
+            patch("frappe.utils.background_jobs.enqueue") as real_bg_enqueue,
+            patch("frappe.publish_realtime") as real_publish,
+            patch("frappe.realtime.publish_realtime") as real_realtime_publish,
+        ):
+            with import_dry_run.held_back():
+                other_request = threading.Thread(
+                    target=lambda: (
+                        frappe.enqueue("frappe.ping"),
+                        frappe.utils.background_jobs.enqueue("frappe.ping"),
+                        # nosemgrep: frappe-realtime-pick-room — mocked: another request's event
+                        frappe.publish_realtime("x"),
+                        frappe.realtime.publish_realtime("x"),
+                    )
+                )
+                other_request.start()
+                other_request.join()
+                frappe.enqueue("frappe.ping")  # this request's own: held back
+
+            for real in (real_enqueue, real_bg_enqueue, real_publish, real_realtime_publish):
+                real.assert_called_once()
 
     # -- when it can't run ---------------------------------------------------------------------------
 
@@ -334,7 +468,7 @@ class TestDryRunImport(BaseAssistantTest):
         session = started["result"]["session_id"]
         self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
 
-        self._check_fails(session, "Attach it in FAC Chat")
+        self._check_fails(session, "Upload it in File Manager")
 
         file_doc = frappe.get_doc(
             {
@@ -360,6 +494,58 @@ class TestDryRunImport(BaseAssistantTest):
         ).insert()
 
         self._check_fails(session, "columns don't match", file_url=other.file_url)
+
+        self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
+
+    def _chat_session(self):
+        """A mapped session whose file stayed in the chat."""
+        started = self._run(
+            "start_import_session", {"file_name": "customers.csv", "columns": list(MAPPING), "row_count": 1}
+        )
+        session = started["result"]["session_id"]
+        self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+        return session
+
+    def _upload(self, rows):
+        return frappe.get_doc(
+            {"doctype": "File", "file_name": "customers.csv", "content": self._csv(rows), "is_private": 1}
+        ).insert()
+
+    def test_the_file_uploaded_in_file_manager_is_given_by_its_id(self):
+        session = self._chat_session()
+        file_doc = self._upload([[f"Manager {self.tag}", GROUP, "Company", ""]])
+
+        result = self._check(session, file_id=file_doc.name)
+
+        self.assertEqual(result["ready"], 1)
+        self.assertEqual(frappe.db.get_value("FAC Import Session", session, "source_file"), file_doc.name)
+
+    def test_a_file_the_user_cannot_read_is_not_linked_by_its_id(self):
+        user = self.make_throwaway_user("clerk", roles=("Sales Master Manager", "Desk User"))
+        theirs = self._upload([["CEO pay", GROUP, "Company", ""]])  # Administrator's, private
+        frappe.set_user(user)
+        session = self._chat_session()
+
+        response = self._check_fails(session, "don't have access", file_id=theirs.name)
+
+        self.assertNotIn("CEO pay", frappe.as_json(response))
+        self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
+
+    def test_an_unknown_file_id_reads_the_same_as_one_the_user_cannot_read(self):
+        session = self._chat_session()
+
+        unknown = self._check_fails(session, "don't have access", file_id="no-such-file")
+        folder = self._check_fails(session, "don't have access", file_id="Home")
+
+        self.assertEqual(unknown["error"], folder["error"])
+
+    def test_file_id_and_file_url_of_different_files_are_refused(self):
+        # Both of the same file are taken (test_import_session); two different files are not.
+        session = self._chat_session()
+        file_doc = self._upload([[f"Both {self.tag}", GROUP, "Company", ""]])
+        other = self._upload([[f"Other {self.tag}", GROUP, "Company", ""]])
+
+        self._check_fails(session, "different files", file_id=file_doc.name, file_url=other.file_url)
 
         self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
 

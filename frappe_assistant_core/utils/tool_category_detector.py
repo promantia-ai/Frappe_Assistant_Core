@@ -48,6 +48,8 @@ PRIVILEGED_TOOLS = {
     "run_database_query",
     "delete_document",
     "document_action",  # can cancel, which reverses accounting and stock entries
+    "undo_import",  # cancels and deletes the records an import created, ledger entries with them
+    "run_migration_plan",  # creates masters and imports every file of a plan, submitting opening entries
 }
 
 # Tools that are always categorized as read_only (hardcoded list)
@@ -90,13 +92,21 @@ READ_ONLY_TOOLS = {
     "browser_capture_diagnostics",  # Reads console/network buffers + captures the page
     "browser_wait_for_page",  # Waits for load; no-op on data
     "browser_navigate_to",  # Changes the viewed page only, not data
+    # Writes only cleaned copies of the user's file and import sessions, never business data.
+    "apply_import_preset",
     # Writes only the import session, never business data.
     # As a write tool it would put an approval card on starting every import.
     "start_import_session",
     # Writes only the session's mapping; as a write tool every correction would raise a card.
     "set_column_mapping",
+    # Writes only the session's settings and mapping, as set_column_mapping does.
+    "set_opening_stock",
+    "set_opening_invoices",
+    "set_opening_balances",
     # Every row it inserts is rolled back; it writes only the session and its result file.
     "dry_run_import",
+    # Deletes nothing: lists what an undo would remove; it writes only its figures on the session.
+    "preview_import_undo",
 }
 
 # Tools that are always categorized as write (hardcoded list)
@@ -104,6 +114,12 @@ WRITE_TOOLS = {
     # Document tools
     "create_document",
     "start_import",  # imports the checked file through Data Import
+    "plan_migration",  # makes a migration plan and links import sessions to it
+    "plan_questions",  # applies the user's fixes and answers to a plan's sessions
+    "stop_migration_plan",  # stops a running plan after its current file
+    "import_opening_stock",  # creates and submits Stock Reconciliations
+    "import_opening_invoices",  # creates and submits opening invoices
+    "import_opening_balances",  # creates and submits the opening Journal Entry
     "update_document",
     # Document generation (saves a private Frappe File — a create side effect)
     "generate_document",  # Markdown -> PDF saved as a File record; NOT read-only
