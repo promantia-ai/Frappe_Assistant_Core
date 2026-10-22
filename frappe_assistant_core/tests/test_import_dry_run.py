@@ -13,15 +13,20 @@ nothing written, failures grouped by cause.
 Customer is the target because it carries every kind of failure the story names: a Link
 (Customer Group), a Select (Customer Type), a required, naming field (Customer Name) and a
 controller rule the import preview never runs ("Cannot select a Group type Customer
-Group", raised when the group is left empty and the default group is a group).
+Group", raised for a group node such as All Customer Groups). The row names that group itself:
+left empty, it took Selling Settings' default group, which a site may not have (fac16 doesn't).
 """
 
+GROUP_NODE = "All Customer Groups"  # a group: a Customer can't be in it
+
+import hashlib
 import json
 import threading
 import unittest
 from unittest.mock import patch
 
 import frappe
+from frappe.core.doctype.data_import.importer import INSERT, Importer
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
@@ -108,7 +113,7 @@ class TestDryRunImport(BaseAssistantTest):
             [f"Alpha {t}", GROUP, "Company", "fine"],  # row 2: ready
             [f"Beta {t}", self.typo, "Company", ""],  # row 3: missing link
             [f"Gamma {t}", self.typo, "Company", ""],  # row 4: missing link, same group
-            [f"Delta {t}", "", "Company", ""],  # row 5: controller rule
+            [f"Delta {t}", GROUP_NODE, "Company", ""],  # row 5: controller rule
             [f"Alpha {t}", GROUP, "Company", ""],  # row 6: duplicate of row 2
             [self.existing, GROUP, "Company", ""],  # row 7: already in ERPNext
             [f"Eps {t}", GROUP, "Robot", ""],  # row 8: not an allowed option
@@ -117,6 +122,12 @@ class TestDryRunImport(BaseAssistantTest):
     @staticmethod
     def _group(result, cause):
         return next(g for g in result["groups"] if g["cause"] == cause)
+
+    @staticmethod
+    def _stored(session):
+        """The check's full result, as the session keeps it: every group with all its rows."""
+        url = frappe.db.get_value("FAC Import Session", session, "validation_results")
+        return json.loads(frappe.get_doc("File", {"file_url": url}).get_content())
 
     # -- what a check must not leave behind -------------------------------------------
 
@@ -334,6 +345,273 @@ class TestDryRunImport(BaseAssistantTest):
         result = self._check(session)
 
         self.assertEqual((result["ready"], result["failed"]), (2, 0), result.get("groups"))
+
+    def _account_session(self, rows):
+        """A session of an Account file (name, parent, company, is group), mapped."""
+        lines = ["Account Name,Parent Account,Company,Is Group", *(",".join(row) for row in rows)]
+        content = "\n".join(lines) + "\n"
+        file_doc = frappe.get_doc(
+            {"doctype": "File", "file_name": "accounts.csv", "content": content.encode(), "is_private": 1}
+        ).insert()
+        session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
+        mapping = {
+            "Account Name": "account_name",
+            "Parent Account": "parent_account",
+            "Company": "company",
+            "Is Group": "is_group",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Account"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        return session
+
+    def _company_and_root(self):
+        company = frappe.get_all("Company", pluck="name", order_by="creation", limit=1)[0]
+        root = frappe.db.get_value(
+            "Account", {"company": company, "root_type": "Asset", "is_group": 1}, order_by="lft"
+        )
+        return company, root
+
+    # Frappe 16's Data Import takes a tree's parent by its title (an Account's name without the
+    # company's abbreviation); Frappe 15's refuses it as a missing link. The check says what each does.
+    RESOLVES_TITLES = hasattr(Importer, "_resolve_tree_parent_link")
+
+    def test_an_account_naming_its_parent_by_account_name_from_an_earlier_row_is_ready(self):
+        t = self.tag
+        company, root = self._company_and_root()
+        session = self._account_session(
+            [
+                [f"Group {t}", root, company, "1"],  # row 2
+                [f"Leaf {t}", f"Group {t}", company, "0"],  # row 3: row 2 by its account name
+                [f"Orphan {t}", f"No Such {t}", company, "1"],  # row 4: its parent doesn't exist
+                [f"Under Orphan {t}", f"Orphan {t}", company, "0"],  # row 5: its parent row fails
+            ]
+        )
+
+        self._check(session)
+
+        stored = self._stored(session)
+        rows = {r["row"]: r for r in stored["rows"]}
+        leaf = "ready" if self.RESOLVES_TITLES else "failed"
+        self.assertEqual(
+            {n: r["status"] for n, r in rows.items()},
+            {2: "ready", 3: leaf, 4: "failed", 5: "failed"},
+            stored["groups"],
+        )
+        missing = {g["value"] for g in stored["groups"] if g["cause"] == "Missing link"}
+        if self.RESOLVES_TITLES:
+            self.assertEqual(rows[3]["after"], [2])  # imported once row 2 is
+            self.assertEqual(missing, {f"No Such {t}", f"Orphan {t}"})
+        else:
+            self.assertEqual(missing, {f"No Such {t}", f"Orphan {t}", f"Group {t}"})
+        self.assertFalse(frappe.db.exists("Account", {"account_name": f"Group {t}"}))
+
+    def test_an_account_naming_an_existing_parent_by_account_name_is_ready(self):
+        t = self.tag
+        company, root = self._company_and_root()
+        frappe.get_doc(
+            {
+                "doctype": "Account",
+                "account_name": f"Existing Group {t}",
+                "parent_account": root,
+                "company": company,
+                "is_group": 1,
+            }
+        ).insert()
+        session = self._account_session([[f"Leaf {t}", f"Existing Group {t}", company, "0"]])
+
+        result = self._check(session)
+
+        if self.RESOLVES_TITLES:
+            self.assertEqual((result["ready"], result["failed"]), (1, 0), result["groups"])
+        else:
+            self.assertEqual(
+                [(g["cause"], g["value"]) for g in result["groups"]],
+                [("Missing link", f"Existing Group {t}")],
+            )
+
+    # -- #34395: rows go through Frappe's own importer, its warnings become groups ----------------
+
+    def test_each_row_is_tried_through_frappes_own_process_doc(self):
+        t = self.tag
+        session = self._session(
+            [
+                [f"Alpha {t}", GROUP, "Company", ""],  # row 2: tried, ready
+                [f"Beta {t}", GROUP, "Company", ""],  # row 3: tried, ready
+                [f"Delta {t}", GROUP_NODE, "Company", ""],  # row 4: tried, refused by the controller
+                [f"Gamma {t}", self.typo, "Company", ""],  # row 5: a missing link, never tried
+            ]
+        )
+        frappe.db.set_value("FAC Import Session", session, "submit_after_import", 1)
+
+        real = Importer.process_doc
+        with patch.object(Importer, "process_doc", autospec=True, side_effect=real) as tried:
+            result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 2), result["groups"])
+        self.assertEqual(tried.call_count, 3)
+        names = [call.args[1].get("customer_name") for call in tried.call_args_list]
+        self.assertEqual(names, [f"Alpha {t}", f"Beta {t}", f"Delta {t}"])
+        importer = tried.call_args.args[0]
+        self.assertIsInstance(importer, Importer)
+        self.assertEqual(importer.data_import.doctype, "Data Import")
+        self.assertTrue(importer.data_import.is_new())  # never saved
+        data_import = importer.data_import
+        self.assertEqual((data_import.import_type, data_import.submit_after_import), (INSERT, 1))
+
+    def test_a_bad_link_value_is_its_own_group_with_every_row(self):
+        # Frappe 16 reports a bad link once for its column, listing six rows; each value is still
+        # a group of its own, with all its rows.
+        t, other = self.tag, f"Whole {self.tag}"
+        rows = [[f"Clean {t}", GROUP, "Company", ""]]  # row 2
+        rows += [[f"A{i} {t}", self.typo, "Company", ""] for i in range(7)]  # rows 3-9
+        rows += [[f"B{i} {t}", other, "Company", ""] for i in range(2)]  # rows 10-11
+        session = self._session(rows)
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (1, 9))
+        groups = sorted(self._stored(session)["groups"], key=lambda g: -g["count"])
+        self.assertEqual(
+            [(g["cause"], g["parent"], g["field"], g["value"], g["count"], g["rows"]) for g in groups],
+            [
+                ("Missing link", "Customer", "customer_group", self.typo, 7, list(range(3, 10))),
+                ("Missing link", "Customer", "customer_group", other, 2, [10, 11]),
+            ],
+        )
+        for group, value in zip(groups, (self.typo, other)):
+            self.assertEqual(group["message"], f"Customer Group '{value}' doesn't exist.")
+            key = json.dumps(["Missing link", "Customer", "customer_group", value])
+            self.assertEqual(group["id"], "G" + hashlib.sha256(key.encode()).hexdigest()[:6])
+
+    def test_a_bad_select_value_is_its_own_group_with_every_row(self):
+        t = self.tag
+        session = self._session(
+            [
+                [f"Alpha {t}", GROUP, "Company", ""],  # row 2
+                [f"Beta {t}", GROUP, "Pvt Ltd", ""],  # row 3
+                [f"Gamma {t}", GROUP, "Company", ""],  # row 4
+                [f"Delta {t}", GROUP, "Pvt Ltd", ""],  # row 5
+            ]
+        )
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 2))
+        groups = self._stored(session)["groups"]
+        self.assertEqual(
+            [(g["cause"], g["field"], g["value"], g["message"], g["rows"]) for g in groups],
+            [
+                (
+                    "Not an allowed option",
+                    "customer_type",
+                    "Pvt Ltd",
+                    "'Pvt Ltd' isn't one of the options for Customer Type.",
+                    [3, 5],
+                )
+            ],
+        )
+
+    def test_a_bad_value_only_on_rows_left_out_makes_no_group(self):
+        t = self.tag
+        session = self._session(
+            [
+                [f"Alpha {t}", GROUP, "Company", ""],  # row 2
+                [f"Beta {t}", self.typo, "Company", ""],  # row 3: left out
+                [f"Gamma {t}", GROUP, "Robot", ""],  # row 4: left out
+            ]
+        )
+        frappe.db.set_value("FAC Import Session", session, "excluded_rows", json.dumps([3, 4]))
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"], result["excluded"]), (1, 0, 2))
+        self.assertEqual((result["groups"], result["status"]), ([], "Ready to Import"))
+
+    def _provider(self):
+        """The class of Customer's import provider (Frappe 16: ERPNext's PartyImportProvider)."""
+        try:
+            from frappe.core.doctype.data_import.import_provider import get_import_provider
+        except ImportError:
+            self.skipTest("this Frappe has no import providers (data_import_providers came with Frappe 16)")
+        provider = get_import_provider("Customer")
+        if not provider:
+            self.skipTest("no import provider is registered for Customer on this site")
+        return type(provider)
+
+    def test_a_registered_import_provider_imports_the_row(self):
+        provider = self._provider()
+        t = self.tag
+        session = self._session([[f"Alpha {t}", GROUP, "Company", ""], [f"Beta {t}", GROUP, "Company", ""]])
+
+        real = provider.import_row
+        with patch.object(provider, "import_row", autospec=True, side_effect=real) as imported:
+            result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result["groups"])
+        self.assertEqual(imported.call_count, 2)
+
+        # The provider's error is ERPNext refusing the row.
+        refused = frappe.ValidationError("The provider refused it")
+        with patch.object(provider, "import_row", autospec=True, side_effect=refused):
+            result = self._check(session)
+
+        rejected = self._group(result, "Rejected by ERPNext")
+        self.assertEqual((rejected["count"], rejected["message"]), (2, "The provider refused it"))
+
+    def test_an_import_providers_warning_is_a_group(self):
+        provider = self._provider()
+        t = self.tag
+        session = self._session(
+            [[f"{n} {t}", GROUP, "Company", ""] for n in ("Alpha", "Beta", "Gamma")]  # rows 2-4
+        )
+        warnings = [
+            {"row": 3, "message": "Beta's <b>PAN</b> is missing"},
+            {"row": 4, "message": "Just so you know", "type": "info"},
+        ]
+
+        with patch.object(provider, "validate", autospec=True, return_value=warnings):
+            result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 1))
+        self.assertEqual(
+            [(g["cause"], g["message"], g["rows"]) for g in self._stored(session)["groups"]],
+            [("Invalid value", "Beta's PAN is missing", [3])],
+        )
+
+    def test_a_check_saves_no_data_import_or_log(self):
+        t = self.tag
+        session = self._session([[f"Alpha {t}", GROUP, "Company", ""], [f"Beta {t}", GROUP, "Company", ""]])
+        doctypes = (
+            "Customer",
+            "Contact",
+            "Address",
+            "Email Queue",
+            "Version",
+            "Data Import",
+            "Data Import Log",
+        )
+        before = {dt: frappe.db.count(dt) for dt in doctypes}
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 0), result["groups"])
+        self.assertEqual({dt: frappe.db.count(dt) for dt in doctypes}, before)
+
+    def test_a_check_leaves_the_import_flags_as_they_were(self):
+        # Data Import's own setup sets them, and its end sets them to False: neither is the caller's.
+        session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])
+        saved = {name: frappe.flags.get(name) for name in ("in_import", "mute_emails")}
+        frappe.flags.in_import = frappe.flags.mute_emails = None
+        try:
+            result = self._check(session)
+            flags = (frappe.flags.in_import, frappe.flags.mute_emails)
+        finally:
+            frappe.flags.update(saved)
+
+        self.assertEqual(result["ready"], 1, result["groups"])
+        self.assertEqual(flags, (None, None))
 
     # -- criterion 4: large files run in the background -------------------------------------------
 
