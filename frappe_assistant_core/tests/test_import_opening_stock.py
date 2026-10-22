@@ -10,7 +10,7 @@ import frappe
 from frappe.utils import nowdate
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.tests.base_test import BaseAssistantTest, item_hsn_fields
 from frappe_assistant_core.utils import import_opening_stock as opening_stock
 
 HEADER = "Item,Warehouse,Qty,Rate"
@@ -89,6 +89,7 @@ class OpeningStockCase(BaseAssistantTest):
             "item_group": frappe.db.get_value("Item Group", {"is_group": 0}) or "All Item Groups",
             "stock_uom": "Nos",
             "is_stock_item": 1,
+            **item_hsn_fields(),
             **flags,
         }
         return frappe.get_doc(doc).insert().name

@@ -35,6 +35,28 @@ try:
 except ImportError:  # Frappe v15
     from frappe.tests.utils import FrappeTestCase as IntegrationTestCase
 
+# The one role of the "someone else" a test acts as: desk access and no permission rules, which
+# is what a role an administrator has just added looks like. Every right its user has then comes
+# from the rules Frappe gives every desk user (All, Desk User). No role Frappe ships does this on
+# every version (v16 dropped the blog roles the tests used), so the role is made here when missing.
+NO_RIGHTS_ROLE = "FAC Test No Rights"
+
+
+def item_hsn_fields() -> dict:
+    """The HSN code a test Item needs on this site: ``{"gst_hsn_code": ...}`` or ``{}``.
+
+    India Compliance adds ``gst_hsn_code`` to Item and refuses a sales Item without a GST HSN
+    Code, so an Item fixture can't be saved there without one. An eight-digit code is valid at
+    every "minimum HSN digits" setting. Without India Compliance there is no such field, and
+    nothing is set.
+    """
+    if not frappe.get_meta("Item").has_field("gst_hsn_code"):
+        return {}
+    codes = frappe.get_all(
+        "GST HSN Code", filters={"name": ("like", "_" * 8)}, pluck="name", order_by="name", limit=1
+    )
+    return {"gst_hsn_code": codes[0]} if codes else {}
+
 
 class BaseAssistantTest(IntegrationTestCase):
     """Base test class with common setup and utilities"""
@@ -284,6 +306,31 @@ class BaseAssistantTest(IntegrationTestCase):
             }
         ).insert(ignore_permissions=True)
         return email
+
+    def make_desk_user(self, prefix: str) -> str:
+        """A fresh desk (System) user whose only own role grants nothing: see ``NO_RIGHTS_ROLE``.
+
+        For tests that must act as an ordinary user without rights on the records they touch.
+        The user and the role are rolled back with the test transaction.
+        """
+        if not frappe.db.exists("Role", NO_RIGHTS_ROLE):
+            frappe.get_doc({"doctype": "Role", "role_name": NO_RIGHTS_ROLE, "desk_access": 1}).insert(
+                ignore_permissions=True
+            )
+        email = self.make_throwaway_user(prefix, roles=(NO_RIGHTS_ROLE,))
+        self.assertEqual(frappe.db.get_value("User", email, "user_type"), "System User")
+        return email
+
+    def assert_cannot(self, user: str, ptype: str, doctype: str, doc: str | None = None):
+        """``user`` lacks ``ptype`` on ``doctype`` (or on the record ``doc``), by Frappe's own rules.
+
+        A test that proves a refusal checks this first, so a role that quietly grants the right
+        makes it fail instead of passing for another reason (#34412).
+        """
+        self.assertFalse(
+            frappe.has_permission(doctype, ptype, doc=doc, user=user),
+            f"{user} may {ptype} {doc or doctype}",
+        )
 
     def create_test_document(self, doctype, data):
         """Create a test document"""

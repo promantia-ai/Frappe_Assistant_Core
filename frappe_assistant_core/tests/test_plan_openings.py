@@ -13,6 +13,7 @@ import unittest
 
 import frappe
 
+from frappe_assistant_core.tests.base_test import item_hsn_fields
 from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
 from frappe_assistant_core.tests.test_import_opening_stock import OpeningStockCase
 from frappe_assistant_core.tests.test_import_run import ImportRunCase
@@ -54,12 +55,20 @@ class PlanFiles:
 class StockPlanCase(PlanFiles, OpeningStockCase):
     def _items(self, *codes):
         group = frappe.db.get_value("Item Group", {"is_group": 0})
+        # with India Compliance an items file carries the HSN code every Item needs there
+        hsn = list(item_hsn_fields().values())
         return self._master_file(
             "items.csv",
-            ["Code", "Name", "Group", "UOM"],
-            [[code, code, group, "Nos"] for code in codes],
+            ["Code", "Name", "Group", "UOM"] + ["HSN"] * len(hsn),
+            [[code, code, group, "Nos", *hsn] for code in codes],
             "Item",
-            {"Code": "item_code", "Name": "item_name", "Group": "item_group", "UOM": "stock_uom"},
+            {
+                "Code": "item_code",
+                "Name": "item_name",
+                "Group": "item_group",
+                "UOM": "stock_uom",
+                **({"HSN": "gst_hsn_code"} if hsn else {}),
+            },
         )
 
     def _stock(self, lines):

@@ -99,7 +99,9 @@ class TestDocumentBatch(BaseAssistantTest):
         self.assertEqual(self._todos(), set())
 
     def test_a_record_the_user_may_not_create_stops_the_list_before_anything_is_written(self):
-        frappe.set_user(self.make_throwaway_user("writer", roles=("Blogger",)))
+        user = self.make_desk_user("writer")
+        self.assert_cannot(user, "create", "Role")
+        frappe.set_user(user)
 
         response = self._run(
             "create_document",
@@ -391,7 +393,8 @@ class TestDocumentBatch(BaseAssistantTest):
 
     def test_a_record_the_user_may_not_change_stops_the_update_list(self):
         (others,) = self._make_todos("Administrator's")
-        user = self.make_throwaway_user("updater", roles=("Blogger",))
+        user = self.make_desk_user("updater")
+        self.assert_cannot(user, "write", "Role", "System Manager")
         frappe.set_user(user)
         # A user may create a ToDo that names them.
         mine = (

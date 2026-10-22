@@ -39,7 +39,8 @@ class TestImportSession(BaseAssistantTest):
         super().setUp()
         self.registry = get_tool_registry()
         # A plain desk user: owns the files they upload, holds no import rights.
-        self.user = self.make_throwaway_user("importer", roles=("Blogger",))
+        self.user = self.make_desk_user("importer")
+        self.assert_cannot(self.user, "create", "Data Import")
         frappe.set_user(self.user)
         self.files_before = set(frappe.get_all("File", pluck="name"))
         self.sessions_before = frappe.db.count("FAC Import Session")
@@ -324,9 +325,10 @@ class TestImportSession(BaseAssistantTest):
     # -- file access -----------------------------------------------------------------------
 
     def test_another_users_private_file_cannot_be_read(self):
-        frappe.set_user(self.make_throwaway_user("other", roles=("Blogger",)))
+        frappe.set_user(self.make_desk_user("other"))
         theirs = self._upload("theirs.csv", CSV_CONTENT)
         frappe.set_user(self.user)
+        self.assert_cannot(self.user, "read", "File", theirs.name)
 
         response = self._start_fails(file_url=theirs.file_url)
 
@@ -344,9 +346,10 @@ class TestImportSession(BaseAssistantTest):
         )
 
     def test_another_users_private_file_cannot_be_read_by_its_id(self):
-        frappe.set_user(self.make_throwaway_user("other", roles=("Blogger",)))
+        frappe.set_user(self.make_desk_user("other"))
         theirs = self._upload("theirs.csv", CSV_CONTENT)
         frappe.set_user(self.user)
+        self.assert_cannot(self.user, "read", "File", theirs.name)
 
         response = self._start_fails("don't have access", file_id=theirs.name)
 
@@ -362,9 +365,10 @@ class TestImportSession(BaseAssistantTest):
 
     def test_a_file_shared_with_the_user_can_be_read_by_its_id(self):
         # Frappe's own rule decides who may read a file: here, a share.
-        frappe.set_user(self.make_throwaway_user("owner", roles=("Blogger",)))
+        frappe.set_user(self.make_desk_user("owner"))
         theirs = self._upload("shared.csv", CSV_CONTENT)
         frappe.set_user("Administrator")
+        self.assert_cannot(self.user, "read", "File", theirs.name)
         frappe.share.add("File", theirs.name, self.user, read=1)
         frappe.set_user(self.user)
 
@@ -425,9 +429,9 @@ class TestImportSession(BaseAssistantTest):
         file_doc = self._upload("customers.csv", CSV_CONTENT)
         session_id = self._start(file_url=file_doc.file_url)["session_id"]
 
-        other = self.make_throwaway_user("other", roles=("Blogger",))
+        other = self.make_desk_user("other")
 
-        self.assertFalse(frappe.has_permission("FAC Import Session", "read", session_id, user=other))
+        self.assert_cannot(other, "read", "FAC Import Session", session_id)
         frappe.set_user(other)
         self.assertNotIn(session_id, frappe.get_list("FAC Import Session", pluck="name"))
 

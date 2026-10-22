@@ -24,6 +24,7 @@ from frappe.utils import add_days, add_to_date, get_datetime, getdate, now_datet
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import (
     FACImportSession,
 )
+from frappe_assistant_core.tests.base_test import item_hsn_fields
 from frappe_assistant_core.tests.test_import_opening_balances import OpeningBalancesCase
 from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
 from frappe_assistant_core.tests.test_import_opening_stock import OpeningStockCase
@@ -439,6 +440,7 @@ class TestBlockers(BlockerCase):
                     "item_group": frappe.db.get_value("Item Group", {"is_group": 0}),
                     "stock_uom": frappe.db.get_value("UOM", {}) or "Nos",
                     "customer_items": [{"customer_name": alpha, "ref_code": f"R{self.tag}"}],
+                    **item_hsn_fields(),
                 }
             )
             .insert()
@@ -460,6 +462,7 @@ class TestBlockers(BlockerCase):
                     "item_group": frappe.db.get_value("Item Group", {"is_group": 0}),
                     "stock_uom": frappe.db.get_value("UOM", {}) or "Nos",
                     "standard_rate": 100,
+                    **item_hsn_fields(),
                 }
             )
             .insert()

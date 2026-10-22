@@ -484,7 +484,9 @@ class TestImportFixes(BaseAssistantTest):
         self.assertNotEqual(frappe.db.get_value("File", doc.source_file, "file_url"), other.file_url)
 
     def test_closest_names_are_empty_for_a_doctype_the_user_cannot_read(self):
-        frappe.set_user(self.make_throwaway_user("noread", roles=("Blogger",)))
+        user = self.make_desk_user("noread")
+        self.assert_cannot(user, "read", "Customer Group")
+        frappe.set_user(user)
 
         self.assertEqual(import_fixes.closest_names("Customer Group", self.missing), [])
 
@@ -559,7 +561,9 @@ class TestImportFixes(BaseAssistantTest):
 
     def test_another_users_session_is_refused(self):
         session, result = self._session()
-        frappe.set_user(self.make_throwaway_user("other", roles=("Blogger",)))
+        other = self.make_desk_user("other")
+        self.assert_cannot(other, "write", "FAC Import Session", session)
+        frappe.set_user(other)
 
         response = self._run(
             "dry_run_import", {"session": session, "fixes": [{"group": "G1", "action": "leave_out"}]}

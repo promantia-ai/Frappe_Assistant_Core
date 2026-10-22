@@ -9,6 +9,7 @@ import frappe
 from frappe.core.doctype.file.file import File
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
+from frappe_assistant_core.tests.test_apply_import_preset import assert_gstin_and_email_follow_the_site
 from frappe_assistant_core.tests.test_import_tally_xml import (
     GSTIN_NEW,
     VOUCHER,
@@ -142,8 +143,7 @@ class TestImport(TallyXmlToolCase):
         customers = by_target["Customers"]
         mapped = {row["column"]: row["field"] for row in customers["mapping"]["mapping"]}
         self.assertEqual(mapped["Name"], "customer_name")
-        self.assertEqual(mapped["GSTIN"], "tax_id")
-        self.assertEqual(mapped["Email"], "email_id")
+        assert_gstin_and_email_follow_the_site(self, mapped, ledgers)
         session = frappe.get_doc("FAC Import Session", customers["session_id"])
         self.assertEqual(session.status, "Mapped")
         self.assertIn("ledgers (Tally XML)", session.steps[0].message)
@@ -347,7 +347,9 @@ class TestRefusals(TallyXmlToolCase):
 
     def test_a_user_who_cannot_read_the_file_gets_the_usual_refusal(self):
         doc = self._file()
-        frappe.set_user(self.make_throwaway_user("outsider", roles=("Blogger",)))
+        outsider = self.make_desk_user("outsider")
+        self.assert_cannot(outsider, "read", "File", doc.name)
+        frappe.set_user(outsider)
         reply = self._run({"file_id": doc.name})
         self.assertFalse(reply["success"])
         self.assertIn("File not found, or you don't have access to it.", reply["error"])

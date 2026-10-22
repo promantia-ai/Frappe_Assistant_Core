@@ -13,7 +13,7 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.tests.base_test import BaseAssistantTest, item_hsn_fields
 from frappe_assistant_core.utils import import_opening_stock, import_plan
 
 SESSION = "FAC Import Session"
@@ -56,6 +56,22 @@ class ImportPlanCase(BaseAssistantTest):
         mapped = self._run("set_column_mapping", {"session": session, "mapping": mapping, "doctype": doctype})
         self.assertTrue(mapped["success"], mapped)
         return session
+
+    def _item_file(self, group, extra=None, file_name="items.csv"):
+        """An items file of one Item, mapped. ``group`` None leaves the Group column out.
+
+        On a site with India Compliance it has an HSN column too, as a real items file there
+        must: an Item without an HSN code can't be saved (see ``item_hsn_fields``).
+        """
+        columns = {"Code": ("item_code", f"I {self.tag}"), "Name": ("item_name", f"Item {self.tag}")}
+        if group is not None:
+            columns["Group"] = ("item_group", group)
+        columns["UOM"] = ("stock_uom", "Nos")
+        columns.update({"HSN": ("gst_hsn_code", code) for code in item_hsn_fields().values()})
+        columns.update(extra or {})
+        mapping = {column: field for column, (field, _value) in columns.items()}
+        row = [value for _field, value in columns.values()]
+        return self._session(file_name, list(columns), [row], "Item", mapping)
 
     def _desk_user(self):
         email = "fac-plan-test@example.com"
@@ -350,13 +366,7 @@ class TestRecordsEarlierFilesCreate(ImportPlanCase):
             "Item Group",
             {"Name": "item_group_name", "Parent": "parent_item_group", "Is Group": "is_group"},
         )
-        item = self._session(
-            "items.csv",
-            ["Code", "Name", "Group", "UOM"],
-            [[f"I {t}", f"Item {t}", item_group_value, "Nos"]],
-            "Item",
-            {"Code": "item_code", "Name": "item_name", "Group": "item_group", "UOM": "stock_uom"},
-        )
+        item = self._item_file(item_group_value)
         plan = self._run("plan_migration", {"sessions": [item, group]})["result"]["plan"]
         self.assertTrue(self._run("dry_run_import", {"session": group})["result"]["ready"] == 1)
         return plan, group, item
@@ -576,15 +586,6 @@ class TestWhatTheReviewFound(ImportPlanCase):
             {"Name": "item_group_name", "Parent": "parent_item_group", "Is Group": "is_group"},
         )
 
-    def _item_file(self, group, extra=None, file_name="items.csv"):
-        header = ["Code", "Name", "Group", "UOM"] + list((extra or {}).keys())
-        mapping = {"Code": "item_code", "Name": "item_name", "Group": "item_group", "UOM": "stock_uom"}
-        row = [f"I {self.tag}", f"Item {self.tag}", group, "Nos"]
-        for column, (field, value) in (extra or {}).items():
-            mapping[column] = field
-            row.append(value)
-        return self._session(file_name, header, [row], "Item", mapping)
-
     def _questions(self, plan, answers=None):
         response = self._run("plan_questions", {"plan": plan, **({"answers": answers} if answers else {})})
         self.assertTrue(response["success"], response)
@@ -625,13 +626,7 @@ class TestWhatTheReviewFound(ImportPlanCase):
     def test_only_mapped_columns_decide_the_order(self):
         # Items made first, so among files free to go they go first: no Group column is mapped, so
         # nothing makes them wait for the groups file, though Item links to Item Group.
-        items = self._session(
-            "items.csv",
-            ["Code", "Name", "UOM"],
-            [[f"I {self.tag}", f"Item {self.tag}", "Nos"]],
-            "Item",
-            {"Code": "item_code", "Name": "item_name", "UOM": "stock_uom"},
-        )
+        items = self._item_file(None)
         groups = self._group_file(f"G {self.tag}")
 
         result = self._run("plan_migration", {"sessions": [items, groups]})["result"]
@@ -698,3 +693,16 @@ class TestWhatTheReviewFound(ImportPlanCase):
 
         fixes = [(q["file_name"], q["message"]) for q in result["questions"] if q["kind"] == "fix"]
         self.assertEqual(fixes, [("items.csv", f"Brand 'B {self.tag}' doesn't exist.")])
+
+    def test_an_item_file_has_an_hsn_column_when_india_compliance_is_installed(self):
+        items = self._item_file(f"G {self.tag}")
+
+        options = frappe.parse_json(frappe.db.get_value(SESSION, items, "template_options"))
+        mapped = options["column_to_field_map"].values()
+        if frappe.get_meta("Item").has_field("gst_hsn_code"):
+            self.assertIn("gst_hsn_code", mapped)
+            code = next(iter(item_hsn_fields().values()))
+            self.assertTrue(frappe.db.exists("GST HSN Code", code))
+        else:
+            self.assertNotIn("gst_hsn_code", mapped)
+            self.assertEqual(len(mapped), 4)  # Code, Name, Group, UOM

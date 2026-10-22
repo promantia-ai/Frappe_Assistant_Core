@@ -557,7 +557,9 @@ class TestDryRunImport(BaseAssistantTest):
 
     def test_another_users_session_is_refused(self):
         session = self._session(self._mixed_rows())
-        frappe.set_user(self.make_throwaway_user("other", roles=("Blogger",)))
+        other = self.make_desk_user("other")
+        self.assert_cannot(other, "write", "FAC Import Session", session)
+        frappe.set_user(other)
 
         response = self._run("dry_run_import", {"session": session})
 
