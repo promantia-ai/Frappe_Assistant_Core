@@ -36,6 +36,23 @@ def xlsx(rows, sheet="Sheet1") -> bytes:
     return buffer.getvalue()
 
 
+def assert_gstin_and_email_follow_the_site(test, mapped, result):
+    """The shipped ledgers preset's GSTIN and Email columns, as this site's Customer takes them.
+
+    GSTIN goes to the first of ["gstin", "tax_id"] the site has: India Compliance adds gstin.
+    ERPNext 16 hides Customer's email_id (it shows the primary contact's), and a hidden field is
+    not imported, so there Email is reported as not on this site instead.
+    """
+    customer = frappe.get_meta("Customer")
+    test.assertEqual(mapped["GSTIN"], "gstin" if customer.has_field("gstin") else "tax_id")
+    if customer.get_field("email_id").hidden:
+        test.assertNotIn("Email", mapped)
+        test.assertIn("Email (email_id)", result["not_on_this_site"])
+    else:
+        test.assertEqual(mapped["Email"], "email_id")
+        test.assertNotIn("Email (email_id)", result.get("not_on_this_site", []))
+
+
 LEDGER_ROWS = [
     ["Acme Pvt Ltd"],
     ["Ledgers"],
@@ -298,7 +315,9 @@ class TestApply(PresetToolCase):
 
     def test_a_user_who_cannot_read_the_file_gets_the_usual_refusal(self):
         file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
-        frappe.set_user(self.make_throwaway_user("outsider", roles=("Blogger",)))
+        outsider = self.make_desk_user("outsider")
+        self.assert_cannot(outsider, "read", "File", file_doc.name)
+        frappe.set_user(outsider)
         before = frappe.db.count("FAC Import Session")
         reply = self._run({"file_id": file_doc.name})
         self.assertFalse(reply["success"])
@@ -962,9 +981,27 @@ class TestShippedPresets(PresetToolCase):
         customers = next(s for s in result["sessions"] if s["target"] == "Customers")
         mapped = {row["column"]: row["field"] for row in customers["mapping"]["mapping"]}
         self.assertEqual(mapped["Name"], "customer_name")
-        self.assertEqual(mapped["GSTIN"], "tax_id")
-        self.assertEqual(mapped["Email"], "email_id")
+        assert_gstin_and_email_follow_the_site(self, mapped, result)
         self.assertEqual(result["needs"][0]["name"], "company")
+
+    def test_a_hidden_email_field_is_listed_as_not_on_this_site(self):
+        if not frappe.get_meta("Customer").get_field("email_id").hidden:
+            # ERPNext 16 ships it hidden; on v15 an administrator hides it in Customize Form
+            from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+            setter = make_property_setter("Customer", "email_id", "hidden", 1, "Check")
+            self.addCleanup(frappe.clear_cache, doctype="Customer")
+            self.addCleanup(frappe.delete_doc, "Property Setter", setter.name, force=True)
+        self.assertTrue(frappe.get_meta("Customer").get_field("email_id").hidden)
+        rows, expected = SHIPPED["tally_prime.ledgers"]
+
+        result, _ = self._check("tally_prime.ledgers", rows, expected)
+
+        customers = next(s for s in result["sessions"] if s["target"] == "Customers")
+        mapped = {row["column"]: row["field"] for row in customers["mapping"]["mapping"]}
+        self.assertNotIn("Email", mapped)
+        self.assertIn("Email", customers["mapping"]["not_imported"])
+        self.assertIn("Email (email_id)", result["not_on_this_site"])
 
     def test_tally_trial_balance_drops_group_subtotals(self):
         rows, expected = SHIPPED["tally_prime.trial_balance"]

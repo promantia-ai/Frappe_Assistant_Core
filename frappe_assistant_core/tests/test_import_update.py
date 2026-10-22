@@ -19,6 +19,7 @@ import frappe
 
 # The module, not its class: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_run as run_tests
+from frappe_assistant_core.tests.base_test import item_hsn_fields
 from frappe_assistant_core.utils import import_update
 
 UPDATE = "Update Existing Records"
@@ -560,7 +561,13 @@ class TestPrices(UpdateCase):
     def test_prices_update_keyed_on_item_code_and_price_list(self):
         group = frappe.get_all("Item Group", filters={"is_group": 0}, pluck="name", limit=1)[0]
         item = frappe.get_doc(
-            {"doctype": "Item", "item_code": f"ITEM-{self.tag}", "item_group": group, "stock_uom": "Nos"}
+            {
+                "doctype": "Item",
+                "item_code": f"ITEM-{self.tag}",
+                "item_group": group,
+                "stock_uom": "Nos",
+                **item_hsn_fields(),
+            }
         ).insert()
         lists = []
         for label in ("Retail", "Wholesale"):
@@ -615,7 +622,13 @@ class TestPrices(UpdateCase):
     def test_an_item_code_in_other_case_finds_the_item_and_stays_as_it_is(self):
         group = frappe.get_all("Item Group", filters={"is_group": 0}, pluck="name", limit=1)[0]
         item = frappe.get_doc(
-            {"doctype": "Item", "item_code": f"ITEM-{self.tag}", "item_group": group, "stock_uom": "Nos"}
+            {
+                "doctype": "Item",
+                "item_code": f"ITEM-{self.tag}",
+                "item_group": group,
+                "stock_uom": "Nos",
+                **item_hsn_fields(),
+            }
         ).insert()
         file_doc = self._csv([f"item-{self.tag},Renamed {self.tag}"], "Item Code,Item Name")
         session = self._run("start_import_session", {"file_id": file_doc.name, "import_type": UPDATE})

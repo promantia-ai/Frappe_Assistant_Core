@@ -14,6 +14,7 @@ from unittest.mock import patch
 import frappe
 from erpnext.setup.doctype.item_group.item_group import ItemGroup
 
+from frappe_assistant_core.tests.base_test import item_hsn_fields
 from frappe_assistant_core.tests.test_import_plan import set_plan
 from frappe_assistant_core.tests.test_import_run import ImportRunCase
 from frappe_assistant_core.utils import import_plan, import_run
@@ -41,13 +42,21 @@ class TestRunMigrationPlan(ImportRunCase):
             "Item Group",
             {"Name": "item_group_name", "Parent": "parent_item_group", "Is Group": "is_group"},
         )
+        # with India Compliance an items file carries the HSN code every Item needs there
+        hsn = "".join(f",{code}" for code in item_hsn_fields().values())
         items = self._mapped(
             "items.csv",
-            "".join(f"{code},{code},{self.g2},Nos\n" for code in self.items)
-            .join(["Code,Name,Group,UOM\n", ""])
+            "".join(f"{code},{code},{self.g2},Nos{hsn}\n" for code in self.items)
+            .join([f"Code,Name,Group,UOM{',HSN' if hsn else ''}\n", ""])
             .encode(),
             "Item",
-            {"Code": "item_code", "Name": "item_name", "Group": "item_group", "UOM": "stock_uom"},
+            {
+                "Code": "item_code",
+                "Name": "item_name",
+                "Group": "item_group",
+                "UOM": "stock_uom",
+                **({"HSN": "gst_hsn_code"} if hsn else {}),
+            },
         )
         plan = self._run("plan_migration", {"sessions": [items, groups], "failure_rule": rule})["result"][
             "plan"

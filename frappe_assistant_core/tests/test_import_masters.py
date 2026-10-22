@@ -502,6 +502,8 @@ class TestImportMasters(BaseAssistantTest):
             self.assertIn("doesn't allow", import_fixes.cannot_create("Brand"))
 
     def test_a_user_who_cannot_create_it_is_not_offered_it(self):
-        frappe.set_user(self.make_throwaway_user("reader", roles=("Blogger",)))
+        user = self.make_desk_user("reader")
+        self.assert_cannot(user, "create", "Customer Group")
+        frappe.set_user(user)
 
         self.assertIn("aren't allowed", import_fixes.cannot_create("Customer Group"))

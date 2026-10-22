@@ -123,7 +123,9 @@ class TestGetImportSchema(ImportToolTestCase):
                 self.assertIn(reason, result["error"])
 
     def test_user_without_import_permission_is_told_before_any_work(self):
-        frappe.set_user(self.make_throwaway_user("reader", roles=("Blogger",)))
+        user = self.make_desk_user("reader")
+        self.assert_cannot(user, "import", "Contact")
+        frappe.set_user(user)
         result = self._schema("Contact")
         self.assertFalse(result["success"])
         self.assertRegex(result["error"], r"permission.*Contact")
@@ -262,7 +264,9 @@ class TestSetColumnMapping(ImportToolTestCase):
 
     def test_target_permission_is_checked_before_anything_is_saved(self):
         # A desk user can open a session for their own upload but may not import Contacts.
-        frappe.set_user(self.make_throwaway_user("importer", roles=("Blogger",)))
+        user = self.make_desk_user("importer")
+        self.assert_cannot(user, "import", "Contact")
+        frappe.set_user(user)
         session = self._session()
 
         result = self._map(session, {"First Name": "first_name"}, doctype="Contact")
@@ -273,7 +277,9 @@ class TestSetColumnMapping(ImportToolTestCase):
 
     def test_another_users_session_cannot_be_changed(self):
         session = self._session()
-        frappe.set_user(self.make_throwaway_user("other", roles=("Blogger",)))
+        other = self.make_desk_user("other")
+        self.assert_cannot(other, "write", "FAC Import Session", session)
+        frappe.set_user(other)
 
         result = self._map(session, {"First Name": "first_name"}, doctype="Contact")
 

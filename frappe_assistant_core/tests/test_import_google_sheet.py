@@ -70,7 +70,8 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
         super().setUp()
         self.registry = get_tool_registry()
         # A plain desk user: owns the files they upload, holds no import rights.
-        self.user = self.make_throwaway_user("sheets", roles=("Blogger",))
+        self.user = self.make_desk_user("sheets")
+        self.assert_cannot(self.user, "create", "Data Import")
         frappe.set_user(self.user)
         self.files_before = set(frappe.get_all("File", pluck="name"))
         self.sessions_before = frappe.db.count("FAC Import Session")
