@@ -114,7 +114,7 @@ def window(session) -> dict:
 
 def refusal(session) -> str:
     """Why the session can't be undone now, or "" when it can."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     if dry_run.is_running(session):
         return dry_run.check_running()
@@ -763,6 +763,7 @@ def _permission_blockers(records: List[Record]) -> List[Blocker]:
                         limit_page_length=0,
                     )
                 )
+        # nosemgrep: unchecked-frappe-permission-call — the answer is used: a record the user can't cancel is listed as blocked
         can_cancel = frappe.has_permission(doctype, "cancel") if submitted else True
         for record in (r for r in records if r.doctype == doctype):
             if not can_delete:
@@ -1168,7 +1169,7 @@ def undo_job(session_name: str, user: str, mode: str) -> None:
     """Background job: the undo, as the user who approved it. A record that can't be removed
     is kept (delete_failed) with what it needs; anything else that goes wrong rolls back and
     sets the session back to its status before the undo."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the undo
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
@@ -1420,7 +1421,7 @@ def _remove(session, record: Record):
 def _error_of(e: Exception, since: int) -> str:
     """What refused a record: the messages shown since ``since``, which are then dropped, so
     one record's failure isn't shown with the next."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     log = list(frappe.local.message_log or [])
     frappe.local.message_log = log[since:]

@@ -19,14 +19,13 @@ from unittest.mock import patch
 
 import frappe
 
-from frappe_assistant_core.plugins.core import import_failures, import_signoff
-
 # Modules, not their classes: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_failures as failures_tests
 from frappe_assistant_core.tests import test_import_opening_balances as balances_tests
 from frappe_assistant_core.tests import test_import_opening_invoices as invoices_tests
 from frappe_assistant_core.tests import test_import_opening_stock as stock_tests
 from frappe_assistant_core.tests import test_import_run as run_tests
+from frappe_assistant_core.utils import import_failures, import_signoff
 
 GROUP_NODE = failures_tests.GROUP_NODE
 REPORT = "Migration Sign-off"

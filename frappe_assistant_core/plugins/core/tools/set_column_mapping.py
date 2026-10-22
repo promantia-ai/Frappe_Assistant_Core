@@ -25,8 +25,8 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_update
-from frappe_assistant_core.plugins.core.import_mapping import (
+from frappe_assistant_core.utils import import_update
+from frappe_assistant_core.utils.import_mapping import (
     DONT_IMPORT,
     SESSION_DOCTYPE,
     build_import_schema,
@@ -38,7 +38,7 @@ from frappe_assistant_core.plugins.core.import_mapping import (
     session_headers,
     session_mapping,
 )
-from frappe_assistant_core.plugins.core.import_session import import_target_problem
+from frappe_assistant_core.utils.import_session import import_target_problem
 
 
 class SetColumnMapping(BaseTool):
@@ -207,14 +207,14 @@ def _imported_as(doc, target: str, import_type: str):
 
 def _check_running(doc):
     """A background check stores its result when it ends: a remap now would be stamped as checked."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     return dry_run.check_running() if dry_run.is_running(doc) else None
 
 
 def _mapping_refused(status: str):
     """Why a session with ``status`` can't be remapped, or None."""
-    from frappe_assistant_core.plugins.core.import_dry_run import RUNNABLE_STATUSES
+    from frappe_assistant_core.utils.import_dry_run import RUNNABLE_STATUSES
 
     if status in ("File Read", *RUNNABLE_STATUSES):
         return None

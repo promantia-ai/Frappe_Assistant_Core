@@ -13,8 +13,8 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_opening_stock, import_plan
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_opening_stock, import_plan
 
 SESSION = "FAC Import Session"
 
@@ -236,7 +236,7 @@ class TestTheOrder(ImportPlanCase):
         self.assertEqual([o["session"] for o in ordered], [group.name, item.name, price.name])
         self.assertEqual([o["position"] for o in ordered], [1, 2, 3])
         self.assertIn("groups.csv", ordered[1]["reason"])
-        self.assertIn("Nothing in the plan", ordered[0]["reason"])
+        self.assertIn("No other file is needed", ordered[0]["reason"])
         self.assertEqual(problems, [])
 
     def test_opening_files_come_last(self):

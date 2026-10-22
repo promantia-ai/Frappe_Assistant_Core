@@ -25,9 +25,9 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
-from frappe_assistant_core.plugins.core import import_presets as presets
-from frappe_assistant_core.plugins.core import import_tally_xml as tally_xml
-from frappe_assistant_core.plugins.core.import_mapping import (
+from frappe_assistant_core.utils import import_presets as presets
+from frappe_assistant_core.utils import import_tally_xml as tally_xml
+from frappe_assistant_core.utils.import_mapping import (
     DONT_IMPORT,
     SESSION_DOCTYPE,
     build_import_schema,
@@ -36,7 +36,7 @@ from frappe_assistant_core.plugins.core.import_mapping import (
     resolve_mapping,
     save_mapping,
 )
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils.import_session import (
     SAMPLE_SIZE,
     FileProblem,
     find_site_file,
@@ -327,7 +327,7 @@ class ApplyImportPreset(BaseTool):
                 )
             listed.append(item)
             counts.append(f"{entry.count} {tally_xml.LABELS[part]}")
-        where = _(" from {0}").format(found.company) if found.company else ""
+        where = " " + _("from {0}").format(found.company) if found.company else ""
         return {
             "success": True,
             "matched": True,
@@ -464,7 +464,7 @@ class ApplyImportPreset(BaseTool):
     def _open_session(
         self, file_doc, sheet, match, cleaned, rows, not_on_site, already, cleaned_file, name
     ) -> Dict[str, Any]:
-        from frappe_assistant_core.plugins.core.import_opening_stock import PRESET_FILE
+        from frappe_assistant_core.utils.import_opening_stock import PRESET_FILE
 
         target = rows.target
         session = frappe.get_doc(

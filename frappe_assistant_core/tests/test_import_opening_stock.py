@@ -10,8 +10,8 @@ import frappe
 from frappe.utils import nowdate
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_opening_stock as opening_stock
 
 HEADER = "Item,Warehouse,Qty,Rate"
 
@@ -425,7 +425,7 @@ class TestOpeningStockCheck(OpeningStockCase):
 
     def test_stock_reconciliation_can_not_go_through_data_import(self):
         # Why opening stock has its own route: Allow Import is off for Stock Reconciliation.
-        from frappe_assistant_core.plugins.core.import_session import import_target_problem
+        from frappe_assistant_core.utils.import_session import import_target_problem
 
         session = self._session([f"{self.item},{self.stores},5,10"])
 

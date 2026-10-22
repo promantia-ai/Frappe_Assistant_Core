@@ -25,10 +25,10 @@ from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_
     FACImportSession,
 )
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.plugins.core.plugin import CorePlugin
 from frappe_assistant_core.tests.test_import_run import MAPPING
 from frappe_assistant_core.tests.test_import_undo import BlockerCase
+from frappe_assistant_core.utils import import_undo
 from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
 
 

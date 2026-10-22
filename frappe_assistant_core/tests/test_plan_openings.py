@@ -13,10 +13,10 @@ import unittest
 
 import frappe
 
-from frappe_assistant_core.plugins.core import import_plan
 from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
 from frappe_assistant_core.tests.test_import_opening_stock import OpeningStockCase
 from frappe_assistant_core.tests.test_import_run import ImportRunCase
+from frappe_assistant_core.utils import import_plan
 
 SESSION = "FAC Import Session"
 

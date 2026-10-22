@@ -22,8 +22,8 @@ import frappe
 import requests
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_session
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_session
 
 LINK = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMn/edit#gid=0"
 EXPORT = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMn/export?format=csv&gid=0"

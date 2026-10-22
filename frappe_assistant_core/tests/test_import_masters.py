@@ -22,9 +22,9 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_fixes
 from frappe_assistant_core.plugins.core.tools.create_document import DocumentCreate
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_fixes
 
 PARENT_FIELDS = {"Customer Group": "parent_customer_group", "Territory": "parent_territory"}
 

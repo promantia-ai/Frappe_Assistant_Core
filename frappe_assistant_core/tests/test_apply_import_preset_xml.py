@@ -9,8 +9,6 @@ import frappe
 from frappe.core.doctype.file.file import File
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_presets as presets
-from frappe_assistant_core.plugins.core import import_tally_xml as tally_xml
 from frappe_assistant_core.tests.test_import_tally_xml import (
     GSTIN_NEW,
     VOUCHER,
@@ -20,6 +18,8 @@ from frappe_assistant_core.tests.test_import_tally_xml import (
     ledger,
     stock_item,
 )
+from frappe_assistant_core.utils import import_presets as presets
+from frappe_assistant_core.utils import import_tally_xml as tally_xml
 
 MASTERS = (
     group("Sundry Debtors"),

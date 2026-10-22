@@ -29,8 +29,8 @@ from frappe.core.doctype.data_import.importer import Importer
 from rq.timeouts import JobTimeoutException
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run, import_failures, import_fixes, import_run
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run, import_failures, import_fixes, import_run
 
 MAPPING = {
     "Customer Name": "customer_name",
@@ -870,7 +870,7 @@ class TestATreeFile(ImportRunCase):
 
         def leaf_refused(doc, *args, **kwargs):
             if doc.name == leaf:
-                frappe.throw("Leaf refused for the test")
+                frappe.throw(frappe._("Leaf refused for the test"))
             return real(doc, *args, **kwargs)
 
         with self._each_row_commits(), patch.object(

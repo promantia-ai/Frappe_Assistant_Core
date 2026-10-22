@@ -22,7 +22,7 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils.import_session import (
     FileProblem,
     SheetSummary,
     discard_sheet_copy,

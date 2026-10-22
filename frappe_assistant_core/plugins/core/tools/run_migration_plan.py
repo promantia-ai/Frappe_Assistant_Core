@@ -20,7 +20,7 @@ from frappe import _
 from frappe.utils import cstr
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_plan
+from frappe_assistant_core.utils import import_plan
 
 
 class RunMigrationPlan(BaseTool):

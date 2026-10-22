@@ -21,10 +21,10 @@ import frappe
 
 from frappe_assistant_core.mcp.server import MCPServer
 from frappe_assistant_core.mcp.tool_adapter import build_tool_dict
-from frappe_assistant_core.plugins.core import import_dry_run, import_fixes, import_session
 
 # The module, not its class: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_run as run_tests
+from frappe_assistant_core.utils import import_dry_run, import_fixes, import_session
 from frappe_assistant_core.utils.tool_category_detector import (
     PRIVILEGED_TOOLS,
     READ_ONLY_TOOLS,
@@ -96,9 +96,9 @@ class TestFileContentIsFenced(GuardrailCase):
             self.assertTrue(self.registry.get_tool(name).untrusted_fields, name)
 
     def test_a_preset_reply_reaches_the_model_fenced(self):
-        from frappe_assistant_core.plugins.core import import_presets as presets
         from frappe_assistant_core.tests.test_apply_import_preset import xlsx
         from frappe_assistant_core.tests.test_import_presets import LEDGERS
+        from frappe_assistant_core.utils import import_presets as presets
 
         rows = [
             [f"Acme {INJECTION}"],

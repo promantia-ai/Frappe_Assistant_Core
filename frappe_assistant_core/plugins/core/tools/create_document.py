@@ -479,8 +479,8 @@ class DocumentCreate(BaseTool):
     def _execute_many(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Create ``documents`` in one call: checked first, then all created or none. With
         ``import_session`` they must be that session's missing masters, and are listed on it."""
-        from frappe_assistant_core.plugins.core import import_fixes
-        from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
+        from frappe_assistant_core.utils import import_fixes
+        from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
 
         session_name = arguments.get("import_session")
         session = None

@@ -304,7 +304,7 @@ def _table_title(table: Dict[str, Any]) -> str:
 
 def load_session(name: str):
     """The session, if this user may change it. Raises DoesNotExistError or PermissionError."""
-    from frappe_assistant_core.plugins.core import import_plan
+    from frappe_assistant_core.utils import import_plan
 
     doc = frappe.get_doc(SESSION_DOCTYPE, name)
     if not frappe.has_permission(SESSION_DOCTYPE, "write", doc=doc):

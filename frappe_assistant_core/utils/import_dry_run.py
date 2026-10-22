@@ -43,7 +43,7 @@ from frappe.core.doctype.data_import.importer import (
 )
 from frappe.utils import cstr, now_datetime, strip_html
 
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils.import_session import (
     FileProblem,
     import_target_problem,
     read_sheet_rows,
@@ -119,9 +119,9 @@ def special_engine(session):
     """The engine of a session that isn't imported through Data Import (opening stock, opening
     invoices, opening balances), or None. Each keeps its settings under its own key in
     template_options."""
-    from frappe_assistant_core.plugins.core import import_opening_balances as opening_balances
-    from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
-    from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
+    from frappe_assistant_core.utils import import_opening_balances as opening_balances
+    from frappe_assistant_core.utils import import_opening_invoices as opening_invoices
+    from frappe_assistant_core.utils import import_opening_stock as opening_stock
 
     for engine in (opening_stock, opening_invoices, opening_balances):
         if engine.settings(session):
@@ -174,7 +174,7 @@ def link_site_file(session, file_doc, sheet_url: Optional[str] = None) -> None:
     Sheet (#34006): the same columns, perhaps with the ones that file added after them, which
     are not imported. ``file_doc`` is a File the user may read (find_site_file), or the copy
     ``sheet_url`` was read into."""
-    from frappe_assistant_core.plugins.core.import_failures import own_columns
+    from frappe_assistant_core.utils.import_failures import own_columns
 
     try:
         read = read_spreadsheet(file_doc, session.sheet or None)
@@ -261,7 +261,7 @@ def _session_columns(session) -> List[str]:
 def enqueue(session) -> None:
     session.db_set("progress", _progress("queued", 0, row_count(session)), update_modified=False)
     frappe.enqueue(
-        "frappe_assistant_core.plugins.core.import_dry_run.run_job",
+        "frappe_assistant_core.utils.import_dry_run.run_job",
         queue="long",
         timeout=4 * 60 * 60,
         job_id=f"fac_dry_run::{session.name}",
@@ -274,7 +274,7 @@ def enqueue(session) -> None:
 
 def run_job(session_name: str, user: str) -> None:
     """Background job: the dry run as the user who asked for it."""
-    from frappe_assistant_core.plugins.core.import_fixes import check
+    from frappe_assistant_core.utils.import_fixes import check
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who asked for the check
     try:
@@ -302,8 +302,8 @@ def _progress(state: str, done: int, total: int) -> str:
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """Check every row of the session's file. Stores the result on the session and
     returns the summary, with up to three example rows per group for the model."""
-    from frappe_assistant_core.plugins.core.import_failures import imported_rows
-    from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
+    from frappe_assistant_core.utils.import_failures import imported_rows
+    from frappe_assistant_core.utils.import_fixes import apply_value_maps
 
     session = frappe.get_doc(SESSION_DOCTYPE, session_name)
     file_doc = readable_session_file(session)
@@ -315,7 +315,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     engine = special_engine(session)
     if engine:
         return engine.run(session_name, commit_progress=commit_progress)
-    from frappe_assistant_core.plugins.core import import_update
+    from frappe_assistant_core.utils import import_update
 
     rows = apply_value_maps(session, sheet_rows)
     matches, column_map = None, None
@@ -326,7 +326,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     import_file = _parse(session, file_doc, rows, column_map)
     payloads = import_file.get_payloads_for_import()
 
-    from frappe_assistant_core.plugins.core import import_plan
+    from frappe_assistant_core.utils import import_plan
 
     checker = _Checker(
         session,
@@ -444,7 +444,7 @@ class _Checker:
         self.later: Dict[str, Dict[str, str]] = later or {}
         self.preview = {"records_changing": 0, "fields_changing": 0, "by_field": {}, "samples": []}
         if matches is not None:
-            from frappe_assistant_core.plugins.core import import_update
+            from frappe_assistant_core.utils import import_update
 
             self.key_label = import_update.key_label(session)
 
@@ -467,7 +467,7 @@ class _Checker:
             problems += self._duplicate_problems(payload)
         record, changed = self._record(payload), []
         if not problems and record:
-            from frappe_assistant_core.plugins.core import import_update
+            from frappe_assistant_core.utils import import_update
 
             changed = import_update.changes(self.doctype, record, payload.doc)
             if not changed:  # Data Import would fail it: "No changes to update"
@@ -832,7 +832,7 @@ def _stand_in(doctype: str, name: str) -> None:
     row's savepoint, which is rolled back."""
     if frappe.db.exists(doctype, name):
         return
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     meta = frappe.get_meta(doctype)
     doc = frappe.new_doc(doctype)
@@ -1180,7 +1180,7 @@ def fingerprint(session, file_doc) -> str:
         json.dumps(frappe.parse_json(session.transformation_rules or "null"), sort_keys=True),
         json.dumps(sorted(_excluded_rows(session))),
     ]
-    from frappe_assistant_core.plugins.core.import_failures import imported_rows
+    from frappe_assistant_core.utils.import_failures import imported_rows
 
     imported = imported_rows(session)
     if imported:  # an import since the check makes it stale: other rows are left to import

@@ -14,9 +14,9 @@ from unittest.mock import patch
 import frappe
 from erpnext.setup.doctype.item_group.item_group import ItemGroup
 
-from frappe_assistant_core.plugins.core import import_plan, import_run
 from frappe_assistant_core.tests.test_import_plan import set_plan
 from frappe_assistant_core.tests.test_import_run import ImportRunCase
+from frappe_assistant_core.utils import import_plan, import_run
 
 SESSION = "FAC Import Session"
 
@@ -302,7 +302,7 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
             for name in (first, second)
         ]
         set_plan(plan, masters=frappe.as_json(entries))
-        from frappe_assistant_core.plugins.core import import_fixes
+        from frappe_assistant_core.utils import import_fixes
 
         real = import_fixes.create_master
 

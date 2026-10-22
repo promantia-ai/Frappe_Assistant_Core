@@ -31,7 +31,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_months, cint, cstr, get_last_day, getdate, now_datetime, today
 
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_dry_run as dry_run
 
 SESSION_DOCTYPE = dry_run.SESSION_DOCTYPE
 ANSWERS_SAVEPOINT = "fac_plan_answers"
@@ -224,7 +224,7 @@ def _created_names(session) -> List[str]:
     """The names the rows of the session's last check create, or mean to: a failing row whose
     name is one of its fields counts too, as its file is fixed or imported without it before any
     later file is."""
-    from frappe_assistant_core.plugins.core import import_run
+    from frappe_assistant_core.utils import import_run
 
     return [
         row["name"]
@@ -240,7 +240,7 @@ def masters(plan) -> List[Dict[str, Any]]:
 
 def add_masters(session, items: List[Dict[str, Any]]) -> None:
     """Add masters the session's rows need to its plan, once each across the plan."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     plan = load_plan(session.migration_plan)
     entries = masters(plan)
@@ -259,7 +259,7 @@ def add_masters(session, items: List[Dict[str, Any]]) -> None:
 def create_planned(plan) -> List[Dict[str, Any]]:
     """Create the plan's masters not in ERPNext yet, each listed on the session whose rows need
     it, so undoing that session removes it. Raises PlanProblem if ERPNext refuses one."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     made: List[Dict[str, Any]] = []
     by_session: Dict[str, List[Dict[str, Any]]] = {}
@@ -387,7 +387,7 @@ def dependencies(doctype: str) -> Set[str]:
 def _links(session) -> Set[str]:
     """The DocTypes the session's mapped columns link to; all its DocType's links before it is
     mapped. A column mapped to Don't Import doesn't make its file wait for another."""
-    from frappe_assistant_core.plugins.core.import_mapping import DONT_IMPORT, session_mapping
+    from frappe_assistant_core.utils.import_mapping import DONT_IMPORT, session_mapping
 
     mapping = session_mapping(session)
     if not mapping:
@@ -413,9 +413,9 @@ def _links(session) -> Set[str]:
 
 def _engine_rank(session) -> int:
     """0 for a file imported through Data Import; 1, 2, 3 for opening stock, invoices, balances."""
-    from frappe_assistant_core.plugins.core import import_opening_balances as balances
-    from frappe_assistant_core.plugins.core import import_opening_invoices as invoices
-    from frappe_assistant_core.plugins.core import import_opening_stock as stock
+    from frappe_assistant_core.utils import import_opening_balances as balances
+    from frappe_assistant_core.utils import import_opening_invoices as invoices
+    from frappe_assistant_core.utils import import_opening_stock as stock
 
     engine = dry_run.special_engine(session)
     return {None: 0, stock: 1, invoices: 2, balances: 3}.get(engine, 3)
@@ -485,7 +485,7 @@ def _bring_up_to_date(plan, session) -> Optional[Dict[str, Any]]:
     create what they did then. A question when it can't be checked here: still running, too
     large for this request, or not checkable yet. Keeps what the check depended on in the plan
     (the caller saves it)."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     if dry_run.is_running(session):
         return {"kind": "checking", "message": _("Still being checked. Ask again in a moment.")}
@@ -519,8 +519,8 @@ UNCHECKED = ("checking", "blocked", "structure")
 
 
 def _file_questions(plan, session) -> List[Dict[str, Any]]:
-    from frappe_assistant_core.plugins.core import import_fixes
-    from frappe_assistant_core.plugins.core.import_mapping import session_headers
+    from frappe_assistant_core.utils import import_fixes
+    from frappe_assistant_core.utils.import_mapping import session_headers
 
     about = {"session": session.name, "file_name": session.file_name}
     waiting = _bring_up_to_date(plan, session)
@@ -639,7 +639,7 @@ def _add_needed_by(questions: List[Dict[str, Any]], files: List[Any]) -> None:
     """A fix question whose rows create records a later file of the plan needs says which later
     rows need them: leaving those rows out leaves the later ones without their record (an invoice
     without its customer), which the user must know before choosing."""
-    from frappe_assistant_core.plugins.core import import_run
+    from frappe_assistant_core.utils import import_run
 
     rows = {session.name: import_run._checked_rows(session) for session in files}
     place = {session.name: i for i, session in enumerate(files)}
@@ -667,7 +667,7 @@ def _add_needed_by(questions: List[Dict[str, Any]], files: List[Any]) -> None:
 def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
     """Apply the user's answers, each to the question it names, all or none. Returns what was done.
     Raises PlanProblem, or import_fixes.FixProblem(s) for a fix the session refuses."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     files = {session.name: session for session in children(plan)}
     fixes: Dict[str, List[Dict[str, Any]]] = {}
@@ -724,7 +724,7 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
 def cut_offs(files: List[Any]) -> Dict[str, str]:
     """Each opening file of the plan (stock, invoices, balances) → the cut-off date it is set up
     with."""
-    from frappe_assistant_core.plugins.core import import_opening_stock
+    from frappe_assistant_core.utils import import_opening_stock
 
     dates = {}
     for session in files:
@@ -821,7 +821,7 @@ def card_figures(plan) -> Dict[str, Any]:
 def decisions(plan, files: List[Any], new: List[Dict[str, Any]]) -> List[str]:
     """Each decision of the plan, one plain line each: the records it creates, each file's fixes
     and left-out rows, a file name whose date isn't the cut-off, and the failure rule."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     lines = [_("Create {0} '{1}'.").format(_(entry["doctype"]), entry["name"]) for entry in new]
     for session in files:
@@ -943,7 +943,7 @@ def cut_off_choices(files: List[Any], on: Optional[str] = None) -> List[str]:
 
 def run_problem(plan) -> Optional[str]:
     """Why the plan can't run now, or None."""
-    from frappe_assistant_core.plugins.core import import_fixes, import_run
+    from frappe_assistant_core.utils import import_fixes, import_run
 
     if plan.status != "Ready to Run":
         return _("The plan is {0}: run plan_questions until it is Ready to Run.").format(_(plan.status))
@@ -1020,7 +1020,7 @@ def alive(plan) -> bool:
     """Whether a job of the plan, or of the file it is importing, is queued or running."""
     from frappe.utils.background_jobs import is_job_enqueued
 
-    from frappe_assistant_core.plugins.core import import_run
+    from frappe_assistant_core.utils import import_run
 
     if is_job_enqueued(PLAN_JOB.format(plan.name)):
         return True
@@ -1143,7 +1143,7 @@ def _next_file(plan_name: str) -> None:
 def _prepare(plan, child) -> Optional[str]:
     """Check the file again just before its import and apply the failure rule. Returns why the plan
     stops, or None."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     approved = (_progress(plan).get("approved") or {}).get(child.name)
     if child.status != "Ready to Import" or child.validated_fingerprint != approved:
@@ -1189,7 +1189,7 @@ def _prepare(plan, child) -> Optional[str]:
 
 def _import(child) -> bool:
     """Start the file's import. True while it runs in a background job."""
-    from frappe_assistant_core.plugins.core import import_run
+    from frappe_assistant_core.utils import import_run
 
     summary = frappe.parse_json(child.validation_summary or "{}") or {}
     if child.status == "Completed" or not summary.get("ready"):
@@ -1247,7 +1247,7 @@ def _end(plan_name: str, status: str, message: str) -> None:
 
 def result(plan) -> Dict[str, Any]:
     """The run as FACO reports it: each file's state and counts, and what the plan says."""
-    from frappe_assistant_core.plugins.core import import_failures
+    from frappe_assistant_core.utils import import_failures
 
     left_out = _progress(plan).get("left_out") or {}
     files = []

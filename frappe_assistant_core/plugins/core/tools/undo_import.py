@@ -20,8 +20,8 @@ from frappe import _
 from frappe.utils import cint
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_undo
-from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.utils import import_undo
+from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
 
 
 def _capped(labels) -> list:
@@ -221,7 +221,7 @@ class UndoImport(BaseTool):
             if report["already_removed"]:
                 message += " " + _("{0} were already removed by hand.").format(report["already_removed"])
             if already_ended:
-                message = _("This import was already undone. ") + message
+                message = _("This import was already undone.") + " " + message
         else:
             message = report["reason"] or _("The undo stopped.")
         return {

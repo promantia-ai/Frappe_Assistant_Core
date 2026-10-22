@@ -158,7 +158,7 @@ class ExtractFileContent(BaseTool):
 
             # A file an import session holds is read by the import tools, which show the model
             # headers, samples and summaries only (#34003); the whole file isn't read into the chat.
-            from frappe_assistant_core.plugins.core.import_session import holding_session
+            from frappe_assistant_core.utils.import_session import holding_session
 
             holding = holding_session(file_doc.name)
             if holding:

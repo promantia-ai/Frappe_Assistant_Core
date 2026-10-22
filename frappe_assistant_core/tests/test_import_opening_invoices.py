@@ -13,10 +13,10 @@ from frappe import _
 from frappe.utils import add_days, nowdate
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_fixes
-from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_fixes
+from frappe_assistant_core.utils import import_opening_invoices as opening_invoices
 
 HEADER = "Customer,Invoice,Date,Due,Amount"
 COLUMNS = {

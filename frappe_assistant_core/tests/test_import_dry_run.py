@@ -24,8 +24,8 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run
 
 GROUP = "FAC Dry Run Group"
 MAPPING = {
@@ -348,9 +348,7 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(again["state"], "running")
         enqueue.assert_called_once()
         self.assertEqual(enqueue.call_args.kwargs["session_name"], session)
-        self.assertEqual(
-            enqueue.call_args.args[0], "frappe_assistant_core.plugins.core.import_dry_run.run_job"
-        )
+        self.assertEqual(enqueue.call_args.args[0], "frappe_assistant_core.utils.import_dry_run.run_job")
         progress = json.loads(frappe.db.get_value("FAC Import Session", session, "progress"))
         self.assertEqual((progress["state"], progress["total"]), ("queued", 7))
 

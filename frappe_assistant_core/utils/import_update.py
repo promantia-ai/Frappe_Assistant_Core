@@ -216,7 +216,7 @@ def changes(doctype: str, record: str, doc: Dict) -> List[Dict]:
 
 def checked_records(session) -> Dict[int, str]:
     """The record of each row the last check found ready, from its results file."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     file_doc = dry_run._results_file(session)
     if not file_doc:

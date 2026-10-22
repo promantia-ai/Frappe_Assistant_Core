@@ -28,8 +28,8 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt, getdate
 
-from frappe_assistant_core.plugins.core.import_mapping import save_mapping, session_headers
-from frappe_assistant_core.plugins.core.import_session import read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils.import_mapping import save_mapping, session_headers
+from frappe_assistant_core.utils.import_session import read_sheet_rows, readable_session_file
 from frappe_assistant_core.utils.savepoint import open_savepoint, rollback_to_savepoint
 
 TARGET = "Stock Reconciliation"
@@ -282,8 +282,8 @@ def is_totals_row(cells: Dict[str, str]) -> bool:
 
 def read_lines(session) -> List[Line]:
     """Every non-blank row of the session's sheet, as field → text, with value maps applied."""
-    from frappe_assistant_core.plugins.core.import_dry_run import column_to_field_map
-    from frappe_assistant_core.plugins.core.import_fixes import apply_value_maps
+    from frappe_assistant_core.utils.import_dry_run import column_to_field_map
+    from frappe_assistant_core.utils.import_fixes import apply_value_maps
 
     file_doc = readable_session_file(session)
     rows = apply_value_maps(session, read_sheet_rows(file_doc, session.sheet or None))
@@ -362,7 +362,7 @@ class Ready:
 
 
 def check_can_run(session) -> None:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     dry_run.check_status(session)
     stock = settings(session)
@@ -381,7 +381,7 @@ class _StockChecker:
     """Groups failures the dry run's way, so its results file, fixes and reply are reused."""
 
     def __init__(self):
-        from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+        from frappe_assistant_core.utils import import_dry_run as dry_run
 
         self.doctype = TARGET
         self.key_df = None
@@ -403,7 +403,7 @@ class _StockChecker:
 
 
 def _problem(cause: str, field: str, value: str, message: str):
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     by_value = cause in BY_VALUE or cause == dry_run.CAUSE_MISSING_LINK
     key = (cause, ITEM_TABLE, field) + ((value,) if by_value else ())
@@ -458,7 +458,7 @@ def _line_problem(
 ):
     """The line's problem as (key, info), the Ready line, or IMPORTED. ``coming``: in a migration
     plan, the records its earlier files bring (import_plan.planned_names)."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     cells = line.cells
     if is_totals_row(cells):
@@ -623,8 +623,8 @@ def _allowed_zero(session) -> set:
 
 
 def _check_lines(session, checker: _StockChecker, lines: Optional[List[Line]] = None) -> List[Ready]:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-    from frappe_assistant_core.plugins.core import import_plan
+    from frappe_assistant_core.utils import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_plan
 
     stock, excluded, allowed = settings(session), dry_run._excluded_rows(session), _allowed_zero(session)
     imported, coming = imported_keys(session), import_plan.planned_names(session)
@@ -682,7 +682,7 @@ def _totals(ready: List[Ready]) -> Dict[str, Any]:
 def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     """The dry run of an opening-stock session: every row checked, ERPNext's own validation of
     the ready rows, the result stored the dry run's way, with the totals."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     file_doc = readable_session_file(session)
@@ -787,7 +787,7 @@ ISOLATE_LIMIT = 20  # rows a chunk's check singles out before it fails the rest 
 
 def _draft_error(stock: Dict[str, Any], lines: List[Ready]) -> Optional[Exception]:
     """None when ERPNext accepts ``lines`` as a draft Opening Stock, else why not. Rolled back."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     frappe.clear_messages()
     with dry_run.held_back():
@@ -807,7 +807,7 @@ def _erpnext_check(session, ready: List[Ready], checker: _StockChecker) -> List[
     """Insert each chunk as a draft inside a savepoint, rolled back: ERPNext's own validation.
     When it refuses a chunk and names a row ("Row #3"), that row fails alone, under its place in
     the sheet, and the rest are tried again. Otherwise the whole chunk fails together."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     def fail(line, message, kind):
         checker.fail(
@@ -958,7 +958,7 @@ def check_card(session, company, posting_date, rows, total_qty, total_value) -> 
 
 
 def _message_of_create(e: Exception) -> str:
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     return _("ERPNext refused the opening stock: {0}").format(dry_run._message_of(e))
 
@@ -1002,7 +1002,7 @@ def create(session) -> List[str]:
     this request, more in a background job, so a large sheet never runs into the request's time
     limit. Chunks made by an earlier call are skipped, so calling again never duplicates. Returns
     the names made in this request."""
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_fixes
 
     if session.status in ("Completed", "Importing"):
         return []  # done, or still being made: the caller reports
@@ -1056,8 +1056,8 @@ def _commits() -> bool:
 
 def create_job(session_name: str, user: str) -> None:
     """Background job: the opening stock, as the user who approved it."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-    from frappe_assistant_core.plugins.core import import_fixes
+    from frappe_assistant_core.utils import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_fixes
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the import
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
@@ -1087,7 +1087,7 @@ def create_job(session_name: str, user: str) -> None:
             frappe.db.rollback()
             _stopped(session_name, _("the background job stopped."))
             frappe.log_error(title=_("FAC opening stock import failed"), message=frappe.get_traceback())
-    from frappe_assistant_core.plugins.core import import_plan
+    from frappe_assistant_core.utils import import_plan
 
     import_plan.child_finished(session_name)  # in a migration plan, its next file
     if _commits():
@@ -1152,7 +1152,7 @@ def _building(session) -> bool:
 
 def _stopped(session_name: str, reason: str) -> None:
     """A background import that stopped before its end: what it committed is in."""
-    from frappe_assistant_core.plugins.core import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_dry_run as dry_run
 
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     if session.status != "Importing":
@@ -1338,8 +1338,8 @@ def outcomes(session) -> List[Dict[str, Any]]:
     """Every row of the file and where it stands now: imported (in a submitted document of the
     session), left out, failed (the check or ERPNext refused it, with why) or not imported yet,
     with its quantity and value as the file writes them. Writes nothing."""
-    from frappe_assistant_core.plugins.core import import_fixes
-    from frappe_assistant_core.plugins.core.import_signoff import NOT_IMPORTED
+    from frappe_assistant_core.utils import import_fixes
+    from frappe_assistant_core.utils.import_signoff import NOT_IMPORTED
 
     lines = read_lines(session)
     checker = _StockChecker()
@@ -1380,7 +1380,7 @@ def outcomes(session) -> List[Dict[str, Any]]:
 def summary(session) -> Dict[str, Any]:
     """The sign-off report's view of this session: its rows, quantities and values per status, and
     the Stock Ledger's value against the file's for the rows imported. Writes nothing."""
-    from frappe_assistant_core.plugins.core.import_signoff import tally
+    from frappe_assistant_core.utils.import_signoff import tally
 
     stock = settings(session)
     precision = frappe.get_precision(ITEM_TABLE, "amount") or 2

@@ -35,9 +35,9 @@ from frappe.utils import cstr, strip_html
 from frappe.utils.background_jobs import enqueue, is_job_enqueued
 from frappe.utils.scheduler import is_scheduler_inactive
 
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes, import_update
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_failures, import_fixes, import_update
+from frappe_assistant_core.utils.import_session import (
     import_target_problem,
     read_sheet_rows,
     readable_session_file,
@@ -185,7 +185,7 @@ def resume(session) -> Tuple[str, str]:
     ended = di.status in FINISHED_STATUS and _log_count(name) >= (di.payload_count or 0)
     if di.status == "Success" or (ended and session.status == IMPORTING):
         # Run to its end from Desk, or its result never recorded: record it, don't run again.
-        from frappe_assistant_core.plugins.core import import_plan
+        from frappe_assistant_core.utils import import_plan
 
         record_result(session.name, name)
         if not _next_level(session.name, name):
@@ -224,7 +224,7 @@ def _launch(session, data_import: str) -> None:
         # rollback: what this request wrote must be saved first, as Desk's Start Import has it.
         frappe.db.commit()  # nosemgrep: frappe-manual-commit — see the comment above
     enqueue(
-        "frappe_assistant_core.plugins.core.import_run.run_job",
+        "frappe_assistant_core.utils.import_run.run_job",
         queue="default",
         timeout=10000,
         event="data_import",
@@ -244,7 +244,7 @@ def run_job(data_import: str, session_name: str) -> None:
     """Background job: Data Import's own run, then its result recorded on the session."""
     from frappe.core.doctype.data_import.data_import import start_import
 
-    from frappe_assistant_core.plugins.core import import_plan
+    from frappe_assistant_core.utils import import_plan
 
     start_import(data_import)
     record_result(session_name, data_import)

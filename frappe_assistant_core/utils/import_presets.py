@@ -32,7 +32,7 @@ import frappe
 from frappe import _
 from openpyxl import load_workbook
 
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils.import_session import (
     MAX_FILE_SIZE,
     SUPPORTED_EXTENSIONS,
     FileProblem,
@@ -93,7 +93,7 @@ def _plain(value: Decimal) -> str:
 
 
 def _typed(value: Any) -> bool:
-    from frappe_assistant_core.plugins.core.import_opening_stock import Typed
+    from frappe_assistant_core.utils.import_opening_stock import Typed
 
     return isinstance(value, Typed)
 
@@ -102,7 +102,7 @@ def _decimal(text: str, typed: bool = False) -> Optional[Decimal]:
     """``text`` read by the opening imports' number(): commas and points as the site's number
     format says, so '1500,50' where the site writes 1.500,50 is 1500.5, not 150050. None for
     what it refuses ('12,5' where the site writes 12.5): the cell is then kept for the dry run."""
-    from frappe_assistant_core.plugins.core.import_opening_stock import Typed, number
+    from frappe_assistant_core.utils.import_opening_stock import Typed, number
 
     if not _NUMERIC.fullmatch(text):
         return None
@@ -209,7 +209,7 @@ def parse(value: str, spec: Dict[str, Any]) -> str:
 # -- presets ---------------------------------------------------------------------------------
 
 PRESET_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "import_presets"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "import_presets"
 )
 HOOK = "assistant_import_presets"
 ENGINES = {
@@ -222,9 +222,9 @@ WHEN_KEYS = ("in", "not_in", "nonzero")
 
 
 def _engine_fields(engine: str):
-    from frappe_assistant_core.plugins.core import import_opening_balances as balances
-    from frappe_assistant_core.plugins.core import import_opening_invoices as invoices
-    from frappe_assistant_core.plugins.core import import_opening_stock as stock
+    from frappe_assistant_core.utils import import_opening_balances as balances
+    from frappe_assistant_core.utils import import_opening_invoices as invoices
+    from frappe_assistant_core.utils import import_opening_stock as stock
 
     return {
         "opening_stock": stock.ITEM_FIELDS + stock.EXTRA_FIELDS,
@@ -438,6 +438,7 @@ def _preset_files() -> List[str]:
 
 def _read_file(path: str) -> List[Any]:
     try:
+        # nosemgrep: frappe-security-file-traversal — FAC's preset folder or a path a hooked app declares, not user input
         with open(path, encoding="utf-8") as f:
             content = json.load(f)
     except Exception as e:
@@ -520,7 +521,7 @@ def _sheet_rows(file_doc) -> Iterator[Tuple[Optional[str], Iterator[List[str]]]]
     consumed, and the next one only after it. A CSV is one sheet named None."""
     content = _content(file_doc)
     if _extension(file_doc) == "csv":
-        from frappe_assistant_core.plugins.core.import_opening_stock import Typed
+        from frappe_assistant_core.utils.import_opening_stock import Typed
 
         yield None, ([Typed(cell) for cell in row] for row in _csv_rows(content))
         return

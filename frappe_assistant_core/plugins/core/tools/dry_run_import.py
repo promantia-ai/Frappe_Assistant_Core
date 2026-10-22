@@ -20,10 +20,10 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes
-from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_failures, import_fixes
+from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.utils.import_session import (
     FileProblem,
     discard_sheet_copy,
     file_from_google_sheet,

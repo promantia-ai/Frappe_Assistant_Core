@@ -15,10 +15,10 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
-from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
-from frappe_assistant_core.plugins.core import import_plan
-from frappe_assistant_core.plugins.core.import_mapping import SESSION_DOCTYPE, load_session
-from frappe_assistant_core.plugins.core.import_session import FileProblem
+from frappe_assistant_core.utils import import_opening_invoices as opening_invoices
+from frappe_assistant_core.utils import import_plan
+from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
+from frappe_assistant_core.utils.import_session import FileProblem
 
 
 class ImportOpeningInvoices(BaseTool):

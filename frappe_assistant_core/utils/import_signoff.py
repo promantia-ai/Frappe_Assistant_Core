@@ -23,9 +23,9 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, cint, cstr, escape_html, flt, fmt_money, getdate, now_datetime
 
-from frappe_assistant_core.plugins.core import import_dry_run as dry_run
-from frappe_assistant_core.plugins.core import import_failures, import_fixes
-from frappe_assistant_core.plugins.core.import_session import (
+from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_failures, import_fixes
+from frappe_assistant_core.utils.import_session import (
     FileProblem,
     get_readable_file_by_id,
     read_sheet_rows,

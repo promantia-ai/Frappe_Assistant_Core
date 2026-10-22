@@ -22,8 +22,8 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_dry_run, import_fixes
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
+from frappe_assistant_core.utils import import_dry_run, import_fixes
 
 MAPPING = {
     "Customer Name": "customer_name",

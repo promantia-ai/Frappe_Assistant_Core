@@ -15,14 +15,14 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core import import_opening_invoices as opening_invoices
-from frappe_assistant_core.plugins.core import import_opening_stock as opening_stock
-from frappe_assistant_core.plugins.core import import_presets as presets
-from frappe_assistant_core.plugins.core.import_session import import_target_problem
 from frappe_assistant_core.plugins.core.tools import apply_import_preset as tool_module
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.tests.test_import_opening_balances import OpeningBalancesCase
 from frappe_assistant_core.tests.test_import_presets import LEDGERS, TB
+from frappe_assistant_core.utils import import_opening_invoices as opening_invoices
+from frappe_assistant_core.utils import import_opening_stock as opening_stock
+from frappe_assistant_core.utils import import_presets as presets
+from frappe_assistant_core.utils.import_session import import_target_problem
 
 
 def xlsx(rows, sheet="Sheet1") -> bytes:

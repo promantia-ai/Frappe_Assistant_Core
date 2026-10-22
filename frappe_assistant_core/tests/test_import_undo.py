@@ -24,11 +24,11 @@ from frappe.utils import add_days, add_to_date, get_datetime, getdate, now_datet
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import (
     FACImportSession,
 )
-from frappe_assistant_core.plugins.core import import_undo
 from frappe_assistant_core.tests.test_import_opening_balances import OpeningBalancesCase
 from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
 from frappe_assistant_core.tests.test_import_opening_stock import OpeningStockCase
 from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase
+from frappe_assistant_core.utils import import_undo
 
 
 @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
@@ -1158,7 +1158,7 @@ class TestRun(BlockerCase):
 
         def refuse(doctype=None, name=None, *args, **kwargs):
             if name == n["alpha"]:
-                frappe.throw("Alpha is refused")
+                frappe.throw(frappe._("Alpha is refused"))
             if name == n["gamma"]:  # deleted, then refused: the savepoint brings it back
                 real(doctype, name, *args, **kwargs)
                 raise frappe.ValidationError("Gamma is refused after its delete")
@@ -1690,7 +1690,7 @@ def refusing(*names):
 
     def delete_doc(doctype=None, name=None, *args, **kwargs):
         if name in names:
-            frappe.throw("Refused for the test")
+            frappe.throw(frappe._("Refused for the test"))
         return real(doctype, name, *args, **kwargs)
 
     return delete_doc
@@ -1952,7 +1952,7 @@ class TestReviewFindings(BlockerCase):
         # mapping and its fixes are unchanged, so the session is still checked as it is.
         session, _checked = self._ready_session()
         doc = self._doc(session)
-        from frappe_assistant_core.plugins.core import import_fixes
+        from frappe_assistant_core.utils import import_fixes
 
         self.assertTrue(import_fixes.checked_as_is(doc))
 
