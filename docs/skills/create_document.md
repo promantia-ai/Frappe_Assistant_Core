@@ -117,7 +117,8 @@ Pass `documents` instead of `doctype` and `data`: one call, so the user approves
 }
 ```
 
-- **Any DocTypes, up to 100 records.** More than that: split them into several calls.
+- **Up to 100 records.** More than that: split them into several calls.
+- **Customisations and schema changes one at a time.** A customisation (Custom Field, Property Setter, Client or Server Script, Custom DocPerm, DocType, Role, Report, Print Format, Notification, Workflow, Workflow State, Workflow Action Master) or a record whose save changes the database schema (Inventory Dimension, Accounting Dimension, Service Level Agreement) is refused in `documents`, before anything is created: `error_type: "one_at_a_time"`, with every such record in `problems`. Create each of them on its own, with `doctype` and `data`, one call each (the user approves each customisation); the other records may still go as a list. Any other record whose save would change the schema fails the list the same way (`error_type: "schema_change_in_list"`), and nothing is created.
 - **In order:** put a parent before the records under it.
 - **All or nothing.** Every record is checked first (permission, restricted fields); then they are created one by one with the same checks as a single record. If one fails, none is kept, and the error names it: "Document 2 (Territory) couldn't be created: … Nothing was created." Fix it, or take it out, and call again. What a save sends out at once can't be taken back, as with one record: a Notification's Slack or SMS message, say.
 - **Show the user the list as a table before calling.** The approval card then lists each record with every field it sets (the first 10, the rest on request).

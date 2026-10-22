@@ -122,7 +122,8 @@ Pass `documents` instead of `doctype`, `name` and `data`: one call, so the user 
 }
 ```
 
-- **Up to 100 records**, any DocTypes; each `data` works as for one record (child tables included).
+- **Up to 100 records**; each `data` works as for one record (child tables included).
+- **Customisations and schema changes one at a time.** A customisation (Custom Field, Property Setter, Client or Server Script, Custom DocPerm, DocType, Role, Report, Print Format, Notification, Workflow, Workflow State, Workflow Action Master) or a record whose save changes the database schema (Inventory Dimension, Accounting Dimension, Service Level Agreement) is refused in `documents`, before anything is changed: `error_type: "one_at_a_time"`, with every such record in `problems`. Update each of them on its own, with `doctype`, `name` and `data`, one call each (the user approves each customisation); the other records may still go as a list. Any other record whose save would change the schema fails the list the same way (`error_type: "schema_change_in_list"`), and nothing is changed.
 - **All or nothing.** Every record is checked first (permission, restricted fields); then they are updated one by one with the same checks as a single record. If one fails, none is changed, and the error names it: "Document 2 (Customer 'CUST-0002') couldn't be updated: … Nothing was updated." What a save sends out at once can't be taken back, as with one record: a Notification's Slack or SMS message, say.
 - **Show the user the changes as a table before calling.** The approval card then lists each record with every field it changes (the first 10, the rest on request).
 
