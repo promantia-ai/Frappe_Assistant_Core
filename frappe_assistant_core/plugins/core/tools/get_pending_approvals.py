@@ -30,6 +30,93 @@ from frappe_assistant_core.core.base_tool import BaseTool
 MAX_TRANSITION_DOCS = 20
 
 
+def _open_workflow_actions(
+    user: str, limit: int, doctype: str | None = None, offset: int = 0
+) -> list[frappe._dict]:
+    """Open Workflow Actions addressed to ``user``, newest first, at most ``limit``.
+
+    An action is addressed to the user by a permitted role or directly by ``user``;
+    Administrator sees all. It does not check access to the referenced documents; see ``readable_open_approvals``.
+    """
+    roles = frappe.get_roles(user)
+
+    WA = DocType("Workflow Action")
+    WAPR = DocType("Workflow Action Permitted Role")
+
+    # Subquery: workflow action names where permitted roles overlap user's roles
+    role_subquery = (
+        frappe.qb.from_(WA).join(WAPR).on(WA.name == WAPR.parent).select(WA.name).where(WAPR.role.isin(roles))
+    )
+
+    query = (
+        frappe.qb.from_(WA)
+        .select(
+            WA.name,
+            WA.reference_doctype,
+            WA.reference_name,
+            WA.workflow_state,
+            WA.user,
+            WA.creation,
+        )
+        .where(WA.status == "Open")
+        .orderby(WA.creation, order=frappe.qb.desc)
+        .orderby(WA.name, order=frappe.qb.desc)
+        .limit(limit)
+        .offset(offset)
+    )
+
+    # Administrator sees all; others filtered by role or direct user
+    if user != "Administrator":
+        query = query.where(WA.name.isin(role_subquery) | (WA.user == user))
+
+    if doctype:
+        query = query.where(WA.reference_doctype == doctype)
+
+    return query.run(as_dict=True)
+
+
+MAX_SCANNED_ACTIONS = 1000
+MIN_PAGE_SIZE = 100
+
+
+def _readable_subset(user: str, actions: list[frappe._dict]) -> list[frappe._dict]:
+    """The ``actions`` whose referenced documents ``user`` may read (User Permissions apply)."""
+    names_by_doctype: dict[str, set[str]] = {}
+    for action in actions:
+        names_by_doctype.setdefault(action.reference_doctype, set()).add(action.reference_name)
+
+    readable: set[tuple[str, str]] = set()
+    for ref_doctype, names in names_by_doctype.items():
+        if not frappe.db.exists("DocType", ref_doctype) or not frappe.has_permission(
+            ref_doctype, "read", user=user
+        ):
+            continue
+        visible = frappe.get_list(ref_doctype, filters={"name": ["in", list(names)]}, pluck="name", user=user)
+        readable.update((ref_doctype, name) for name in visible)
+    return [a for a in actions if (a.reference_doctype, a.reference_name) in readable]
+
+
+def readable_open_approvals(user: str, limit: int, doctype: str | None = None) -> list[frappe._dict]:
+    """Up to ``limit`` open Workflow Actions for ``user`` whose documents ``user`` may read.
+
+    The Workflow Action query only matches roles and users, so each page is re-checked
+    through ``get_list`` to apply User Permissions. Pages of ``max(limit * 3, MIN_PAGE_SIZE)`` newest-first rows
+    are scanned until ``limit`` readable rows are found, the source is exhausted, or
+    ``MAX_SCANNED_ACTIONS`` rows have been scanned, so hidden rows ahead of readable ones
+    do not shrink the result. Ordering is preserved.
+    """
+    page_size = max(limit * 3, MIN_PAGE_SIZE)
+    readable: list[frappe._dict] = []
+    offset = 0
+    while len(readable) < limit and offset < MAX_SCANNED_ACTIONS:
+        page = _open_workflow_actions(user, min(page_size, MAX_SCANNED_ACTIONS - offset), doctype, offset)
+        readable.extend(_readable_subset(user, page))
+        if len(page) < min(page_size, MAX_SCANNED_ACTIONS - offset):
+            break
+        offset += len(page)
+    return readable[:limit]
+
+
 class GetPendingApprovals(BaseTool):
     """
     Tool for discovering documents pending the current user's approval.
@@ -47,7 +134,7 @@ class GetPendingApprovals(BaseTool):
             "about pending approvals, documents awaiting action, workflow items needing "
             "review, or approval queues. Queries the Workflow Action system — NOT Todos "
             "or Notifications. Returns documents grouped by type with workflow state and "
-            "available actions (Approve, Reject, etc.)."
+            "available actions (Approve, Reject, etc.), limited to documents the user can open."
         )
         self.requires_permission = None
 
@@ -83,45 +170,8 @@ class GetPendingApprovals(BaseTool):
         include_actions = arguments.get("include_actions", True)
 
         user = frappe.session.user
-        roles = frappe.get_roles(user)
-
-        WA = DocType("Workflow Action")
-        WAPR = DocType("Workflow Action Permitted Role")
-
-        # Subquery: workflow action names where permitted roles overlap user's roles
-        role_subquery = (
-            frappe.qb.from_(WA)
-            .join(WAPR)
-            .on(WA.name == WAPR.parent)
-            .select(WA.name)
-            .where(WAPR.role.isin(roles))
-        )
-
-        # Main query
-        query = (
-            frappe.qb.from_(WA)
-            .select(
-                WA.name,
-                WA.reference_doctype,
-                WA.reference_name,
-                WA.workflow_state,
-                WA.user,
-                WA.creation,
-            )
-            .where(WA.status == "Open")
-            .orderby(WA.creation, order=frappe.qb.desc)
-            .limit(limit)
-        )
-
-        # Administrator sees all; others filtered by role or direct user
-        if user != "Administrator":
-            query = query.where(WA.name.isin(role_subquery) | (WA.user == user))
-
-        if doctype_filter:
-            query = query.where(WA.reference_doctype == doctype_filter)
-
         try:
-            pending_actions = query.run(as_dict=True)
+            pending_actions = readable_open_approvals(user, limit, doctype_filter)
         except Exception as e:
             frappe.log_error(
                 title=_("Pending Approvals Query Error"),

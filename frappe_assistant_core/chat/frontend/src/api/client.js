@@ -27,10 +27,12 @@ import { notifications } from "./domains/notifications";
 import { packs } from "./domains/packs";
 import { privacy } from "./domains/privacy";
 import { profile } from "./domains/profile";
+import { projects } from "./domains/projects";
 import { registration } from "./domains/registration";
 import { routingPreferences } from "./domains/routingPreferences";
 import { sharedKnowledge } from "./domains/sharedKnowledge";
 import { suggestions } from "./domains/suggestions";
+import { home } from "./domains/home";
 import { support } from "./domains/support";
 import { templates } from "./domains/templates";
 import { tools } from "./domains/tools";
@@ -53,10 +55,12 @@ export const api = {
 	documents,
 	memories,
 	profile,
+	projects,
 	sharedKnowledge,
 	workflows,
 	registration,
 	suggestions,
+	home,
 	support,
 	templates,
 	models,

@@ -20,16 +20,22 @@ Understand report requirements, structure, and metadata before execution.
 """
 
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
+from frappe_assistant_core.plugins.core.tools.report_access import can_run_report
 
 # Fieldtypes whose `options` is a set of accepted values rather than a target
 # DocType. Everything else (Link, MultiSelectList) points at a DocType instead.
 VALUE_CONSTRAINED_FIELDTYPES = {"Select", "Autocomplete"}
+
+# Longest a single generate_report call waits on a prepared report. FAC tools run in their
+# own MCP HTTP request with no cancel signal, so this bound is what keeps a heavy report
+# from holding a chat turn; the caller retries and the retry reuses the same job.
+PREPARED_REPORT_WAIT_SECONDS = 15
 
 # A JavaScript string literal in each of its three quotings. Empty strings have
 # to match as well: a leading "" in an options array — the "no selection" entry —
@@ -72,12 +78,36 @@ def normalize_filter_options(filter_def: Dict[str, Any]) -> Dict[str, Any]:
     return filter_def
 
 
+# Discovery statuses that are an answer: the report's filters are known, or it has none.
+_KNOWN_CONTRACT_STATUSES = ("resolved", "no_filters_declared")
+
+
+def discover_filter_contract(report_doc) -> Optional[Dict[str, Dict[str, Any]]]:
+    """The report's filter contract as ``{fieldname: definition}``, or None when unknown.
+
+    ``{}`` means the report positively declares no filters; None means discovery
+    could not tell (a Script Report with no readable JS, positional SQL
+    placeholders), so callers must not treat the report as filterless.
+    """
+    tool = ReportRequirements()
+    parsed, diagnostics = tool._discover_report_filters(report_doc.name, report_doc)
+    if diagnostics.get("status") not in _KNOWN_CONTRACT_STATUSES:
+        return None
+    return {
+        filter_def["fieldname"]: filter_def
+        for filter_def in (parsed or {}).get("filters", [])
+        if filter_def.get("fieldname")
+    }
+
+
 def discover_filter_definitions(report_doc) -> Dict[str, Dict[str, Any]]:
     """The report's filter contract as ``{fieldname: definition}``.
 
     The single entry point shared by ``report_requirements``, which advertises the
     contract, and ``generate_report``, which validates against it. Deriving both
     from here is what stops the two tools disagreeing about their own contract.
+    An unknown contract reads as ``{}`` here; use ``discover_filter_contract`` to
+    tell "no filters" from "could not tell".
     """
     tool = ReportRequirements()
     parsed, _diagnostics = tool._discover_report_filters(report_doc.name, report_doc)
@@ -178,8 +208,8 @@ class ReportRequirements(BaseTool):
                 result["prepared_report_info"] = {
                     "requires_background_processing": True,
                     "typical_execution_time": f"{report_timeout // 60} minutes for large datasets",
-                    "behavior": "First execution automatically waits for completion (up to 5 minutes). Subsequent calls with same filters retrieve cached results instantly.",
-                    "recommendation": "The tool will automatically wait for report completion. If timeout occurs, retry with the same filters to retrieve cached results.",
+                    "behavior": f"First execution waits up to {PREPARED_REPORT_WAIT_SECONDS} seconds for completion. If it is not ready, call generate_report again with the same filters: the retry reuses the same job and returns the result once it finishes.",
+                    "recommendation": "If the result status is 'timeout', wait a minute and call generate_report again with exactly the same filters.",
                 }
             else:
                 result["prepared_report_info"] = {
@@ -1052,7 +1082,7 @@ class ReportRequirements(BaseTool):
             report = frappe.get_doc("Report", report_name)
 
             # Check permission
-            if not frappe.has_permission("Report", "read", report):
+            if not can_run_report(report_name):
                 return {"error": f"Insufficient permissions to access report '{report_name}'"}
 
             # Build comprehensive metadata

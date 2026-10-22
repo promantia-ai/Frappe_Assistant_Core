@@ -1,10 +1,6 @@
 <template>
 	<div class="app-layout">
-		<NavigationSidebar
-			:collapsed="navCollapsed"
-			@open-settings="$router.push('/settings')"
-			@toggle-sidebar="navCollapsed = !navCollapsed"
-		/>
+		<NavigationSidebar @open-settings="$router.push('/settings')" />
 
 		<main class="main-content">
 			<!-- Drawer-width top bar so the app nav drawer is reachable from settings
@@ -50,14 +46,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from "vue";
+import { computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import NavigationSidebar from "@/components/layout/NavigationSidebar.vue";
 import SettingsSidebar from "@/components/settings/layout/SettingsSidebar.vue";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { useNavToggle } from "@/composables/useNavToggle";
+import { __ } from "@/utils/i18n";
 
-const navCollapsed = ref(false);
 const route = useRoute();
 const router = useRouter();
 const { isMobile, isTablet } = useIsMobile();
@@ -73,6 +69,10 @@ const showContent = computed(() => !isMobile.value || isLeaf.value);
 const leafTitles = {
 	profile: "Profile",
 	appearance: "Appearance",
+	// A getter, so the label is translated when read, after the catalogue has loaded.
+	get home() {
+		return __("Home page");
+	},
 	privacy: "Privacy & Data",
 	"my-tickets": "Support",
 	memory: "Memory",

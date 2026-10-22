@@ -24,12 +24,18 @@
 			<TopBar
 				v-if="!isOnboarding"
 				:title="currentChatTitle"
+				:project="topBarProject"
+				:rename-value="chatRenameSeed(currentSession)"
+				:renamable="!!currentSession && !route.params.projectId"
+				@rename="renameCurrentChat"
 				:show-actions="registrationStatus === 'ready' && isUserSetupComplete"
 				@toggle-sidebar="sidebarCollapsed = !sidebarCollapsed"
-				@new-chat="handleNewChat"
 			/>
 
+			<ProjectPage v-if="route.params.projectId" :project-id="route.params.projectId" />
+
 			<!-- Chat Area + adaptive context rail -->
+			<template v-else>
 			<div class="chat-shell" ref="chatShellRef" :style="readWidthStyle">
 			<aside
 				v-if="indexMode !== 'hidden'"
@@ -209,6 +215,7 @@
 				</div>
 			</transition>
 			</div>
+			</template>
 		</main>
 
 		<!-- Template Browser Modal -->
@@ -240,9 +247,14 @@ import { useModelStore } from "@/stores/modelStore";
 import { useSuggestionStore } from "@/stores/suggestionStore";
 import { resolveComposerRoute } from "@/stores/chat/composerRouting";
 import { useToast } from "@/composables/useToast";
+import { __ } from "@/utils/i18n";
 import { storeToRefs } from "pinia";
 import NavigationSidebar from "@/components/layout/NavigationSidebar.vue";
 import TopBar from "@/components/layout/TopBar.vue";
+import { chatDisplayTitle, chatRenameSeed } from "@/utils/chatTitle";
+import ProjectPage from "@/components/projects/ProjectPage.vue";
+import { useConversationsStore } from "@/stores/conversationsStore";
+import { useProjectsStore } from "@/stores/projectsStore";
 import InputArea from "@/components/chat/InputArea.vue";
 import ConnectionBanners from "@/components/chat/ConnectionBanners.vue";
 import ChatStagePicker from "@/components/chat/ChatStagePicker.vue";
@@ -266,6 +278,7 @@ import { useChatSessionActions } from "@/composables/useChatSessionActions";
 import { useRobotMoodWiring } from "@/composables/useRobotMoodWiring";
 import { useContextRail } from "@/composables/useContextRail";
 import { useSheetDismiss } from "@/composables/useSheetDismiss";
+import { useComposerFocus } from "@/composables/useComposerFocus";
 import { deriveArtifacts } from "@/utils/contextArtifacts";
 import { isPausedTurn, isStoppedTurn } from "@/utils/turnState";
 import ContextRail from "@/components/chat/ContextRail.vue";
@@ -277,17 +290,27 @@ import { useLedgerIndex } from "@/composables/useLedgerIndex";
 import { loadPins, togglePin } from "@/utils/indexPins.js";
 
 useRobotMoodWiring();
+useComposerFocus();
 
 const route = useRoute();
 const router = useRouter();
 const chatStore = useChatStore();
 const userStore = useUserStore();
+const conversationsStore = useConversationsStore();
+const projectsStore = useProjectsStore();
 const modelStore = useModelStore();
 const suggestionStore = useSuggestionStore();
 const { showError } = useToast();
 
+function renameCurrentChat(title) {
+	conversationsStore
+		.renameSession(currentSessionId.value, title)
+		.catch((err) => showError(err?.message || __("Something went wrong")));
+}
+
 const {
 	currentSessionId,
+	currentProjectId,
 	messages,
 	isLoading,
 	isStreaming,
@@ -379,14 +402,21 @@ const userNotRegistered = computed(() => {
 	return !userAuthStatus.value.user_registered && !userAuthStatus.value.ready;
 });
 
+const topBarProject = computed(() =>
+	currentProjectId.value && !route.params.projectId
+		? {
+				name: currentProjectId.value,
+				title:
+					projectsStore.byId(currentProjectId.value)?.title ||
+					currentSession.value?.project_title ||
+					"",
+			}
+		: null
+);
+
 const currentChatTitle = computed(() => {
-	if (currentSession.value?.preview) {
-		return (
-			currentSession.value.preview.slice(0, 50) +
-			(currentSession.value.preview.length > 50 ? "..." : "")
-		);
-	}
-	return messages.value.length > 0 ? "Chat" : "New Chat";
+	if (route.params.projectId) return projectsStore.byId(route.params.projectId)?.title || __("Project");
+	return chatDisplayTitle(currentSession.value, messages.value.length > 0);
 });
 
 // Artifacts come from the most recent assistant turn's blocks. The rail mirrors
@@ -497,7 +527,8 @@ function handleRailReviewApproval(blockId) {
 useChatViewInit(
 	{ chatStore, userStore, modelStore, suggestionStore },
 	{ route, router },
-	{ registrationStatus, isUserSetupComplete }
+	{ registrationStatus, isUserSetupComplete },
+	{ onFirstMessage: (text) => handleSendMessage({ message: text, files: [] }) }
 );
 
 // Auto-scroll to bottom on new messages / streaming chunks
@@ -563,7 +594,7 @@ async function handleNewChat() {
 // Session lifecycle — select, delete (recurses into handleNewChat when list empties),
 // continue-archived. Extracted to keep ChatView under its size budget.
 const { handleSessionSelect, handleDeleteSession, handleContinueArchived } = useChatSessionActions(
-	{ chatStore, router, handleNewChat }
+	{ chatStore, route, router, handleNewChat }
 );
 
 // One InputArea instance: hero slot on the empty state, bottom dock in a

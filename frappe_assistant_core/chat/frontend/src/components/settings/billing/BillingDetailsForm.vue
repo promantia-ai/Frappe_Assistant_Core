@@ -262,10 +262,9 @@ const taxPreview = computed(() => {
 // Validation lives in `_billing/billingValidation` so it can be unit-tested
 // and kept in step with the server's rules. Blur re-checks only the field the
 // user just left, so typing in one input never lights up the whole form.
+// The phone is not rewritten here: it sits above the country select, so on
+// blur the country may still be the India default. `save()` normalises it.
 function validateField(field) {
-	if (field === "billing_phone") {
-		form.value.billing_phone = normalisePhone(form.value.billing_phone);
-	}
 	if (field === "gstin") {
 		form.value.gstin = String(form.value.gstin || "").trim().toUpperCase();
 	}
@@ -341,7 +340,10 @@ async function load() {
 async function save() {
 	// Normalise before validating so a phone typed with spaces is not rejected
 	// for punctuation we were about to strip anyway.
-	form.value.billing_phone = normalisePhone(form.value.billing_phone);
+	form.value.billing_phone = normalisePhone(
+		form.value.billing_phone,
+		form.value.billing_country
+	);
 	form.value.gstin = String(form.value.gstin || "").trim().toUpperCase();
 
 	const errors = validateBillingForm(form.value);

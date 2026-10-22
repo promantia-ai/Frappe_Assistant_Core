@@ -13,18 +13,26 @@
 				</svg>
 			</div>
 			<div class="approval-heading">
-				<div class="approval-title">Approve: {{ approvalTitle }}</div>
-				<div v-if="consequence" class="approval-subtitle">{{ consequence }}</div>
+				<div class="approval-title">{{ message.entry.value ? messageTitle : `Approve: ${approvalTitle}` }}</div>
+				<div v-if="subtitle" class="approval-subtitle">{{ subtitle }}</div>
 			</div>
 			<span v-if="!hasDecision" class="needs-you-pill">NEEDS YOU</span>
 		</div>
 
-		<p v-if="toolDescription" class="approval-description">{{ toolDescription }}</p>
+		<template v-if="message.entry.value">
+			<p v-if="message.failed.value" class="approval-description">{{ __("Couldn't load the preview") }}</p>
+			<p v-else-if="message.blockedReason.value !== null" class="approval-description">
+				{{ message.blockedReason.value }}
+			</p>
+			<EmailPreview v-else :preview="message.preview.value" v-bind="message.fields.value" />
+		</template>
+
+		<p v-else-if="toolDescription" class="approval-description">{{ toolDescription }}</p>
 
 		<!-- Several records in one call: each one, so the user sees what they approve -->
 		<div v-if="records.length" class="approval-records">
 			<div class="records-heading">
-				{{ records.length }} {{ records.length === 1 ? "record" : "records" }}
+				{{ records.length === 1 ? __("1 record") : __("{0} records", [records.length]) }}
 			</div>
 			<ol class="records-list">
 				<li v-for="(line, index) in visibleRecords" :key="index">{{ line }}</li>
@@ -34,59 +42,54 @@
 				class="field-toggle"
 				@click="showAllRecords = !showAllRecords"
 			>
-				{{ showAllRecords ? "Show fewer ‹" : `Show all ${records.length} ›` }}
+				{{ showAllRecords ? __("Show fewer ‹") : __("Show all {0} ›", [records.length]) }}
 			</button>
 		</div>
 
-		<!-- Scannable 2-col key/value table -->
-		<div v-if="hasDetails" class="approval-table">
-			<template v-for="[key, value] in visibleRows" :key="key">
-				<span class="field-key">{{ formatKey(key) }}</span>
-				<span
-					class="field-value"
-					:class="{ 'value-mono': isMonoValue(key, value), 'value-money': isMoneyKey(key) }"
-					>{{ formatValue(value) }}</span
-				>
-			</template>
-			<template v-if="fieldSplit.overflowCount > 0">
-				<span class="field-more">+ {{ fieldSplit.overflowCount }} more</span>
-				<button class="field-toggle" @click="showAllFields = !showAllFields">
-					{{ showAllFields ? "Show fewer fields ‹" : "Show all fields ›" }}
-				</button>
-			</template>
-		</div>
+		<ApprovalDetails v-if="!message.entry.value" :block="block" />
 
 		<div v-if="hasDecision" class="decided-banner">
 			<span class="decided-label">{{ decidedLabel }}</span>
 			<span v-if="batchInfo" class="decided-batch">{{ batchInfo }}</span>
 		</div>
 
-		<div v-else class="approval-actions">
-			<button class="ql-btn ql-btn-approve" :disabled="submitting" @click="handleApprove('approve')">
-				Approve
-			</button>
+		<div v-else-if="message.blockedReason.value !== null" class="approval-actions">
 			<button class="ql-btn ql-btn-reject" :disabled="submitting" @click="handleReject">
-				Reject
-			</button>
-			<button class="ql-btn ql-btn-trust" :disabled="submitting" @click="handleApprove('trust')">
-				Always allow this tool
+				{{ __("Dismiss") }}
 			</button>
 		</div>
+
+		<template v-else>
+			<label v-if="!message.failed.value && !isCustomisation" class="trust-choice">
+				<input v-model="dontAskAgain" type="checkbox" :disabled="submitting || message.loading.value" />
+				{{ __("Don't ask again for this tool") }}
+			</label>
+			<div class="approval-actions">
+				<button
+					v-if="!message.failed.value"
+					class="ql-btn ql-btn-approve"
+					:disabled="submitting || message.loading.value"
+					@click="handleApprove(dontAskAgain && !isCustomisation ? 'trust' : 'approve')"
+				>
+					{{ message.entry.value ? __(message.entry.value.sendLabel) : "Approve" }}
+				</button>
+				<button class="ql-btn ql-btn-reject" :disabled="submitting" @click="handleReject">
+					Reject
+				</button>
+			</div>
+		</template>
 	</div>
 </template>
 
 <script setup>
 import { computed, ref } from "vue";
-import {
-	documentLines,
-	flattenInput,
-	formatToolName,
-	formatKey,
-	formatValue,
-	isMonoValue,
-	isMoneyKey,
-	splitDetailFields,
-} from "./helpers";
+import { __ } from "@/utils/i18n";
+import ApprovalDetails from "./ApprovalDetails.vue";
+import EmailPreview from "./EmailPreview.vue";
+import { useMessagePreview } from "./useMessagePreview";
+import { baseToolName, isCustomisationRisk } from "@/utils/toolNames";
+import { writeConsequence } from "./customisation";
+import { documentLines, formatToolName } from "./helpers";
 
 const props = defineProps({
 	block: { type: Object, required: true },
@@ -96,6 +99,17 @@ const props = defineProps({
 const emit = defineEmits(["approve", "reject"]);
 
 const hasDecision = computed(() => Boolean(props.block.decision));
+// AR flags customisation writes: they are always asked about, so no "don't ask again".
+const isCustomisation = computed(() => isCustomisationRisk(props.block));
+// Ticked, the approve button also stops this tool asking again (AR Tool Trust "always").
+const dontAskAgain = ref(false);
+
+// Message tools (send_email, reply_to_helpdesk_ticket) show their draft as a message.
+const message = useMessagePreview(() => props.block);
+const messageTitle = computed(() => message.preview.value?.title || __(message.entry.value.sendLabel));
+const subtitle = computed(() =>
+	message.entry.value ? message.preview.value?.context || "" : consequence.value,
+);
 
 const decidedLabel = computed(() => {
 	const r = props.block.decision?.resolution;
@@ -115,12 +129,6 @@ const approvalTitle = computed(() => {
 	return map[props.block.tool_name] || formatToolName(props.block.tool_name);
 });
 
-const hasDetails = computed(
-	() => props.block.input && Object.keys(flattenInput(props.block.input)).length > 0,
-);
-
-const showAllFields = ref(false);
-
 // Several records in one call (create_document / update_document `documents`).
 const RECORDS_SHOWN = 10;
 const showAllRecords = ref(false);
@@ -129,59 +137,17 @@ const visibleRecords = computed(() =>
 	showAllRecords.value ? records.value : records.value.slice(0, RECORDS_SHOWN),
 );
 
-const fieldSplit = computed(() => {
-	if (!props.block.input) return { primary: [], overflow: [], overflowCount: 0 };
-	return splitDetailFields(flattenInput(props.block.input), 4);
-});
-
-// Consequence subtitle — states the concrete write effect, but ONLY for tools
-// we can be certain write to the ERP. Showing "This action will write to your
-// ERP" for every other tool was misleading: read-only/clarification tools (e.g.
-// ask_user, get_skill) and dynamic tools (run_python_code) don't necessarily
-// write, and a false "will write" warning erodes trust and trains users to
-// ignore it on calls that genuinely do mutate data. For unmapped tools we show
-// no consequence line — the title, tool description and input table already
-// convey what is about to happen.
-// document_action submits, cancels or amends, so its warning follows the requested action.
-const DOCUMENT_ACTION_CONSEQUENCES = {
-	submit: "This will submit a record — it becomes immutable",
-	cancel: "This will cancel a submitted record and reverse its accounting and stock entries",
-	amend: "This will create a new draft copy of a cancelled record",
+// Several records: how many, and that they are written all or none.
+const MANY_CONSEQUENCES = {
+	create_document: (count) => __("This will write {0} new records to your ERP, all or none", [count]),
+	update_document: (count) => __("This will modify {0} existing records in your ERP, all or none", [count]),
 };
 
-function documentActionConsequence(input) {
-	const action = input && typeof input === "object" ? String(input.action || "submit") : "";
-	return (
-		DOCUMENT_ACTION_CONSEQUENCES[action.trim().toLowerCase()] ||
-		"This will submit, cancel or amend a record in your ERP"
-	);
-}
-
 const consequence = computed(() => {
-	if (props.block.tool_name === "document_action") {
-		return documentActionConsequence(props.block.input);
-	}
-	const count = records.value.length;
-	if (count > 1) {
-		const many = {
-			create_document: `This will write ${count} new records to your ERP, all or none`,
-			update_document: `This will modify ${count} existing records in your ERP, all or none`,
-		};
-		if (many[props.block.tool_name]) return many[props.block.tool_name];
-	}
-	const map = {
-		create_document: "This will write a new record to your ERP",
-		update_document: "This will modify an existing record in your ERP",
-		delete_document: "This will permanently delete a record from your ERP",
-	};
-	return map[props.block.tool_name] || "";
+	const many = MANY_CONSEQUENCES[baseToolName(props.block.tool_name)];
+	if (many && records.value.length > 1) return many(records.value.length);
+	return writeConsequence(props.block.tool_name, props.block.input);
 });
-
-const visibleRows = computed(() =>
-	showAllFields.value
-		? [...fieldSplit.value.primary, ...fieldSplit.value.overflow]
-		: fieldSplit.value.primary,
-);
 
 // First sentence of the full MCP tool description so the user sees *what
 // this tool does* before approving. Falls back to null if unavailable.
@@ -282,41 +248,6 @@ function handleReject() {
 	font-size: 12px;
 	color: var(--ql-text-secondary);
 	line-height: 1.45;
-}
-
-/* Scannable 2-col key/value table */
-.approval-table {
-	display: grid;
-	grid-template-columns: auto 1fr;
-	gap: 5px 14px;
-	padding: 10px 14px;
-	font-size: 11.5px;
-}
-
-.field-key {
-	color: var(--ql-text-muted);
-}
-
-.field-value {
-	color: var(--ql-text);
-	font-weight: 500;
-	word-break: break-word;
-}
-
-/* Tabular mono numerals/dates so values align on the decimal (spec §2.2) */
-.value-mono {
-	font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
-	font-variant-numeric: tabular-nums;
-}
-
-/* Gold reserved for money (spec §2.1) */
-.value-money {
-	color: var(--ql-gold);
-}
-
-.field-more {
-	color: var(--ql-text-muted);
-	align-self: start;
 }
 
 .field-toggle {
@@ -421,15 +352,23 @@ function handleReject() {
 	border-color: var(--ql-danger);
 }
 
-.ql-btn-trust {
-	margin-left: auto;
-	padding: 7px 14px;
-	background: transparent;
-	color: var(--ql-text-muted);
-	border: none;
+.trust-choice {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 10px 14px 4px;
+	font-size: 12px;
+	color: var(--ql-text-secondary);
+	cursor: pointer;
 }
 
-.ql-btn-trust:hover:not(:disabled) {
-	color: var(--ql-text-secondary);
+.trust-choice input {
+	margin: 0;
+	accent-color: var(--ql-accent);
+}
+
+.trust-choice:has(input:disabled) {
+	cursor: default;
+	opacity: 0.6;
 }
 </style>

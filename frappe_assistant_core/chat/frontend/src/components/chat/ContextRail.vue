@@ -36,7 +36,7 @@
 		<div v-if="artifacts.approval" class="rail-approval">
 			<div class="rail-approval-head">
 				<span class="rail-approval-dot" aria-hidden="true"></span>
-				<span class="rail-approval-count">1 approval waiting</span>
+				<span class="rail-approval-count">{{ artifacts.approval.kind === "question" ? __("1 question waiting") : __("1 approval waiting") }}</span>
 			</div>
 			<div class="rail-approval-body">
 				<div class="rail-approval-title">{{ artifacts.approval.title }}</div>
@@ -44,7 +44,7 @@
 					{{ artifacts.approval.subtitle }}
 				</div>
 				<button class="rail-approval-btn" @click="$emit('review-approval', artifacts.approval.id)">
-					Review &amp; approve
+					{{ artifacts.approval.kind === "question" ? __("Answer") : __("Review & approve") }}
 				</button>
 			</div>
 		</div>
@@ -53,10 +53,25 @@
 		<div v-if="artifacts.records.length" class="rail-group">
 			<div class="rail-group-label">Records &amp; sources</div>
 			<div class="rail-chip-list">
-				<div v-for="rec in artifacts.records" :key="rec.key" class="rail-chip">
-					<span class="rail-chip-icon" aria-hidden="true">{{ rec.kind === "source" ? "📄" : "🗂" }}</span>
-					<span class="rail-chip-label" :title="rec.label">{{ rec.label }}</span>
-				</div>
+				<template v-for="rec in artifacts.records" :key="rec.key">
+					<component
+						:is="rec.url ? 'a' : 'div'"
+						class="rail-chip"
+						:class="{ 'rail-chip-link': rec.url }"
+						v-bind="rec.url ? { href: rec.url, target: '_blank', rel: 'noopener' } : {}"
+					>
+						<span class="rail-chip-icon" aria-hidden="true">{{ rec.kind === "source" ? "📄" : "🗂" }}</span>
+						<span class="rail-chip-label" :title="rec.label">{{ rec.label }}</span>
+					</component>
+					<a
+						v-if="rec.appliesTo"
+						class="rail-chip-open"
+						:href="rec.appliesTo.url"
+						target="_blank"
+						rel="noopener"
+						>{{ __("Open a new {0}", [rec.appliesTo.doctype]) }}</a
+					>
+				</template>
 			</div>
 		</div>
 
@@ -96,6 +111,7 @@
 import ActivityTimeline from "./rail/ActivityTimeline.vue";
 import TaskList from "./rail/TaskList.vue";
 import { useChatStore } from "@/stores/chatStore";
+import { __ } from "@/utils/i18n";
 
 const chatStore = useChatStore();
 
@@ -257,6 +273,15 @@ defineEmits(["review-approval", "collapse"]);
 }
 .rail-chip-link:hover {
 	border-color: var(--ql-border-hover, #dedad2);
+}
+.rail-chip-open {
+	padding: 0 8px 2px 30px;
+	font-size: 11px;
+	color: var(--ql-accent);
+	text-decoration: none;
+}
+.rail-chip-open:hover {
+	text-decoration: underline;
 }
 .rail-chip-label {
 	flex: 1;

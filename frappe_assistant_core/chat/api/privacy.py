@@ -14,7 +14,10 @@ to HMAC-signed AR API calls.
 import frappe
 from frappe import _
 
+from frappe_assistant_core.chat.home_preferences import HOME_SIGNALS_CACHE_KEY, parse_hidden_signals
+
 from .auth import _ar_user_id
+from .chat.projects import project_documents_enabled, project_memory_enabled
 
 
 def _get_client():
@@ -25,6 +28,26 @@ def _get_client():
     if not client:
         frappe.throw(_("FAC Cloud is not configured"))
     return client
+
+
+def _project_document_names(client, user: str, project: str) -> list[str] | None:
+    """File names attached to a project; None when AR cannot list them (AR's own export has them)."""
+    try:
+        result = client.list_documents(user_id=_ar_user_id(user), project_id=project, limit=500)
+        return [d["file_name"] for d in result.get("documents", [])]
+    except Exception:
+        frappe.log_error(title="FAC project documents export failed", message=frappe.get_traceback())
+        return None
+
+
+def _project_memory_count(client, user: str, project: str) -> int | None:
+    """Memories stored for a project; None when AR cannot list them (AR's own export has them)."""
+    try:
+        result = client.list_memories(user_id=_ar_user_id(user), project_id=project, limit=1)
+        return int(result["pagination"]["total"])
+    except Exception:
+        frappe.log_error(title="FAC project memories export failed", message=frappe.get_traceback())
+        return None
 
 
 @frappe.whitelist(methods=["GET"])
@@ -51,7 +74,16 @@ def export_my_data() -> dict:
     prefs = frappe.db.get_value(
         "FAC Chat User Preferences",
         {"user": user},
-        ["widget_position", "widget_theme", "keyboard_shortcut", "show_suggested_prompts"],
+        [
+            "widget_position",
+            "widget_theme",
+            "keyboard_shortcut",
+            "show_suggested_prompts",
+            "show_needs_you",
+            "needs_you_count",
+            "hidden_home_signals",
+            "show_personalized_suggestions",
+        ],
         as_dict=True,
     )
     if prefs:
@@ -60,15 +92,53 @@ def export_my_data() -> dict:
             "widget_theme": prefs.widget_theme,
             "keyboard_shortcut": prefs.keyboard_shortcut,
             "show_suggested_prompts": bool(prefs.show_suggested_prompts),
+            "show_needs_you": bool(prefs.show_needs_you),
+            "needs_you_count": prefs.needs_you_count,
+            "hidden_home_signals": parse_hidden_signals(prefs.hidden_home_signals),
+            "show_personalized_suggestions": bool(prefs.show_personalized_suggestions),
         }
+
+    faco_data["faco_projects"] = frappe.get_all(
+        "FAC Chat Project",
+        filters={"user": user},
+        fields=["name", "title", "instructions", "creation"],
+        order_by="creation asc",
+        limit_page_length=0,
+    )
+    if project_documents_enabled():
+        for project in faco_data["faco_projects"]:
+            project["documents"] = _project_document_names(client, user, project["name"])
+    memory_enabled = project_memory_enabled()
+    for project in faco_data["faco_projects"]:
+        project["memory_count"] = (
+            _project_memory_count(client, user, project["name"]) if memory_enabled else None
+        )
+    faco_data["faco_conversations"] = [
+        {
+            "session_id": row.name,
+            "title": row.title,
+            "project": row.project,
+            "started": row.started,
+            "last_activity": row.last_activity,
+            "is_archived": row.is_archived,
+        }
+        for row in frappe.get_all(
+            "FAC Chat Conversation",
+            filters={"user": user},
+            fields=["name", "title", "project", "started", "last_activity", "is_archived"],
+            order_by="creation asc",
+            limit_page_length=0,
+        )
+    ]
 
     # Message count (content already exported from AR side)
     faco_data["faco_messages_count"] = frappe.db.count("FAC Chat Message", {"user": user})
 
-    if ar_data and ar_data.get("data"):
-        ar_data["data"]["faco"] = faco_data
-
-    return ar_data or {"status": "success", "data": {"faco": faco_data}}
+    result = dict(ar_data) if isinstance(ar_data, dict) else {}
+    result.setdefault("status", "success")
+    result["data"] = dict(result["data"]) if isinstance(result.get("data"), dict) else {}
+    result["data"]["faco"] = faco_data
+    return result
 
 
 @frappe.whitelist(methods=["POST"])
@@ -124,9 +194,13 @@ def erase_my_data(password: str | None = None) -> dict:
     #    need to fire, and this avoids N document loads.
     local_deleted = len(message_names)
     frappe.db.delete("FAC Chat Message", {"user": user})
+    frappe.db.delete("FAC Chat Conversation", {"user": user})
+    frappe.db.delete("FAC Chat Project", {"user": user})
 
     prefs_name = frappe.db.get_value("FAC Chat User Preferences", {"user": user}, "name")
     frappe.db.delete("FAC Chat User Preferences", {"user": user})
+    # db.delete skips the controller's on_update, which is what drops the cached home payload.
+    frappe.cache.hdel(HOME_SIGNALS_CACHE_KEY, user)
 
     # FACO Usage Log — ships with the app; safe no-op if table absent.
     usage_log_deleted = 0
@@ -281,6 +355,26 @@ def update_my_consent(consent_type: str | None = None, granted: bool = True) -> 
     return client.update_user_consent(user_id=_ar_user_id(user), consent_type=consent_type, granted=granted)
 
 
+@frappe.whitelist(methods=["POST"])
+def confirm_memory_consent(keep: bool = False) -> dict:
+    """Answer AR's memory-consent confirmation (``memory_consent_pending``).
+
+    AR withdrew consent that came from a pre-ticked onboarding switch. Keeping memory
+    grants consent again; turning it off keeps consent withdrawn and deletes the user's
+    memories. Either answer clears the pending flag on AR.
+    """
+    if isinstance(keep, str):
+        keep = keep.lower() in ("true", "1", "yes")
+
+    ar_user = _ar_user_id(frappe.session.user)
+    client = _get_client()
+    # Withdraw before deleting, so nothing new is written between the two calls.
+    client.update_user_consent(user_id=ar_user, consent_type="memory", granted=keep)
+    if not keep:
+        client.delete_all_memories(user_id=ar_user)
+    return {"memory_consent": keep}
+
+
 _CONSENT_POLICIES = ("Opt-In", "Opt-Out")
 
 
@@ -321,6 +415,7 @@ def get_privacy_config() -> dict:
         if user_data:
             result["user_privacy"] = {
                 "memory_consent": user_data.get("memory_consent", False),
+                "memory_consent_pending": user_data.get("memory_consent_pending", False),
                 "processing_restricted": user_data.get("processing_restricted", False),
             }
     except Exception:

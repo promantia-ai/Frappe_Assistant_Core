@@ -10,6 +10,7 @@ vi.mock("@/api/client", () => ({
 			getMessages: vi.fn().mockResolvedValue({ messages: [] }),
 			getSessions: vi.fn().mockResolvedValue([]),
 			send: vi.fn().mockResolvedValue({}),
+			createSession: vi.fn().mockResolvedValue({ session_id: "faco_new" }),
 		},
 		suggestions: { get: vi.fn().mockResolvedValue({ suggestions: [] }) },
 		init: { initialize: vi.fn().mockResolvedValue(null) },
@@ -23,6 +24,7 @@ vi.mock("@/api/client", () => ({
 
 import { api } from "@/api/client";
 import WidgetPanel from "./WidgetPanel.vue";
+import InputArea from "@/components/chat/InputArea.vue";
 import PanelApp from "./PanelApp.vue";
 import WidgetWelcome from "./WidgetWelcome.vue";
 import BrowserToolConfirm from "./BrowserToolConfirm.vue";
@@ -36,6 +38,7 @@ import { useModelStore } from "@/stores/modelStore";
 import { useSpotlightStore } from "@/stores/spotlightStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 import { configureSurface, resetSurface } from "@/stores/chat/surface";
+import { configureWidgetSurface } from "./widgetSurface.js";
 import { DAILY_KEY, localDate } from "@/components/spotlight/spotlightRules";
 
 // A panel left mounted keeps its document-level listeners alive into the next test.
@@ -124,6 +127,7 @@ describe("widget panel", () => {
 	it("draws the header actions as icons that keep their accessible names", () => {
 		const w = mount(WidgetPanel, { global: { stubs } });
 		for (const [test, name] of [
+			["new-chat", "New chat"],
 			["expand", "Open Full Assistant"],
 			["close", "Close"],
 		]) {
@@ -138,7 +142,11 @@ describe("widget panel", () => {
 	// A one-click Hide left users with no visible way back; the preference stays in My Preferences.
 	it("offers no way to hide the widget from its header", () => {
 		const w = mount(WidgetPanel, { global: { stubs } });
-		expect(w.findAll(".wp-actions button").map((b) => b.attributes("data-test"))).toEqual(["expand", "close"]);
+		expect(w.findAll(".wp-actions button").map((b) => b.attributes("data-test"))).toEqual([
+			"new-chat",
+			"expand",
+			"close",
+		]);
 	});
 
 	it("asks the launcher to close, and hands the session to FAC Chat on expand", async () => {
@@ -153,6 +161,60 @@ describe("widget panel", () => {
 		await w.find('[data-test="expand"]').trigger("click");
 		expect(JSON.parse(sessionStorage.getItem("faco_active_session")).id).toBe("faco_1");
 		expect(assign).toHaveBeenCalledWith("/copilot");
+	});
+
+	describe("new chat", () => {
+		const newChatButton = (w) => w.find('[data-test="new-chat"]');
+
+		it("is disabled while the chat is empty, since it would start the chat already on screen", () => {
+			const w = mount(WidgetPanel, { global: { stubs } });
+			expect(newChatButton(w).attributes("disabled")).toBeDefined();
+		});
+
+		it("is disabled while a reply streams or an approved card resumes", async () => {
+			const chatStore = useChatStore();
+			chatStore.messages = [{ role: "user", content: "hi", blocks: [] }];
+			const w = mount(WidgetPanel, { global: { stubs } });
+			expect(newChatButton(w).attributes("disabled")).toBeUndefined();
+			chatStore.isStreaming = true;
+			await nextTick();
+			expect(newChatButton(w).attributes("disabled")).toBeDefined();
+			chatStore.isStreaming = false;
+			chatStore.isSubmittingInterrupts = true;
+			await nextTick();
+			expect(newChatButton(w).attributes("disabled")).toBeDefined();
+		});
+
+		it("starts a server session, shows the welcome, and offers the chat just left", async () => {
+			const chatStore = useChatStore();
+			chatStore.currentSessionId = "faco_1";
+			chatStore.messages = [{ role: "user", content: "hi", blocks: [] }];
+			// The list the welcome loaded before faco_1 existed; the server now has faco_1 in it.
+			chatStore.sessions = [{ session_id: "faco_old", preview: "Older chat" }];
+			api.chat.getSessions.mockResolvedValueOnce([
+				{ session_id: "faco_1", preview: "Chat just left" },
+				{ session_id: "faco_old", preview: "Older chat" },
+			]);
+			const w = mount(WidgetPanel, { global: { stubs } });
+			await newChatButton(w).trigger("click");
+			await flushPromises();
+			expect(api.chat.createSession).toHaveBeenCalled();
+			expect(chatStore.currentSessionId).toBe("faco_new");
+			expect(w.find(".ww").exists()).toBe(true);
+			expect(w.text()).toContain("Chat just left");
+		});
+
+		it("keeps the conversation when the server refuses a new session", async () => {
+			api.chat.createSession.mockRejectedValueOnce(new Error("offline"));
+			const chatStore = useChatStore();
+			chatStore.currentSessionId = "faco_1";
+			chatStore.messages = [{ role: "user", content: "hi", blocks: [] }];
+			const w = mount(WidgetPanel, { global: { stubs } });
+			await newChatButton(w).trigger("click");
+			await flushPromises();
+			expect(chatStore.currentSessionId).toBe("faco_1");
+			expect(chatStore.messages).toHaveLength(1);
+		});
 	});
 
 	it("shows the latest turn's plan above the composer, with its helpers' live labels", async () => {
@@ -336,6 +398,35 @@ describe("widget panel", () => {
 		expect(w.find(".ww").exists()).toBe(false);
 	});
 
+	it("names the form in the composer placeholder, once Desk has loaded each record", async () => {
+		let route = ["Form", "Sales Invoice", "SINV-0001"];
+		let formsByDoctype = { "Sales Invoice": { frm: { doctype: "Sales Invoice", doc: { name: "SINV-0001" }, is_new: () => false } } };
+		let onChange;
+		let onRefresh;
+		window.jQuery = () => ({ on: (_e, fn) => (onRefresh = fn), off: vi.fn() });
+		window.frappe = {
+			get_route: () => route,
+			router: { on: (_e, fn) => (onChange = fn), off: vi.fn() },
+			views: { get formview() { return formsByDoctype; } },
+		};
+		const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+		const w = mount(WidgetPanel, { global: { stubs } });
+		await nextTick();
+		expect(w.findComponent(InputArea).props("placeholder")).toBe("Ask about this Sales Invoice…");
+		// Router change fires before the Customer doc exists: the route already names the doctype.
+		route = ["Form", "Customer", "CUST-0001"];
+		formsByDoctype = {};
+		onChange();
+		await settle();
+		expect(w.findComponent(InputArea).props("placeholder")).toBe("Ask about this Customer…");
+		formsByDoctype = { Customer: { frm: { doctype: "Customer", doc: { name: "CUST-0001" }, is_new: () => false } } };
+		onRefresh();
+		await settle();
+		expect(w.findComponent(InputArea).props("placeholder")).toBe("Ask about this Customer…");
+		delete window.frappe;
+		delete window.jQuery;
+	});
+
 	it("sends a suggestion picked on the welcome", async () => {
 		const chatStore = useChatStore();
 		chatStore.sendMessage = vi.fn().mockResolvedValue();
@@ -345,6 +436,26 @@ describe("widget panel", () => {
 		expect(chatStore.sendMessage).toHaveBeenCalledWith("Show me my pending tasks", [], null, null, null, {
 			skipQueue: false,
 		});
+	});
+
+	it("sends the page the user is on when the widget runs outside Desk", async () => {
+		const { setHost } = await import("../host/index.js");
+		const { deskHost } = await import("../host/deskHost.js");
+		setHost({ ...deskHost, sendContext: () => ({ type: "app_page", path: "/helpdesk/tickets/7" }) });
+		onTestFinished(() => setHost(null));
+		const chatStore = useChatStore();
+		chatStore.sendMessage = vi.fn().mockResolvedValue();
+		const w = mount(WidgetPanel, { global: { stubs } });
+		w.findComponent(WidgetWelcome).vm.$emit("suggestion", "What is this ticket about?");
+		await flushPromises();
+		expect(chatStore.sendMessage).toHaveBeenCalledWith(
+			"What is this ticket about?",
+			[],
+			JSON.stringify({ type: "app_page", path: "/helpdesk/tickets/7" }),
+			null,
+			null,
+			{ skipQueue: false }
+		);
 	});
 
 	it("opens a continued conversation in the widget, with any pending approval", async () => {
@@ -501,63 +612,6 @@ describe("widget panel", () => {
 	});
 });
 
-describe("welcome", () => {
-	beforeEach(() => {
-		setActivePinia(createPinia());
-		api.chat.getSessions.mockReset().mockResolvedValue([]);
-		api.suggestions.get.mockReset().mockResolvedValue({ suggestions: [] });
-		window.frappe = { get_route: () => ["List", "Sales Invoice"], router: { on: vi.fn(), off: vi.fn() } };
-	});
-	afterEach(() => delete window.frappe);
-
-	it("names the page the user is on", async () => {
-		const w = mount(WidgetWelcome);
-		await nextTick();
-		expect(w.find(".ww-context").exists()).toBe(true);
-		expect(w.find(".ww-context").text()).toContain("Sales Invoice");
-	});
-
-	it("greets the user by name, as FAC Chat's home does", async () => {
-		useUserStore().user = "avery.shah@northwind.example";
-		const w = mount(WidgetWelcome);
-		await nextTick();
-		expect(w.find(".wh-greeting").text()).toContain("Avery");
-	});
-
-	it("offers the two latest conversations and emits the one picked", async () => {
-		api.chat.getSessions.mockResolvedValue([
-			{ session_id: "s_old", preview: "Oldest", last_activity: "2026-10-01 09:00:00" },
-			{ session_id: "s_new", preview: "Newest", last_activity: "2026-10-07 09:00:00" },
-			{ session_id: "s_mid", preview: "Middle", last_activity: "2026-10-05 09:00:00" },
-		]);
-		const w = mount(WidgetWelcome);
-		await flushPromises();
-		const rows = w.findAll(".cl-row");
-		expect(rows.map((r) => r.text())).toEqual([expect.stringContaining("Newest"), expect.stringContaining("Middle")]);
-		await rows[0].trigger("click");
-		expect(w.emitted("open-session")).toEqual([["s_new"]]);
-	});
-
-	it("asks for suggestions that fit the page and emits the one picked", async () => {
-		api.suggestions.get.mockResolvedValue({
-			suggestions: [{ name: "Overdue invoices", description: "List overdue invoices", source: "contextual" }],
-		});
-		const w = mount(WidgetWelcome);
-		await flushPromises();
-		expect(api.suggestions.get).toHaveBeenCalledWith({ type: "List", doctype: "Sales Invoice" });
-		const tile = w.findAll(".st-tile").find((t) => t.text().includes("List overdue invoices"));
-		await tile.trigger("click");
-		expect(w.emitted("suggestion")).toEqual([["List overdue invoices"]]);
-	});
-
-	it("hides the tiles when the operator turned suggestions off", async () => {
-		api.suggestions.get.mockResolvedValue({ suggestions: [], suggestions_disabled: true });
-		const w = mount(WidgetWelcome);
-		await flushPromises();
-		expect(w.find(".st").exists()).toBe(false);
-	});
-});
-
 describe("browser tool confirmation card", () => {
 	it("uses the shipped copy and emits exactly approve, trust or deny", async () => {
 		const w = mount(BrowserToolConfirm, { props: { request: { tool_name: "capture_diagnostics", params: {}, description: "" } } });
@@ -611,6 +665,47 @@ describe("panel bootstrap", () => {
 		expect(localStorage.getItem("faco_selected_model")).toBe("gpt-saved");
 	});
 
+	it("sends no explicit model until the catalogue has loaded, so the server's saved model decides", async () => {
+		// A fresh browser: no localStorage, and getAvailable has not answered when the first message is sent.
+		api.models.getAvailable.mockReturnValue(new Promise(() => {}));
+		mount(PanelApp, { global: { stubs: gateless } });
+		await flushPromises();
+		expect(useModelStore().currentModelId).toBeNull();
+	});
+
+	it("passes no model to the server on a first turn sent before the catalogue loads", async () => {
+		// mountPanel configures the surface the same way, and PanelApp pins before loading models.
+		configureWidgetSurface();
+		api.models.getAvailable.mockReturnValue(new Promise(() => {}));
+		api.chat.send.mockClear();
+		const app = mount(PanelApp, { global: { stubs: { ...gateless, WidgetPanel: false, ChatInterface: true, InputArea: SendStub, CreditMeter: true, NotificationHost: true } } });
+		onTestFinished(() => app.unmount());
+		await flushPromises();
+		await app.findComponent(SendStub).vm.$emit("send", { message: "hello" });
+		await flushPromises();
+		expect(api.chat.send).toHaveBeenCalled();
+		expect(api.chat.send.mock.calls[0][4] ?? null).toBeNull();
+	});
+
+	it("follows the saved model once the catalogue has loaded", async () => {
+		api.models.getAvailable.mockResolvedValue({
+			models: [{ model_id: "gpt-saved", tier: "Standard", tier_rank: 1 }],
+			selected_model: "gpt-saved",
+			max_tier_rank: 3,
+			auto_mode: { enabled: true },
+		});
+		mount(PanelApp, { global: { stubs: gateless } });
+		await flushPromises();
+		expect(useModelStore().currentModelId).toBe("gpt-saved");
+	});
+
+	it("routes automatically once loaded when nothing is saved", async () => {
+		api.models.getAvailable.mockResolvedValue({ models: [], max_tier_rank: 3, auto_mode: { enabled: true } });
+		mount(PanelApp, { global: { stubs: gateless } });
+		await flushPromises();
+		expect(useModelStore().currentModelId).toBe("auto");
+	});
+
 	it("does not clear FAC Chat's saved model when it has been retired", async () => {
 		api.models.getAvailable.mockResolvedValue({
 			models: [{ model_id: "other", tier: "Standard", tier_rank: 1 }],
@@ -630,6 +725,20 @@ describe("panel bootstrap", () => {
 		await flushPromises();
 		expect(useChatStore().currentSessionId).toBe("faco_1");
 		expect(emit).toHaveBeenCalledWith("session", "faco_1");
+	});
+
+	it("remembers a chat started from the header across a reload, and tells the launcher", async () => {
+		const emit = vi.spyOn(bridge, "emit");
+		const w = mount(PanelApp, {
+			global: { stubs: { ...stubs, ToastContainer: true, WidgetSetupGate: true } },
+		});
+		await flushPromises();
+		useChatStore().messages = [{ role: "user", content: "hi", blocks: [] }];
+		await nextTick();
+		await w.find('[data-test="new-chat"]').trigger("click");
+		await flushPromises();
+		expect(JSON.parse(sessionStorage.getItem("faco_widget_persistent_session")).id).toBe("faco_new");
+		expect(emit).toHaveBeenCalledWith("session", "faco_new");
 	});
 
 	it("restores the saved conversation when the launcher resumed one", async () => {

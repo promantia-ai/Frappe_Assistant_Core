@@ -267,7 +267,8 @@
     "linked_tool": null,
     "status": "Published",
     "visibility": "Public",
-    "content_file": "insight_v3_skill.md"
+    "content_file": "insight_v3_skill.md",
+    "requires_app": "insights"
   },
   {
     "skill_id": "document-authoring",
@@ -360,5 +361,175 @@
     "status": "Published",
     "visibility": "Public",
     "content_file": "configure_naming_series.md"
+  },
+  {
+    "skill_id": "list-insights-dashboards-usage",
+    "title": "How to Use list_insights_dashboards",
+    "description": "Finding the Frappe Insights dashboards a user can open, by title",
+    "skill_type": "Tool Usage",
+    "linked_tool": "list_insights_dashboards",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "list_insights_dashboards.md"
+  },
+  {
+    "skill_id": "get-insights-dashboard-usage",
+    "title": "How to Use get_insights_dashboard",
+    "description": "Reading an Insights dashboard's charts and numbers — default filters, overrides, raw source rows, truncation",
+    "skill_type": "Tool Usage",
+    "linked_tool": "get_insights_dashboard",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "get_insights_dashboard.md"
+  },
+  {
+    "skill_id": "get-insights-chart-usage",
+    "title": "How to Use get_insights_chart",
+    "description": "Reading one Insights chart in depth, with its dashboard's filters",
+    "skill_type": "Tool Usage",
+    "linked_tool": "get_insights_chart",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "get_insights_chart.md"
+  },
+  {
+    "skill_id": "reply-to-helpdesk-ticket-usage",
+    "title": "How to Use reply_to_helpdesk_ticket",
+    "description": "Replying to the customer on a Helpdesk ticket through Helpdesk's own flow, after the user approves the draft",
+    "skill_type": "Tool Usage",
+    "linked_tool": "reply_to_helpdesk_ticket",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "reply_to_helpdesk_ticket.md"
+  },
+  {
+    "skill_id": "get-crm-activity-usage",
+    "title": "How to Use get_crm_activity",
+    "description": "Reading a Frappe CRM lead's or deal's whole timeline before summarising or deciding a next step",
+    "skill_type": "Tool Usage",
+    "linked_tool": "get_crm_activity",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "get_crm_activity.md",
+    "requires_app": "crm"
+  },
+  {
+    "skill_id": "send-crm-email-usage",
+    "title": "How to Use send_crm_email",
+    "description": "Emailing a Frappe CRM lead or deal through CRM's composer, after the user approves the email card",
+    "skill_type": "Tool Usage",
+    "linked_tool": "send_crm_email",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "send_crm_email.md",
+    "requires_app": "crm"
+  },
+  {
+    "skill_id": "convert-crm-lead-usage",
+    "title": "How to Use convert_crm_lead",
+    "description": "Converting a Frappe CRM lead into a deal through CRM's own conversion",
+    "skill_type": "Tool Usage",
+    "linked_tool": "convert_crm_lead",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "convert_crm_lead.md",
+    "requires_app": "crm"
+  },
+  {
+    "skill_id": "add-crm-activity-usage",
+    "title": "How to Use add_crm_activity",
+    "description": "Adding a linked note, follow-up task or call log to a Frappe CRM lead or deal",
+    "skill_type": "Tool Usage",
+    "linked_tool": "add_crm_activity",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "add_crm_activity.md",
+    "requires_app": "crm"
+  },
+  {
+    "skill_id": "crm-follow-up",
+    "title": "Following Up on Frappe CRM Leads and Deals",
+    "description": "Briefing, emailing, converting and logging follow-ups on Frappe CRM leads and deals — which tools, which fields, which links",
+    "skill_type": "Workflow",
+    "linked_tool": null,
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "crm_follow_up.md",
+    "requires_app": "crm"
+  },
+  {
+    "skill_id": "frappe-app-pages",
+    "title": "Working in Frappe Apps (Helpdesk, CRM, Insights)",
+    "description": "What to do when the user is on a Helpdesk, CRM, Insights or other Frappe app page — reading the page line, where each app keeps its data, what does not work outside Desk",
+    "skill_type": "Workflow",
+    "linked_tool": null,
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "frappe_app_pages.md"
+  },
+  {
+    "skill_id": "raven-messaging",
+    "title": "Posting in Raven",
+    "description": "Sending a message to a Raven channel or existing DM as the user — finding the channel, formatting, mentions, linking a document, replying",
+    "skill_type": "Workflow",
+    "linked_tool": null,
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "raven_messaging.md"
+  },
+  {
+    "skill_id": "raven-bot",
+    "title": "Answering as FAC Bot in Raven",
+    "description": "How to answer when the user is talking to you through FAC Bot in Raven — formatting, charts, approvals, shared channels",
+    "skill_type": "Workflow",
+    "linked_tool": null,
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "raven_bot.md"
+  },
+  {
+    "skill_id": "server-script",
+    "title": "Adding a Server Script",
+    "description": "Use when asked for a rule that runs when a document is saved or submitted, such as blocking a sale below cost or filling a value automatically, and a field property or Client Script won't do.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "server_script.md"
+  },
+  {
+    "skill_id": "client-script",
+    "title": "Adding a Client Script",
+    "description": "Use when asked to fill, show, hide or warn on a form as the user works, such as filling a region when a customer is chosen.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "client_script.md"
+  },
+  {
+    "skill_id": "print-format",
+    "title": "Creating a Print Format",
+    "description": "Use when asked to change how an invoice, delivery note or other document prints, or to add a version without prices or with bank details.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "print_format.md"
+  },
+  {
+    "skill_id": "custom-report",
+    "title": "Building a Custom Report",
+    "description": "Use when asked for a report the standard lists don't give, such as overdue invoices by sales person, or to save a list as a report.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "custom_report.md"
+  },
+  {
+    "skill_id": "notification-setup",
+    "title": "Setting Up a Notification",
+    "description": "Use when asked to email or alert someone when a document is saved or submitted, or to remind someone before a date.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "notification.md"
   }
 ]

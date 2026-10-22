@@ -1,0 +1,104 @@
+import { describe, it, expect, beforeAll, vi } from "vitest";
+import { mount } from "@vue/test-utils";
+import { createPinia } from "pinia";
+import TopBar from "@/components/layout/TopBar.vue";
+
+beforeAll(() => {
+	window.__ = (s) => s;
+});
+
+vi.mock("@/composables/useNavToggle", () => ({ useNavToggle: () => ({ onHamburger: (f) => f() }) }));
+
+const mountBar = (props = {}) =>
+	mount(TopBar, {
+		props: { title: "Overdue invoices", showActions: false, ...props },
+		attachTo: document.body,
+		global: {
+			plugins: [createPinia()],
+			stubs: { RouterLink: { template: "<a><slot/></a>" } },
+		},
+	});
+
+describe("TopBar rename and breadcrumb", () => {
+	it("shows the project crumb", () => {
+		const w = mountBar({ project: { name: "p1", title: "Q3 Close" }, renamable: true });
+		expect(w.find("[data-test=crumb-project]").text()).toContain("Q3 Close");
+	});
+
+	it("has no crumb without a project", () => {
+		expect(mountBar().find("[data-test=crumb-project]").exists()).toBe(false);
+	});
+
+	it("Enter emits the whitespace-collapsed title", async () => {
+		const w = mountBar({ renamable: true });
+		await w.find("[data-test=chat-title]").trigger("click");
+		const input = w.find("[data-test=title-input]");
+		await input.setValue("  New   name ");
+		await input.trigger("keydown", { key: "Enter" });
+		expect(w.emitted("rename")[0]).toEqual(["New name"]);
+	});
+
+	it("not renamable: click opens no input", async () => {
+		const w = mountBar({ renamable: false });
+		await w.find("[data-test=chat-title]").trigger("click");
+		expect(w.find("[data-test=title-input]").exists()).toBe(false);
+	});
+
+	it("Escape discards even though the unmounting input blurs", async () => {
+		const w = mountBar({ renamable: true });
+		await w.find("[data-test=chat-title]").trigger("click");
+		const input = w.find("[data-test=title-input]");
+		await input.setValue("discard");
+		// Synchronous: the blur fired by removing the input must not commit.
+		input.trigger("keydown", { key: "Escape" });
+		input.trigger("blur");
+		await w.vm.$nextTick();
+		expect(w.emitted("rename")).toBeUndefined();
+	});
+
+	it("Escape inside the editor does not reach window listeners", async () => {
+		const w = mountBar({ renamable: true });
+		await w.find("[data-test=chat-title]").trigger("click");
+		const seen = vi.fn();
+		window.addEventListener("keydown", seen);
+		await w.find("[data-test=title-input]").trigger("keydown", { key: "Escape" });
+		window.removeEventListener("keydown", seen);
+		expect(seen).not.toHaveBeenCalled();
+	});
+
+	it("click then blur with no edit does not rename", async () => {
+		const w = mountBar({ renamable: true });
+		await w.find("[data-test=chat-title]").trigger("click");
+		await w.find("[data-test=title-input]").trigger("blur");
+		expect(w.emitted("rename")).toBeUndefined();
+	});
+
+	it("opens with the full untruncated title", async () => {
+		const long = "a".repeat(80);
+		const w = mountBar({ title: long, renamable: true });
+		await w.find("[data-test=chat-title]").trigger("click");
+		expect(w.find("[data-test=title-input]").element.value).toBe(long);
+	});
+
+	it("seeds the editor with renameValue, not a placeholder title", async () => {
+		const w = mountBar({ title: "New Chat", renameValue: "", renamable: true });
+		await w.find("[data-test=chat-title]").trigger("click");
+		expect(w.find("[data-test=title-input]").element.value).toBe("");
+		await w.find("[data-test=title-input]").trigger("blur");
+		expect(w.emitted("rename")).toBeUndefined();
+	});
+
+	it("a whitespace-only difference does not rename", async () => {
+		const w = mountBar({ title: "Q3  close", renamable: true });
+		await w.find("[data-test=chat-title]").trigger("click");
+		await w.find("[data-test=title-input]").setValue(" Q3 close ");
+		await w.find("[data-test=title-input]").trigger("blur");
+		expect(w.emitted("rename")).toBeUndefined();
+	});
+
+	it("has no New Chat button — the chat panel owns that control", () => {
+		const w = mountBar({ showActions: true });
+		const labels = w.findAll("button").map((b) => b.text().trim());
+		expect(labels).not.toContain("New Chat");
+	});
+});

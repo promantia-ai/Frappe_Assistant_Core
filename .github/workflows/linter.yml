@@ -25,6 +25,10 @@ jobs:
           cache: pip
       - uses: pre-commit/action@v3.0.0
 
+      # Pure-Python tests of the release-check tooling; they need no Frappe or site.
+      - name: Release-check unit tests
+        run: python -m unittest discover -s scripts/release_check -p "test_*.py"
+
       - name: Download Semgrep rules
         run: git clone --depth 1 https://github.com/frappe/semgrep-rules.git frappe-semgrep-rules
 
@@ -62,7 +66,7 @@ jobs:
     steps:
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - uses: actions/checkout@v4
 

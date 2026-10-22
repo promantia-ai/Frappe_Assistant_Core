@@ -26,6 +26,12 @@ from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.utils import document_batch
+from frappe_assistant_core.utils.customisation import (
+    customisation_result,
+    desk_url,
+    script_report_warning,
+    server_script_guard,
+)
 from frappe_assistant_core.utils.savepoint import (
     open_savepoint,
     release_savepoint,
@@ -36,6 +42,8 @@ from .child_tables import ChildRowError, child_table_fields, normalize_child_row
 
 # The submit after a create runs inside this savepoint, so a refused submit leaves the draft.
 _SUBMIT_SAVEPOINT = "fac_create_document_submit"
+# A validate_only dry run is rolled back to this savepoint.
+_VALIDATE_SAVEPOINT = "fac_create_document_validate"
 
 
 def _default_todo_allocation(doc: Any) -> None:
@@ -54,6 +62,31 @@ def _default_todo_allocation(doc: Any) -> None:
 
     if not doc.has_permission("create"):
         doc.allocated_to = frappe.session.user
+
+
+def _prepare_for_insert(doc: Any) -> None:
+    """Run the steps ``Document.insert`` takes before ``validate``, in its order, without the insert.
+
+    Controllers rely on them: Custom Field sets its fieldname in before_insert, and naming
+    fills ``doc.name`` and the child rows' parents. check_if_latest sets the ``_action`` that
+    link validation reads; the caller has already run check_permission. The methods exist on
+    Frappe v15 and v16. The caller rolls back, which undoes the naming-series and naming-rule
+    counters. It does not undo an autoincrement sequence: NEXTVAL is not transactional, so a
+    dry run on an autoincrement doctype uses up one id, as a failed real insert does.
+    """
+    doc._set_defaults()
+    doc.set_user_and_timestamp()
+    doc.set_docstatus()
+    doc.check_if_latest()
+    doc._validate_links()
+    doc.run_method("before_insert")
+    doc.set_new_name()
+    doc.set_parent_in_children()
+    doc.validate_higher_perm_levels()
+    doc.flags.in_insert = True
+    # run_before_save_methods would also run before_save, which a dry run must not.
+    if doc._action in ("save", "submit"):
+        doc.run_method("before_validate")
 
 
 class DocumentCreate(BaseTool):
@@ -92,7 +125,7 @@ class DocumentCreate(BaseTool):
                 "validate_only": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Only validate the document without saving it. Use this to test data format and required fields before actual creation.",
+                    "description": "Run the document's validation without saving. Checks permissions and validation rules; it does not check mandatory fields.",
                 },
                 "documents": {
                     "type": "array",
@@ -149,6 +182,7 @@ class DocumentCreate(BaseTool):
             doctype=doctype,
             name=None,  # No specific document for create operation
             perm_type="create",
+            data=data,
         )
 
         if not validation_result["success"]:
@@ -228,6 +262,10 @@ class DocumentCreate(BaseTool):
                     }
                 child_rows[field] = rows
 
+            refusal = server_script_guard(doctype, data)
+            if refusal:
+                return refusal
+
             # Create document
             doc = frappe.new_doc(doctype)
 
@@ -251,12 +289,18 @@ class DocumentCreate(BaseTool):
 
             # Handle validation-only mode
             if validate_only:
-                # insert() refuses a document this user may not create, so say so here
-                # instead of reporting a validation the real create would then fail.
-                doc.check_permission("create")
-
-                # Run validation without saving
-                doc.run_method("validate")
+                # validate() can write (a Property Setter deletes its predecessors, a Workflow
+                # deactivates its siblings, scripts and hooks run), so the dry run is undone
+                # whatever the outcome. Work Frappe queued for the commit is unwound with it.
+                marks = open_savepoint(_VALIDATE_SAVEPOINT)
+                try:
+                    # insert() refuses a document this user may not create, so say so here
+                    # instead of reporting a validation the real create would then fail.
+                    doc.check_permission("create")
+                    _prepare_for_insert(doc)
+                    doc.run_method("validate")
+                finally:
+                    rollback_to_savepoint(_VALIDATE_SAVEPOINT, marks, doctype, doc.name)
 
                 return {
                     "success": True,
@@ -309,9 +353,13 @@ class DocumentCreate(BaseTool):
                 "docstatus": doc.docstatus,
                 "owner": doc.owner,
                 "creation": str(doc.creation),
+                "url": desk_url(doctype, doc.name),
                 "submitted": False,
                 "can_submit": False,
             }
+            result.update(
+                customisation_result(doctype, doc, script_report_warning(doctype, data, current=doc))
+            )
 
             # Submit if requested and allowed
             from frappe.model.workflow import get_workflow_name
@@ -425,16 +473,19 @@ class DocumentCreate(BaseTool):
             # Frappe raises this with no message and keeps the reason in
             # frappe.flags.error_message; exception_message() recovers it.
             error_msg = exception_message(e, _("Insufficient permission to create {0}").format(doctype))
-            frappe.log_error(
-                title=_("Document Creation Error"), message=f"Error creating {doctype}: {error_msg}"
-            )
+            if not validate_only:
+                frappe.log_error(
+                    title=_("Document Creation Error"), message=f"Error creating {doctype}: {error_msg}"
+                )
 
             return permission_error_result(doctype, error_msg)
         except Exception as e:
             error_msg = exception_message(e)
-            frappe.log_error(
-                title=_("Document Creation Error"), message=f"Error creating {doctype}: {error_msg}"
-            )
+            # A dry run refused by validation is the answer the caller asked for, not a fault.
+            if not (validate_only and isinstance(e, frappe.ValidationError)):
+                frappe.log_error(
+                    title=_("Document Creation Error"), message=f"Error creating {doctype}: {error_msg}"
+                )
 
             # Provide specific guidance based on error type
             result = {"success": False, "error": error_msg, "doctype": doctype}

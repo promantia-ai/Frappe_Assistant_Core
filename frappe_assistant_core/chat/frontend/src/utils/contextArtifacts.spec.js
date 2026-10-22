@@ -153,3 +153,95 @@ describe("deriveArtifacts activity", () => {
 		expect(out.activity).toHaveLength(0);
 	});
 });
+
+describe("deriveArtifacts failed steps and question titles", () => {
+	it("gives a failed write no record chip", () => {
+		const input = { doctype: "Server Script", data: {} };
+		const r = deriveArtifacts([
+			{ type: "tool_call", id: "a", status: "error", tool_name: "create_document", input },
+			{ type: "tool_call", id: "b", status: "success", tool_name: "create_document", input, result: { success: false, error: "no" } },
+		]);
+		expect(r.records).toEqual([]);
+	});
+
+	it("strips markdown before cutting the question title", () => {
+		const r = deriveArtifacts([
+			{ type: "interaction", id: "q", status: "pending", interactionType: "confirm", question: "**Which** `warehouse` is [this one](http://x.test) for snake_case?" },
+		]);
+		expect(r.approval.title).toBe("Which warehouse is this one for snake_case?");
+	});
+});
+
+describe("deriveArtifacts reads the stored MCP result shape", () => {
+	const stored = (payload) => [{ text: JSON.stringify(payload) }];
+	const call = (id, input, payload) => ({
+		type: "tool_call",
+		id,
+		status: "success",
+		tool_name: "create_document",
+		input,
+		result: stored(payload),
+	});
+
+	it("gives an add-field chip its name and a link", () => {
+		const r = deriveArtifacts([
+			call("a", { doctype: "Custom Field", data: { dt: "Lead" } }, { success: true, name: "Lead-custom_x", url: "/desk/lead/view" }),
+		]);
+		expect(r.records).toEqual([
+			{ key: "tool-a", label: "Custom Field: Lead-custom_x", kind: "record", url: "/desk/lead/view" },
+		]);
+	});
+
+	it("lists a record once, keeping the latest result", () => {
+		const input = { doctype: "Custom Field", data: {} };
+		const r = deriveArtifacts([
+			call("a", input, { success: true, name: "Lead-custom_x" }),
+			call("b", input, { success: true, name: "Lead-custom_x", url: "/desk/custom-field/Lead-custom_x" }),
+		]);
+		expect(r.records).toEqual([
+			{ key: "tool-a", label: "Custom Field: Lead-custom_x", kind: "record", url: "/desk/custom-field/Lead-custom_x" },
+		]);
+	});
+
+	it("does not let a later read downgrade a written record", () => {
+		const r = deriveArtifacts([
+			call("a", { doctype: "Lead", name: "L-1", data: {} }, { success: true, name: "L-1", url: "/desk/lead/L-1" }),
+			{ type: "tool_call", id: "b", status: "success", tool_name: "get_document", input: { doctype: "Lead", name: "L-1" }, result: { name: "L-1" } },
+		]);
+		expect(r.records).toHaveLength(1);
+		expect(r.records[0]).toMatchObject({ kind: "record", url: "/desk/lead/L-1" });
+	});
+
+	it("gives a validate_only create no record chip", () => {
+		const r = deriveArtifacts([
+			{ ...call("a", { doctype: "Server Script", validate_only: true, data: {} }, { success: true, validation_passed: true }) },
+		]);
+		expect(r.records).toEqual([]);
+	});
+
+	it("falls back to a label for a truncated result", () => {
+		const block = call("a", { doctype: "Custom Field", data: {} }, {});
+		block.result = [{ text: '{"success":true,"na' }];
+		expect(deriveArtifacts([block]).records).toEqual([
+			{ key: "tool-a", label: "Custom Field", kind: "record", url: null },
+		]);
+	});
+});
+
+describe("question titles keep ordinary punctuation", () => {
+	const title = (question) =>
+		deriveArtifacts([{ type: "interaction", id: "q", status: "pending", interactionType: "confirm", question }]).approval.title;
+
+	it("keeps a greater-than sign and tildes inside a sentence", () => {
+		expect(title("Is the total > 100 or ~50?")).toBe("Is the total > 100 or ~50?");
+	});
+
+	it("strips a leading quote marker and heading hashes", () => {
+		expect(title("> Quoted question?")).toBe("Quoted question?");
+		expect(title("## Which one?")).toBe("Which one?");
+	});
+
+	it("strips emphasis and code markers", () => {
+		expect(title("**Which** `warehouse` and __this__ *one*?")).toBe("Which warehouse and this one?");
+	});
+});

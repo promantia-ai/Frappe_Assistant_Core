@@ -49,9 +49,10 @@ const ready = computed(
 
 onMounted(async () => {
 	await userStore.init();
-	// Widget turns always route automatically; pinned in memory only — never
-	// setSelectedModel() or loadModels(), which would read or overwrite FAC Chat's saved choice.
-	modelStore.pinModel("auto");
+	// The widget has no picker: it sends no model until loadModels() swaps in the user's saved
+	// server-side choice (or auto), and the server uses the saved choice for a turn sent before then.
+	// Pinned, so it never touches localStorage or writes the choice back.
+	modelStore.pinModel();
 	modelStore.loadModels();
 	if (!ready.value) return;
 	if (bridge.state.restored) {

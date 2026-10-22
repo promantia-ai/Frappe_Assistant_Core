@@ -46,6 +46,7 @@
 import { computed, h } from "vue";
 import { useRouter } from "vue-router";
 import { useUserStore } from "@/stores/userStore";
+import { __ } from "@/utils/i18n";
 import { useTourStore } from "@/stores/tourStore";
 
 const router = useRouter();
@@ -125,6 +126,14 @@ const AppearanceIcon = () =>
 			d: "M4 5a2 2 0 012-2h12a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V5zM8 21h8m-4-5v5",
 		}),
 	]);
+const HomeIcon = () =>
+	h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 2 }, [
+		h("path", {
+			"stroke-linecap": "round",
+			"stroke-linejoin": "round",
+			d: "M3 12l9-9 9 9M5 10v10a1 1 0 001 1h3v-6h6v6h3a1 1 0 001-1V10",
+		}),
+	]);
 const PrivacyIcon = () =>
 	h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 2 }, [
 		h("path", {
@@ -170,6 +179,7 @@ const visibleGroups = computed(() => {
 	const personalItems = [
 		{ to: "/settings/profile", label: "Profile", icon: ProfileIcon },
 		{ to: "/settings/appearance", label: "Appearance", icon: AppearanceIcon },
+		{ to: "/settings/home", label: __("Home page"), icon: HomeIcon },
 		{ to: "/settings/privacy", label: "Privacy & Data", icon: PrivacyIcon },
 	];
 	personalItems.push({ to: "/settings/my-tickets", label: "Support", icon: TicketIcon });

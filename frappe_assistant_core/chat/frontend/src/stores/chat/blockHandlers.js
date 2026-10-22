@@ -8,6 +8,7 @@
 import { ref, watch } from "vue";
 import { generateBlockId, findActiveMessage } from "./utils";
 import { INTERNAL_TOOLS } from "@/utils/internalTools";
+import { isCustomisationRisk } from "@/utils/toolNames";
 
 export { INTERNAL_TOOLS };
 
@@ -139,6 +140,15 @@ export function createBlockHandlers({
 		const lastMsg = findActiveMessage(messages.value);
 		if (lastMsg && lastMsg.role === "assistant") {
 			lastMsg.routing = data.routing;
+		}
+	}
+
+	// Only task_model_changed has a client-side line today; other codes reach the receipt.
+	function handleRoutingNotice(data) {
+		if (data?.code !== "task_model_changed") return;
+		const lastMsg = findActiveMessage(messages.value);
+		if (lastMsg && lastMsg.role === "assistant") {
+			lastMsg.taskModelChange = { reason: data.reason || null, from: data.from, to: data.to };
 		}
 	}
 
@@ -399,6 +409,29 @@ export function createBlockHandlers({
 		// succeeds (or revert it on failure).
 		block.isExpanded = false;
 
+		// "Don't ask again" is a decision about the tool, not the card: parallel calls to the
+		// same tool render one card each, and asking again on the siblings contradicts it.
+		if (response === "trust") {
+			for (const sibling of lastMsg.blocks) {
+				if (
+					sibling.type === "interaction" &&
+					sibling.status === "pending" &&
+					!sibling.decision &&
+					!isCustomisationRisk(sibling) &&
+					sibling.tool_name &&
+					sibling.tool_name === block.tool_name
+				) {
+					sibling.decision = {
+						resolution,
+						userResponse,
+						response,
+						responses: (sibling.interrupts || []).map((i) => ({ interruptId: i.id, response })),
+					};
+					sibling.isExpanded = false;
+				}
+			}
+		}
+
 		return collectPendingInteractionBatch();
 	}
 
@@ -515,6 +548,7 @@ export function createBlockHandlers({
 		handleTaskActivity,
 		handleWorkflowCreatedEvent,
 		handleModelSelected,
+		handleRoutingNotice,
 		handleThinkingEvent,
 		completeThinkingBlock,
 		handleToolCallStart,

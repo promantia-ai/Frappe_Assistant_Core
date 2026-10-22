@@ -7,6 +7,9 @@
  */
 
 import { isInternalTool } from "@/utils/internalTools";
+import { __ } from "@/utils/i18n";
+import { baseToolName } from "@/utils/toolNames";
+import { appliesTo, failureReason, isDryRun, toolFailed, toolResult } from "@/utils/toolResult";
 
 // Friendly verb + object phrasing per known MCP tool. Falls back to a
 // humanized tool name. `target` is pulled from the tool input when present
@@ -25,6 +28,30 @@ const TOOL_PHRASING = {
 	document_action: { verb: "Prepared", noun: "submission" },
 	generate_report: { verb: "Generated", noun: "report" },
 };
+
+// Literal strings, so each verb is a translatable key of its own.
+const DONE_VERBS = {
+	create_document: () => __("Created"),
+	update_document: () => __("Updated"),
+};
+const DOCUMENT_ACTION_VERBS = {
+	submit: () => __("Submitted"),
+	cancel: () => __("Cancelled"),
+	amend: () => __("Amended"),
+};
+
+// Once a write has succeeded the row says what was done, not what was prepared.
+function donePhrasing(block) {
+	const doctype = block.input?.doctype || "record";
+	const tool = baseToolName(block.tool_name);
+	if (tool === "document_action") {
+		const verb = DOCUMENT_ACTION_VERBS[String(block.input?.action || "submit").trim().toLowerCase()];
+		return verb ? { verb: verb(), noun: doctype } : null;
+	}
+	if (tool === "create_document" && isDryRun(block)) return { verb: __("Checked"), noun: doctype };
+	const verb = DONE_VERBS[tool];
+	return verb ? { verb: verb(), noun: doctype } : null;
+}
 
 function humanizeToolName(name) {
 	if (!name) return "Tool";
@@ -62,19 +89,25 @@ export function toolRowFrom(block) {
 	if (!block || block.type !== "tool_call") return null;
 	if (isInternalTool(block)) return null;
 
-	const phrasing = TOOL_PHRASING[block.tool_name];
-	const target = extractTarget(block);
+	const succeeded = block.status === "success" && !toolFailed(block);
+	const done = succeeded ? donePhrasing(block) : null;
+	const phrasing = done || TOOL_PHRASING[baseToolName(block.tool_name)];
+	const target = done
+		? toolResult(block).name || block.input?.name || block.input?.docname || null
+		: extractTarget(block);
 	const base = phrasing
 		? `${phrasing.verb} ${phrasing.noun}`
 		: humanizeToolName(block.tool_name);
 
 	return {
 		id: block.id,
-		status: block.status, // "running" | "success" | "error" | "cancelled"
+		status: toolFailed(block) ? "error" : block.status, // "running" | "success" | "error" | "cancelled"
 		label: target ? `${base} → ${target}` : base,
 		labelPrefix: target ? `${base} → ` : base,
 		target,
 		toolName: block.tool_name,
+		reason: failureReason(block),
+		appliesTo: appliesTo(block),
 		hasTarget: Boolean(target),
 		block, // raw block for the expandable I/O drawer
 	};

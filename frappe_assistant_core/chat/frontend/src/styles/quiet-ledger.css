@@ -84,9 +84,9 @@
   --ql-font-ui: "Inter", system-ui, -apple-system, sans-serif;
   --ql-font-display: "Source Serif 4", "Fraunces", Georgia, serif;
 
-  /* ---- Layout metrics (consumed via var(--ql-nav-width, …) in components) ---- */
-  --ql-nav-width: 260px;
-  --ql-nav-collapsed-width: 60px;
+  /* ---- Layout metrics (consumed via var(--ql-rail-width, …) in components) ---- */
+  --ql-rail-width: 52px;
+  --ql-panel-width: 240px;
   --ql-topbar-height: 56px;
 }
 
@@ -223,5 +223,17 @@ body {
     animation: none;
     outline: 2px solid var(--ql-accent);
     outline-offset: 2px;
+  }
+}
+
+/* iOS zooms the whole page into any focused field whose text is under 16px, and a home-screen
+   app never zooms back out. Touch screens get 16px fields so focus never zooms, while
+   pinch-zoom stays available (no maximum-scale on the viewport). !important because component
+   styles are scoped and would otherwise outrank this one rule for every field in the app. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]),
+  textarea,
+  select {
+    font-size: 16px !important;
   }
 }

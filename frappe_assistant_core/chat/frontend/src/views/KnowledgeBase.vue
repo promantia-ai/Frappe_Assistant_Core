@@ -1,10 +1,6 @@
 <template>
 	<div class="app-layout">
-		<NavigationSidebar
-			:collapsed="sidebarCollapsed"
-			@open-settings="router.push('/settings')"
-			@toggle-sidebar="sidebarCollapsed = !sidebarCollapsed"
-		/>
+		<NavigationSidebar @open-settings="router.push('/settings')" />
 
 		<main class="main-content">
 			<!-- Top Bar -->
@@ -12,7 +8,6 @@
 				:memory-enabled="memoryEnabled"
 				:can-upload="knowledgeIncluded"
 				:storage="storage"
-				@toggle-sidebar="sidebarCollapsed = !sidebarCollapsed"
 				@upload="triggerUpload"
 			/>
 
@@ -190,7 +185,7 @@
 					type="file"
 					class="hidden-input"
 					multiple
-					accept=".pdf,.md,.txt,.markdown,.text"
+					:accept="ACCEPT_ATTRIBUTE"
 					@change="handleFileSelect"
 				/>
 			</div>
@@ -250,6 +245,7 @@ import AddSlotCard from "@/components/common/list/AddSlotCard.vue";
 import EmptyState from "@/components/common/list/EmptyState.vue";
 import UpgradeBanner from "@/components/common/UpgradeBanner.vue";
 import { api } from "@/api/client";
+import { ACCEPT_ATTRIBUTE } from "@/utils/knowledgeUpload";
 
 const router = useRouter();
 const userStore = useUserStore();
@@ -262,7 +258,6 @@ const knowledgeIncluded = computed(
 	() => quotaInfo.value?.features?.knowledge_base !== false
 );
 
-const sidebarCollapsed = ref(false);
 const loading = ref(true);
 const loadError = ref(null);
 const documents = ref([]);

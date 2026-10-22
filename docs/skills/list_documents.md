@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `list_documents` tool searches and lists Frappe documents with filtering, field selection, and ordering. It is the primary tool for data exploration and discovery.
+The `list_documents` tool searches and lists Frappe documents with filtering, field selection, and ordering. For business totals try `report_list(query=...)` first and use grouped totals here only when no report fits; cite the DocType and filters you used in the answer.
 
 ## Parameters
 
@@ -33,6 +33,15 @@ To opt out, pass `docstatus` explicitly:
 | Everything | `{"docstatus": [0, 1, 2]}` |
 
 Non-submittable DocTypes (Customer, Item, Supplier, User, ToDo, …) have no `docstatus` semantics and are unaffected.
+
+## Fields You Cannot Read
+
+A field you are not allowed to read cannot be used to narrow or sort a query either. The tool
+refuses a request that names one in `filters`, in `order_by`, or inside an expression or alias in
+`fields` (such as `max(field)` or `field as x`), and says which field. That covers fields above
+your permission level and fields FAC withholds for your role, such as passwords and API keys.
+
+Retry without that field. Do not look for another way to reach its value.
 
 ## Response Format
 
@@ -180,6 +189,29 @@ The key is absent when every filter value resolves, so its absence confirms caus
 ```
 Then check `total_count` in the response for the full count.
 
+### Totals by group (exact, permission-safe)
+```json
+{
+  "doctype": "Sales Invoice",
+  "filters": {"posting_date": [">=", "2026-01-01"]},
+  "group_by": "territory",
+  "aggregate": [
+    {"function": "sum", "field": "base_grand_total"},
+    {"function": "count", "field": "name"}
+  ]
+}
+```
+Returns `rows: [{"group_value": "North", "sum_base_grand_total": 125000.0, "count_name": 42}, ...]`, `row_count`, `has_more`, `filters_applied` and `docstatus_defaulted`. The database computes every figure over only the records the user may read (User Permissions included), so report these numbers as-is — never add up listed rows yourself.
+
+- `function` is one of `sum`, `count`, `avg`, `min`, `max`; at most 5 aggregates. `sum` and `avg` need a Currency, Float, Int or Percent field.
+- `group_by` and every `field` must be a real field the user may read. Restricted and higher-permlevel fields are refused with an explanation.
+- `group_by` alone returns the record count per group (`count_name`); `aggregate` alone returns a single total row without `group_value`.
+- `order_by` ranks the groups by a total: pass one aggregate alias (`function_field`) plus `asc` or `desc`, for example `"sum_base_grand_total desc"` with `limit: 10` for the top 10 territories. Without it groups sort by the group value, so `limit` alone returns the first groups alphabetically, not the biggest. Anything other than a requested aggregate alias is refused, and `order_by` needs `group_by`.
+- Grouping by a Date or Datetime field groups by exact day (each distinct value is its own group), not by month or year; to total per month, filter one month at a time or use a report.
+- `fields` and `offset` are ignored. `limit` caps the number of groups (default 100); `has_more: true` means groups were cut off.
+- Submittable DocTypes still default to submitted documents only (`docstatus_defaulted: true`).
+- Prefer a report (`report_list` / `generate_report`) when one fits; use grouped totals for custom DocTypes or grouping by a custom field.
+
 ### Recover from an unresolved entity name
 ```json
 {
@@ -196,4 +228,4 @@ Returns `count: 0` with `unresolved_filters.customer.suggestions: ["Grant Plasti
 - **Child tables** cannot be queried directly — query the parent DocType instead
 - **Permission filters** are applied automatically — results only include documents the user can read
 - **Link fields** store the `name` (ID), not the display value — use the ID in filters
-- **Maximum limit is 1000** — for larger datasets, use `run_python_code`: `tools.get_documents` takes `group_by` and aggregate fields, so totals are computed in the database with the same permission checks
+- **Maximum limit is 1000** — for totals over larger datasets, pass `group_by` and `aggregate` (above) instead of listing rows

@@ -12,10 +12,16 @@ lives in ``relay.py``.
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import frappe
 from frappe import _
+
+from frappe_assistant_core.chat.doctype.fac_chat_project.fac_chat_project import (
+    FACChatProject,
+    project_addendum,
+)
+from frappe_assistant_core.chat.embed.page_context import render_page_context, storable_context
 
 from .._rate_limits import (
     rate_limit,
@@ -33,6 +39,8 @@ from ..chat.relay import (
     _relay_ar_interrupt_resume,
     _relay_ar_stream,
 )
+from ..chat.sessions import conversation_row
+from ..models import usable_saved_model
 
 # Bounded thread pool for relaying AR SSE streams to Socket.IO. Replaces
 # unbounded ``threading.Thread`` spawning (FACO-H14). Workers are daemon
@@ -62,6 +70,16 @@ def _mark_turn_started(
         return None
 
 
+def _effective_model_id(model_id: str | None) -> str | None:
+    """The model a turn runs on: the client's explicit choice, else the user's saved one.
+
+    "auto" is an explicit choice and stays "auto". A client that sends nothing (a fresh browser,
+    the Desk widget before its model list loads, the Raven bot) gets the saved model while the
+    user can still use it, else None so AR applies its own default.
+    """
+    return (model_id or "").strip() or usable_saved_model() or None
+
+
 def _flag(value) -> bool:
     """Coerce a composer toggle to a real bool.
 
@@ -76,15 +94,44 @@ def _flag(value) -> bool:
 EFFORT_LEVELS = ("off", "low", "medium", "high", "xhigh", "max")
 
 
-def _files_addendum(session_id: str, restricted: bool) -> str | None:
-    """Every file attached so far in the conversation, for this turn's system prompt.
+def _conversation_project(session_id: str, fallback: str | None) -> str | None:
+    """The project whose instructions apply to this turn.
 
-    The addendum lasts one turn, so it is rebuilt on every send, resume and continue. A user
-    under processing restriction (M15) has no persisted messages, so no files to list.
+    The conversation row decides once it exists. Before that — and always for a
+    user under processing restriction (M15), whose messages are never persisted —
+    the client's project is used if the caller owns it.
     """
-    if restricted:
-        return None
-    return conversation_files_addendum(session_id, frappe.session.user) or None
+    row = frappe.db.get_value(
+        "FAC Chat Conversation", {"name": session_id, "user": frappe.session.user}, ["project"], as_dict=True
+    )
+    if row:
+        return row.project if FACChatProject.is_owned(row.project) else None
+    return fallback if FACChatProject.is_owned(fallback) else None
+
+
+def _conversation_addendum(session_id: str, restricted: bool, project: str | None = None) -> str | None:
+    """The project's instructions, then every file attached so far, for this turn's system prompt.
+
+    Rebuilt on every send, resume and continue: AR rebuilds the system prompt each
+    turn, so a block left off any one path is missing from that turn. A user under
+    processing restriction (M15) has no persisted messages, so no files to list.
+    """
+    parts = [
+        project_addendum(_conversation_project(session_id, project)),
+        None if restricted else conversation_files_addendum(session_id, frappe.session.user),
+    ]
+    return "".join(p for p in parts if p) or None
+
+
+def _with_project_context(context: dict | None, session_id: str, project: str | None) -> dict | None:
+    """The relay context for this turn, carrying the conversation's project when it has one."""
+    resolved = _conversation_project(session_id, project)
+    if not resolved:
+        # A client-supplied project_id is never trusted: only an owned project reaches AR.
+        if not context or "project_id" not in context:
+            return context
+        return {k: v for k, v in context.items() if k != "project_id"} or None
+    return {**(context or {}), "project_id": resolved}
 
 
 def _effort(value) -> str | None:
@@ -188,6 +235,139 @@ def _assert_session_owner(session_id: str) -> None:
         frappe.throw(_("You can only continue your own conversation"), frappe.PermissionError)
 
 
+def start_turn(
+    session_id: str,
+    message: str,
+    *,
+    context: dict | None = None,
+    include_context: bool = True,
+    file_urls: list[str] | None = None,
+    model_id: str | None = None,
+    attachments: list[dict] | None = None,
+    system_prompt_addendum: str | None = None,
+    client_type: str | None = None,
+    web_search: bool | None = None,
+    thinking_enabled: bool | None = None,
+    reasoning_effort: str | None = None,
+    client_signals: str | None = None,
+    client_turn_id: str | None = None,
+    project: str | None = None,
+) -> Future:
+    """Gate, persist and relay one turn for the session user; returns the relay's Future.
+
+    send_message is its HTTP face. A non-browser surface (the Raven bot) calls it directly, so
+    the gate, persistence and relay are the same for every way into FACO.
+    """
+    # The widget in another Frappe app sends its page; the server writes the prompt line, and
+    # the message stores it in a shape FAC Chat Message accepts.
+    page_addendum = render_page_context(context)
+    context = storable_context(context)
+    file_urls = list(dict.fromkeys(file_urls or []))
+    attachments = attachments or []
+
+    _assert_session_owner(session_id)
+
+    # Check if user can use FACO
+    from ..settings import can_use_faco
+
+    access_check = can_use_faco()
+    if not access_check.get("can_use"):
+        frappe.throw(access_check.get("reason", _("Cannot use FACO")))
+
+    # A Stop raised before this point belongs to an earlier turn, unless it
+    # names this request (cancel.clear).
+    clear_cancel(session_id, keep_turn=client_turn_id)
+
+    # FACO-M15: respect GDPR Article 18 processing restriction. When set,
+    # skip message persistence entirely — the chat still runs (AR handles
+    # the turn in-memory), but no content survives in FACO Message.
+    restricted = _is_processing_restricted(frappe.session.user)
+
+    # Save user message to database
+    from frappe_assistant_core.chat.doctype.fac_chat_message.fac_chat_message import (
+        FACChatMessage,
+    )
+
+    user_msg = None
+    if not restricted:
+        user_msg = FACChatMessage.create_message(
+            session_id=session_id,
+            role="user",
+            content=message,
+            context=context if include_context and context else None,
+            project=project,
+        )
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit — background thread / streaming context (not a request handler), explicit commit required to flush progress to DB.
+
+    # Attach files to the message — only meaningful when we persisted one.
+    if file_urls and user_msg is not None:
+        _attach_files_to_message(file_urls, user_msg.name)
+
+    # Prepare prompt - send the original user message to AR (not enriched with file content)
+    # File content goes via system_prompt_addendum so it reaches the LLM without polluting
+    # the stored user message in conversation history.
+    full_prompt = message
+
+    conversation_addendum = _conversation_addendum(session_id, restricted, project)
+    if conversation_addendum:
+        system_prompt_addendum = (system_prompt_addendum or "") + conversation_addendum
+
+    signal_addendum = _render_client_signals(client_signals)
+    if signal_addendum:
+        system_prompt_addendum = (system_prompt_addendum or "") + signal_addendum
+
+    if page_addendum:
+        system_prompt_addendum = (system_prompt_addendum or "") + page_addendum
+
+    # Default to "spa" if client_type not specified (fail-safe: blocks browser tools)
+    effective_client_type = client_type or "spa"
+
+    # Zero-retention: load the client-held session blob to round-trip to AR.
+    # Skipped for restricted users — we never load or store their state.
+    from frappe_assistant_core.chat.doctype.fac_chat_session_state.fac_chat_session_state import (
+        FACChatSessionState,
+    )
+
+    session_state = None if restricted else FACChatSessionState.load_wire(session_id)
+
+    # Process in background via bounded pool (FACO-H14) — relay from AR.
+    # user_msg_name may be None under M15 restriction — relay tolerates.
+    effort = _effort(reasoning_effort)
+    if effort is not None:
+        thinking_enabled = effort != "off"
+
+    model_id = _effective_model_id(model_id)
+
+    turn = _mark_turn_started(session_id, restricted=restricted, client_turn=client_turn_id)
+    try:
+        return _relay_pool.submit(
+            _relay_ar_stream,
+            session_id,
+            full_prompt,
+            message,
+            _with_project_context(context, session_id, project),
+            user_msg.name if user_msg is not None else None,
+            frappe.session.user,
+            frappe.local.site,
+            model_id,
+            attachments,
+            system_prompt_addendum,
+            effective_client_type,
+            session_state,
+            restricted,
+            # None must reach AR as absence (search available), not as an explicit
+            # off — only coerce when the caller actually supplied a value.
+            web_search=_flag(web_search) if web_search is not None else None,
+            thinking_enabled=_flag(thinking_enabled) if thinking_enabled is not None else None,
+            reasoning_effort=effort,
+            live_turn_token=turn,
+        )
+    except Exception:
+        if turn:
+            live_turn.clear(session_id, turn)
+        raise
+
+
 @frappe.whitelist(methods=["POST"])
 @rate_limit(session_user_or_ip, limit=30, seconds=60)
 def send_message(
@@ -205,6 +385,7 @@ def send_message(
     reasoning_effort: str | None = None,
     client_signals: str | None = None,
     client_turn_id: str | None = None,
+    project: str | None = None,
 ) -> dict:
     """
     Send a message to FACO and stream AI response via Socket.IO.
@@ -235,10 +416,22 @@ def send_message(
                     The rendered wording is owned by the server, never the client.
             client_turn_id (str): The client's id for this request. A Stop
                     (cancel_stream) that already names it is kept by this accept.
+            project (str): The caller's project for a chat that has no conversation row yet;
+                    ignored once the row exists.
 
     Returns:
-            dict: Acknowledgment that processing has started
+            dict: Acknowledgment that processing has started; ``conversation`` is the caller's
+            sidebar row (None when nothing is persisted, e.g. a restricted user)
     """
+    # An existing row keeps its own project, so the client's value only matters (and is
+    # only checked) for a chat that has no row yet.
+    if (
+        project
+        and not FACChatProject.is_owned(project)
+        and not frappe.db.exists("FAC Chat Conversation", {"name": session_id, "user": frappe.session.user})
+    ):
+        frappe.throw(_("Project not found"), frappe.DoesNotExistError)
+
     try:
         # Parse context if provided as string (for backwards compatibility)
         if isinstance(context, str):
@@ -258,105 +451,28 @@ def send_message(
         if not attachments:
             attachments = []
 
-        _assert_session_owner(session_id)
-
-        # Check if user can use FACO
-        from ..settings import can_use_faco
-
-        access_check = can_use_faco()
-        if not access_check.get("can_use"):
-            frappe.throw(access_check.get("reason", _("Cannot use FACO")))
-
-        # A Stop raised before this point belongs to an earlier turn, unless it
-        # names this request (cancel.clear).
-        clear_cancel(session_id, keep_turn=client_turn_id)
-
-        # FACO-M15: respect GDPR Article 18 processing restriction. When set,
-        # skip message persistence entirely — the chat still runs (AR handles
-        # the turn in-memory), but no content survives in FACO Message.
-        restricted = _is_processing_restricted(frappe.session.user)
-
-        # Save user message to database
-        from frappe_assistant_core.chat.doctype.fac_chat_message.fac_chat_message import (
-            FACChatMessage,
+        start_turn(
+            session_id,
+            message,
+            context=context,
+            include_context=include_context,
+            file_urls=file_urls,
+            model_id=model_id,
+            attachments=attachments,
+            system_prompt_addendum=system_prompt_addendum,
+            client_type=client_type,
+            web_search=web_search,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            client_signals=client_signals,
+            client_turn_id=client_turn_id,
+            project=project,
         )
-
-        user_msg = None
-        if not restricted:
-            user_msg = FACChatMessage.create_message(
-                session_id=session_id,
-                role="user",
-                content=message,
-                context=context if include_context and context else None,
-            )
-            frappe.db.commit()  # nosemgrep: frappe-manual-commit — background thread / streaming context (not a request handler), explicit commit required to flush progress to DB.
-
-        # Attach files to the message — only meaningful when we persisted one.
-        if file_urls and user_msg is not None:
-            _attach_files_to_message(file_urls, user_msg.name)
-
-        # Prepare prompt - send the original user message to AR (not enriched with file content)
-        # File content goes via system_prompt_addendum so it reaches the LLM without polluting
-        # the stored user message in conversation history.
-        full_prompt = message
-
-        files_addendum = _files_addendum(session_id, restricted)
-        if files_addendum:
-            system_prompt_addendum = (system_prompt_addendum or "") + files_addendum
-
-        signal_addendum = _render_client_signals(client_signals)
-        if signal_addendum:
-            system_prompt_addendum = (system_prompt_addendum or "") + signal_addendum
-
-        # Default to "spa" if client_type not specified (fail-safe: blocks browser tools)
-        effective_client_type = client_type or "spa"
-
-        # Zero-retention: load the client-held session blob to round-trip to AR.
-        # Skipped for restricted users — we never load or store their state.
-        from frappe_assistant_core.chat.doctype.fac_chat_session_state.fac_chat_session_state import (
-            FACChatSessionState,
-        )
-
-        session_state = None if restricted else FACChatSessionState.load_wire(session_id)
-
-        # Process in background via bounded pool (FACO-H14) — relay from AR.
-        # user_msg_name may be None under M15 restriction — relay tolerates.
-        effort = _effort(reasoning_effort)
-        if effort is not None:
-            thinking_enabled = effort != "off"
-
-        turn = _mark_turn_started(session_id, restricted=restricted, client_turn=client_turn_id)
-        try:
-            _relay_pool.submit(
-                _relay_ar_stream,
-                session_id,
-                full_prompt,
-                message,
-                context,
-                user_msg.name if user_msg is not None else None,
-                frappe.session.user,
-                frappe.local.site,
-                model_id,
-                attachments,
-                system_prompt_addendum,
-                effective_client_type,
-                session_state,
-                restricted,
-                # None must reach AR as absence (search available), not as an explicit
-                # off — only coerce when the caller actually supplied a value.
-                web_search=_flag(web_search) if web_search is not None else None,
-                thinking_enabled=_flag(thinking_enabled) if thinking_enabled is not None else None,
-                reasoning_effort=effort,
-                live_turn_token=turn,
-            )
-        except Exception:
-            if turn:
-                live_turn.clear(session_id, turn)
-            raise
 
         return {
             "status": "processing",
             "session_id": session_id,
+            "conversation": conversation_row(session_id),
             "message": _("Message is being processed. Response will be streamed via Socket.IO."),
         }
 
@@ -417,6 +533,7 @@ def resume_interrupt(
     thinking_enabled: bool | None = None,
     reasoning_effort: str | None = None,
     client_turn_id: str | None = None,
+    project: str | None = None,
 ) -> dict:
     """
     Resume a HITL-interrupted agent stream with the user's approval/rejection.
@@ -442,6 +559,8 @@ def resume_interrupt(
             reasoning_effort (str): Composer thinking level — off/low/medium/high/xhigh/max. When valid it also sets thinking_enabled, so an AR that predates levels still honours on/off.
             client_turn_id: The client's id for this request. A Stop
                     (cancel_stream) that already names it is kept by this accept.
+            project: The caller's project, for a chat with no conversation row (a user under
+                    processing restriction); ignored once the row exists.
 
     Returns:
             dict: Acknowledgment that resume processing has started
@@ -506,7 +625,8 @@ def resume_interrupt(
                 # The turn the user approved was sent with these; the resume is the
                 # same turn continuing, so it has to carry them too.
                 model_id=model_id,
-                system_prompt_addendum=_files_addendum(session_id, restricted),
+                system_prompt_addendum=_conversation_addendum(session_id, restricted, project),
+                context=_with_project_context(None, session_id, project),
                 web_search=_flag(web_search) if web_search is not None else None,
                 thinking_enabled=_flag(thinking_enabled) if thinking_enabled is not None else None,
                 reasoning_effort=effort,
@@ -542,6 +662,7 @@ def continue_response(
     thinking_enabled: bool | None = None,
     reasoning_effort: str | None = None,
     client_turn_id: str | None = None,
+    project: str | None = None,
 ) -> dict:
     """
     Continue a previously truncated assistant response (max_tokens stop).
@@ -561,6 +682,8 @@ def continue_response(
             reasoning_effort (str): Composer thinking level — off/low/medium/high/xhigh/max. When valid it also sets thinking_enabled, so an AR that predates levels still honours on/off.
             client_turn_id: The client's id for this request. A Stop
                     (cancel_stream) that already names it is kept by this accept.
+            project: The caller's project, for a chat with no conversation row (a user under
+                    processing restriction); ignored once the row exists.
 
     Returns:
             dict: Acknowledgment that continuation processing has started
@@ -610,7 +733,7 @@ def continue_response(
                 session_id,
                 full_prompt=None,
                 original_message=None,
-                context=None,
+                context=_with_project_context(None, session_id, project),
                 message_name=None,
                 user=frappe.session.user,
                 site=frappe.local.site,
@@ -618,7 +741,7 @@ def continue_response(
                 session_state=session_state,
                 restricted=restricted,
                 continue_from_message_id=message_id,
-                system_prompt_addendum=_files_addendum(session_id, restricted),
+                system_prompt_addendum=_conversation_addendum(session_id, restricted, project),
                 # A continuation is the same turn finishing; it must run under the
                 # same toggles, not fall back to AR's absence defaults.
                 web_search=_flag(web_search) if web_search is not None else None,

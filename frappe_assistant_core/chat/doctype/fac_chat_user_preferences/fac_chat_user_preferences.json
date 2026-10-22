@@ -14,7 +14,12 @@
   "hide_widget",
   "column_break_display",
   "show_suggested_prompts",
+  "show_needs_you",
+  "needs_you_count",
+  "hidden_home_signals",
+  "show_personalized_suggestions",
   "pinned_prompt_templates",
+  "selected_model",
   "section_break_privacy",
   "privacy_consent_complete",
   "processing_restricted"
@@ -80,11 +85,43 @@
    "label": "Show Suggested Prompts"
   },
   {
+   "default": "1",
+   "fieldname": "show_needs_you",
+   "fieldtype": "Check",
+   "label": "Show Needs You"
+  },
+  {
+   "default": "3",
+   "fieldname": "needs_you_count",
+   "fieldtype": "Int",
+   "label": "Needs You Cards"
+  },
+  {
+   "description": "JSON array of signal ids hidden from the home page",
+   "fieldname": "hidden_home_signals",
+   "fieldtype": "Small Text",
+   "label": "Hidden Home Signals"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_personalized_suggestions",
+   "fieldtype": "Check",
+   "label": "Show Personalised Suggestions"
+  },
+  {
    "fieldname": "pinned_prompt_templates",
    "fieldtype": "Small Text",
    "label": "Pinned Prompt Templates",
    "description": "JSON array of pinned prompt template names (max 5)",
    "hidden": 1
+  },
+  {
+   "description": "The model the user chose in FAC Chat: \"auto\" or a model id. Shared by every browser and the Desk widget.",
+   "fieldname": "selected_model",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Selected Model",
+   "length": 140
   },
   {
    "fieldname": "section_break_privacy",

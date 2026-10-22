@@ -66,6 +66,7 @@ def initialize_spa() -> dict:
             "user_auth": None,
             "onboarding": None,
             "sessions": [],
+            "projects": [],
             # Key present on every path so the SPA never has to distinguish
             # "nothing owed" from "this payload predates the field".
             "outstanding": None,
@@ -74,7 +75,7 @@ def initialize_spa() -> dict:
         }
 
     # Fetch sessions (local DB, main thread)
-    sessions = _fetch_sessions()
+    sessions = _fetch_sessions(limit=30)
 
     # === Phase 2: Parallel AR calls (worker threads) ===
     # Pattern from get_billing_page_data (billing.py:1206-1241):
@@ -144,6 +145,7 @@ def initialize_spa() -> dict:
         "terms": _format_terms(ar_results.get("terms"), is_admin),
         "onboarding": None,  # Retained for backward compat (mobile). Onboarding chat removed.
         "sessions": sessions,
+        "projects": _fetch_projects(),
         # None when nothing is owed, and for non-admins who could not act on it.
         "outstanding": ar_results.get("outstanding"),
         "system_timezone": get_system_timezone(),
@@ -200,7 +202,7 @@ def _build_quota(settings: Document, is_admin: bool) -> dict:
 # ============================================================================
 
 
-def _fetch_sessions(limit: int = 20) -> list[dict] | None:
+def _fetch_sessions(limit: int = 30) -> list[dict] | None:
     """Conversation list for the SPA boot payload, or None when it could not be read.
 
     Delegates to the sidebar's own endpoint so the list the SPA boots with and
@@ -220,6 +222,22 @@ def _fetch_sessions(limit: int = 20) -> list[dict] | None:
         return get_user_sessions(limit=limit)
     except Exception:
         _log("FAC Chat boot: conversation list unavailable")
+        return None
+
+
+def _fetch_projects() -> list[dict] | None:
+    """Project list for the SPA boot payload, or None when it could not be read.
+
+    Delegates to the endpoint for the same reason ``_fetch_sessions`` does: a
+    private copy here would drift from what the sidebar refetches.
+    """
+    from frappe_assistant_core.chat.api._helpers import _log
+    from frappe_assistant_core.chat.api.chat.projects import get_projects
+
+    try:
+        return get_projects()
+    except Exception:
+        _log("FAC Chat boot: project list unavailable")
         return None
 
 
@@ -394,6 +412,7 @@ def _format_user_auth(user_auth: dict | None, settings: Document) -> dict:
         "site_registered": True,
         "user_registered": user_exists,
         "user_status": user_auth.get("user_status", "unknown"),
+        "memory_consent_pending": bool(user_auth.get("memory_consent_pending", False)),
         "has_mcp_servers": has_mcp_servers,
         "active_server_count": active_server_count,
         "servers_with_expired_tokens": expired_count,
@@ -427,6 +446,8 @@ def _default_capabilities() -> dict:
             "billing": True,
             "workflows": False,
             "web_search": False,
+            "project_documents": False,
+            "project_memory": False,
         },
         "marketplace": {
             "marketplace_enabled": False,

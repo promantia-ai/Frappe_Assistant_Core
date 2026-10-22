@@ -38,6 +38,11 @@ export function useAutoScroll(containerRef, messages, isStreaming) {
 		el.scrollTop = el.scrollHeight;
 	}
 
+	function scrollToTop() {
+		const el = containerRef.value;
+		if (el) el.scrollTop = 0;
+	}
+
 	function onScroll() {
 		const el = containerRef.value;
 		if (!el) return;
@@ -48,10 +53,37 @@ export function useAutoScroll(containerRef, messages, isStreaming) {
 		isFollowing.value = isAtBottom(el);
 	}
 
+	// Content can grow without its text changing (a tool card, a plan, thinking, a chart that
+	// renders late) and the container shrinks when a phone keyboard opens. Neither fires a
+	// scroll event, so a follower would end up above the latest line. Re-pin on any resize.
+	function onResize() {
+		if (isFollowing.value && messages.value.length) scrollToBottom();
+	}
+
+	let resizeObserver = null;
+	let childObserver = null;
+
+	function observeSizes(el) {
+		if (typeof ResizeObserver === "undefined") return;
+		resizeObserver = new ResizeObserver(onResize);
+		const observeChildren = () => {
+			resizeObserver.disconnect();
+			resizeObserver.observe(el);
+			for (const child of el.children) resizeObserver.observe(child);
+		};
+		observeChildren();
+		// The container's child is swapped when the chat stage changes (welcome -> thread).
+		if (typeof MutationObserver !== "undefined") {
+			childObserver = new MutationObserver(observeChildren);
+			childObserver.observe(el, { childList: true });
+		}
+	}
+
 	onMounted(() => {
 		const el = containerRef.value;
 		if (el) {
 			el.addEventListener("scroll", onScroll, { passive: true });
+			observeSizes(el);
 		}
 	});
 
@@ -60,15 +92,18 @@ export function useAutoScroll(containerRef, messages, isStreaming) {
 		if (el) {
 			el.removeEventListener("scroll", onScroll);
 		}
+		resizeObserver?.disconnect();
+		childObserver?.disconnect();
 	});
 
 	// New message added — always scroll. Sending a message is an explicit
 	// user action that resets intent (you want to see your own message land).
+	// An emptied list is a new chat, whose welcome reads from the top.
 	watch(
 		() => messages.value.length,
-		() => {
+		(length) => {
 			isFollowing.value = true;
-			nextTick(scrollToBottom);
+			nextTick(length ? scrollToBottom : scrollToTop);
 		}
 	);
 

@@ -6,6 +6,8 @@ Adds a field to an existing form, such as "add a vehicle number to Delivery Note
 
 **Only a System Manager can do this.** `Custom Field` is write-protected for every other role.
 
+**Talk to the user in business words.** Never show field names, flags or option keys in what you tell the user unless they ask (for example a server-scripts flag, `custom_` names or "Insert after"). Say "server scripts are switched off", "after the Customer field", "the Required By date". See `setup-change-protocol`.
+
 ## When to use
 
 - "Add a field for X on Y", "we need to capture X on every Y", "can Y have a place to enter X?"
@@ -40,8 +42,10 @@ Adds a field to an existing form, such as "add a vehicle number to Delivery Note
    | Another record (a Customer, an Employee) | `Link` | The DocType name |
    | A file | `Attach` | — |
 
-4. **Pick `insert_after`**: the `fieldname` of an existing field on that doctype, taken from your search results. Search for a neighbouring field the same way if you need one. It must exist, or the save fails.
+4. **Place it where people will see it.** Unless the user says otherwise, put the new field on the **first tab**, in an **expanded** section (not a collapsed one), so it is visible without clicking. Set `insert_after` to the `fieldname` of an existing field in that section, taken from your search results. Search for a neighbouring field the same way if you need one. It must exist, or the save fails.
 5. **Plan, confirm and create** through the protocol.
+6. **Read where it landed and say so.** The `create_document` and `update_document` result carries `location`: the tab, the section, whether that section starts collapsed, and whether the tab is the first one. Tell the user in business words ("on the Details tab, in the Customer section"). If it is collapsed, or on a tab other than the first, and the user did not choose that place, move it before you report: `update_document` the same Custom Field with a new `insert_after` pointing at a field in an expanded section on the first tab, then read the new `location`. If the user did pick the place, report it as it is and mention that the section starts closed.
+7. **Link the form, not the setup record.** Give the user the `applies_to.url` link, which opens the form that now has the field. Never offer the link to the Custom Field record as the place the field shows: it opens the setup record, not the form.
 
 ## Reference
 
@@ -71,7 +75,7 @@ Adds a field to an existing form, such as "add a vehicle number to Delivery Note
 - **Mandatory on an existing form.** Existing drafts can't be saved until someone fills the new field. Submitted documents aren't affected. Warn the user before setting `reqd: 1`.
 - **The fieldtype is mostly permanent.** Frappe only allows changes between compatible types, so `Data` → `Link` later is refused. Choose carefully now.
 - **Submitted documents won't show a value.** The field is empty on everything created before it existed.
-- **Undoing it deletes data.** Deleting the Custom Field drops the column and every value in it.
+- **Undoing it keeps the data.** Deleting a Custom Field removes it from the form, but Frappe keeps its database column and the values already saved. Nothing is lost, and nothing is shown. Say so, so the user does not expect deletion to clear old values.
 - The user may need to reload the form to see the new field.
 
 ## Anti-patterns

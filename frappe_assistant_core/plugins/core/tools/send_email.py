@@ -27,6 +27,7 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool
+from frappe_assistant_core.utils.message_body import as_html_body
 
 
 class SendEmail(BaseTool):
@@ -43,7 +44,10 @@ class SendEmail(BaseTool):
         self.description = (
             "Send an email from the Frappe site's configured email account. "
             "Use this when a workflow or agent needs to notify someone by email. "
-            "The email is queued for delivery using the site's SMTP settings."
+            "The email is queued for delivery using the site's SMTP settings. "
+            "Put the complete email in `message`: the user may see it in an approval card and "
+            "choose Send or Reject. Never say it was sent until the tool returns success; if it "
+            "is rejected, nothing was sent."
         )
         self.source_app = "frappe_assistant_core"
         self.category = "Communication"
@@ -107,7 +111,7 @@ class SendEmail(BaseTool):
                 recipients=recipients,
                 cc=cc or None,
                 subject=subject,
-                message=message,
+                message=as_html_body(message),
                 delayed=True,
             )
             return {

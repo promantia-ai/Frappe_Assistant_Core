@@ -112,6 +112,8 @@ from .chat import (
     get_archived_sessions,
     get_session_history,
     get_user_sessions,
+    move_session_to_project,
+    rename_session,
     resume_interrupt,
     send_message,
 )
@@ -141,6 +143,14 @@ from .documents import (
 from .events import (
     get_message_events,
     get_tool_stats,
+)
+
+# ── Home ─────────────────────────────────────────────────────────────
+from .home import (
+    get_home_preferences,
+    get_home_signals,
+    hide_home_signal,
+    update_home_preferences,
 )
 
 # ── SPA Initialization ─────────────────────────────────────────────
@@ -179,6 +189,7 @@ from .memories import (
 from .models import (
     get_available_models,
     set_preferred_model,
+    set_selected_model,
 )
 
 # ── Profile ──────────────────────────────────────────────────────────

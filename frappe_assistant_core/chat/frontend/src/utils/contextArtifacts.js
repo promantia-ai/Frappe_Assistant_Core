@@ -7,8 +7,13 @@
 
 import { formatToolName, flattenInput } from "@/components/chat/interactions/helpers.js";
 import { buildTimelineRows } from "@/composables/useActivityTimeline.js";
+import { isApprovalInteraction } from "@/stores/chat/interactionRegime";
+import { appliesTo, isDryRun, safeUrl, toolFailed, toolResult } from "@/utils/toolResult";
+import { __ } from "@/utils/i18n";
 // formatToolName is still used for the approval card title (an interaction, not
 // a record); record chips deliberately do NOT fall back to a tool name.
+
+const QUESTION_TITLE_MAX = 60;
 
 // Tool names that read/touch ERP records but do not write. Used to label a
 // touched record as a "source" rather than a mutation in the Records list.
@@ -33,14 +38,35 @@ const READ_TOOLS = new Set([
  * the old tool-name fallback produced). Only tool calls that name an actual
  * ERP document earn a chip.
  */
-function recordLabel(block) {
+function recordLabel(block, result) {
 	const flat = block.input ? flattenInput(block.input) : {};
 	const doctype = flat.doctype || "";
-	const name = flat.name || flat.docname || flat.title || "";
+	// A created record's name is only known from the tool's result.
+	const name = result.name || flat.name || flat.docname || flat.title || "";
 	if (doctype && name) return `${doctype}: ${name}`;
 	if (doctype) return doctype;
 	if (name) return String(name);
 	return null;
+}
+
+// The doctype and name together say which record a call touched; null when either is unknown.
+function recordIdentity(block, result) {
+	const flat = block.input ? flattenInput(block.input) : {};
+	const name = result.name || flat.name || flat.docname;
+	return flat.doctype && name ? `${flat.doctype}\u0000${name}` : null;
+}
+
+// Plain text of an agent-written markdown question, for a one-line title.
+function plainText(markdown) {
+	return String(markdown || "")
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+		.replace(/^[ \t]{0,3}(?:#{1,6}|>)+[ \t]*/gm, "")
+		.replace(/`/g, "")
+		.replace(/~~/g, "")
+		.replace(/(?<!\s)\*+|\*+(?!\s)/g, "")
+		.replace(/(?<!\w)_+(?=\w)|(?<=\w)_+(?!\w)/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 /**
@@ -57,10 +83,14 @@ export function deriveArtifacts(blocks) {
 	for (const b of safe) {
 		if (b.type === "interaction" && b.status === "pending") {
 			const flat = b.input ? flattenInput(b.input) : {};
+			const isQuestion = !isApprovalInteraction(b.interactionType);
 			approval = {
 				id: b.id,
-				title: formatToolName(b.tool_name),
-				subtitle: [flat.name || flat.docname || flat.title, flat.grand_total || flat.amount || flat.total]
+				kind: isQuestion ? "question" : "approval",
+				title: isQuestion
+					? plainText(b.question).slice(0, QUESTION_TITLE_MAX) || __("Question")
+					: formatToolName(b.tool_name),
+				subtitle: isQuestion ? "" : [flat.name || flat.docname || flat.title, flat.grand_total || flat.amount || flat.total]
 					.filter(Boolean)
 					.join(" · "),
 			};
@@ -79,16 +109,30 @@ export function deriveArtifacts(blocks) {
 	// 2) Records & sources the AI touched (tool_call blocks + RAG sources).
 	const records = [];
 	const seen = new Set();
-	const pushRecord = (key, label, kind) => {
-		if (!label || seen.has(key)) return;
+	const byIdentity = new Map();
+	const pushRecord = (key, label, kind, url = null, identity = null, opens = null) => {
+		if (!label) return;
+		const earlier = identity ? byIdentity.get(identity) : null;
+		if (earlier) {
+			// The same record touched again: keep one chip, with the latest result and a write over a read.
+			earlier.label = label;
+			earlier.url = url ?? earlier.url;
+			if (opens) earlier.appliesTo = opens;
+			if (kind === "record") earlier.kind = kind;
+			return;
+		}
+		if (seen.has(key)) return;
 		seen.add(key);
-		records.push({ key, label, kind });
+		const record = { key, label, kind, url, ...(opens ? { appliesTo: opens } : {}) };
+		records.push(record);
+		if (identity) byIdentity.set(identity, record);
 	};
 
 	for (const b of safe) {
-		if (b.type === "tool_call" && b.status === "success") {
+		if (b.type === "tool_call" && b.status === "success" && !toolFailed(b) && !isDryRun(b)) {
 			const isRead = READ_TOOLS.has(b.tool_name);
-			pushRecord(`tool-${b.id}`, recordLabel(b), isRead ? "source" : "record");
+			const result = toolResult(b);
+			pushRecord(`tool-${b.id}`, recordLabel(b, result), isRead ? "source" : "record", safeUrl(result.url), recordIdentity(b, result), appliesTo(b));
 		}
 		if (b.type === "sources" && Array.isArray(b.items)) {
 			for (const item of b.items) {

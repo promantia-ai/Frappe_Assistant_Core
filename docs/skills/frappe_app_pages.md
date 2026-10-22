@@ -1,0 +1,40 @@
+# Working in Frappe Apps (Helpdesk, CRM, Insights)
+
+## When this applies
+
+The system prompt has a **Page Context** section when the user is chatting from the FACO
+widget inside another Frappe app. Desk pages do not use it (you have browser tools there).
+
+## Reading the page line
+
+- **"The user is viewing <DocType> <name> in <App>…"** — that document is open. Read it with the tool the line names before answering "what is this?", "summarise this" or "what should I reply?".
+- **"The user is on a <App> page."** — no single document is open, or the user cannot read it. Ask which record they mean, or find it with `list_documents` / `search_documents`. Never guess a record.
+
+## What does not work outside Desk
+
+You cannot read the screen, navigate, take screenshots or see filters the user changed. Do not
+offer those. Links to Desk pages in your answer open in a new tab, so the user keeps their place.
+
+## Helpdesk
+
+- **HD Ticket** key fields: `subject`, `status` with `status_category` (Open / Paused / Resolved), `priority`, `ticket_type`, `agent_group` (team), `customer`, `contact`, `raised_by` (email), SLA `response_by` / `resolution_by` / `agreement_status`, `first_responded_on`, `resolution_date`, `feedback_rating`.
+- The **conversation** is `Communication` rows with `reference_doctype = "HD Ticket"` and `reference_name = <ticket>` — list them oldest first to follow the thread; the customer's latest message is usually the last one with `sent_or_received = "Received"`.
+- **Internal notes** are `HD Ticket Comment` (`reference_ticket`, `content` (HTML), `commented_by`). They are never shown to the customer — do not quote them in a reply draft.
+- **History** (assignments, status changes) is `HD Ticket Activity` (`ticket`, `action`).
+- "Summarise this ticket": subject, status, priority, customer, what the customer asked, what was answered, what is pending, SLA risk.
+- "Reply to this ticket" / "draft a reply": call `reply_to_helpdesk_ticket` with the complete reply in `message`. The user sees it in an approval card and chooses Send or Reject — that card is the draft, so do not paste the draft into the chat first. Never say it was sent until the tool returns `success`. If they reject, nothing was sent: say so and ask what to change. Only Helpdesk agents can send replies. Internal notes are agent-only — never quote them in a reply.
+
+## CRM
+
+Load the `crm-follow-up` skill: it says which tools brief, email and convert a CRM lead or deal, which
+fields notes, tasks and call logs take, and how to link to CRM pages. On a CRM page "this lead" is the
+record on the page — never an ERPNext Lead or Contact.
+
+## Insights
+
+- Use `get_insights_dashboard` / `get_insights_chart` (when the page line names them). `get_document` on a dashboard returns its layout JSON, not its numbers.
+- Always say the numbers use the dashboard's default filters, and offer to apply the user's filters.
+
+## Any other app
+
+Say what you can see (the app, not the screen) and work from the records the user names.

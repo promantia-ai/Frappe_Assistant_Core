@@ -72,6 +72,10 @@
 				/>
 			</svg>
 		</button>
+		<p v-if="row.reason" class="timeline-reason">{{ row.reason }}</p>
+		<a v-if="row.appliesTo" class="timeline-open" :href="row.appliesTo.url" target="_blank" rel="noopener">{{
+			__("Open a new {0}", [row.appliesTo.doctype])
+		}}</a>
 		<div v-if="expanded" class="timeline-drawer">
 			<!-- The row above already names the action and its status, so the
 			     drawer carries only the payload — its own header would repeat
@@ -87,6 +91,7 @@
 
 <script setup>
 import { computed, ref } from "vue";
+import { __ } from "@/utils/i18n";
 import ToolCallBlock from "../ToolCallBlock.vue";
 
 const props = defineProps({
@@ -182,6 +187,25 @@ const expanded = ref(false);
 .timeline-label strong {
 	font-weight: 600;
 	color: var(--ql-text);
+}
+
+.timeline-open {
+	display: inline-block;
+	margin: 2px 0 0 21px;
+	font-size: 11px;
+	color: var(--ql-accent);
+	text-decoration: none;
+}
+
+.timeline-open:hover {
+	text-decoration: underline;
+}
+
+.timeline-reason {
+	margin: 2px 0 0 21px;
+	font-size: 11px;
+	line-height: 1.4;
+	color: var(--ql-danger);
 }
 
 .timeline-chevron {

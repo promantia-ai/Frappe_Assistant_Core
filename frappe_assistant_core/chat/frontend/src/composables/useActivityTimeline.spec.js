@@ -68,3 +68,119 @@ describe("buildTimelineRows on a persisted delegate block", () => {
 		expect(rows).toEqual([]);
 	});
 });
+
+describe("buildTimelineRows for customisation writes", () => {
+	const create = (extra) => ({
+		type: "tool_call",
+		id: "c",
+		tool_name: "create_document",
+		input: { doctype: "Server Script" },
+		...extra,
+	});
+
+	it("successful create reads Created with name", () => {
+		const [row] = buildTimelineRows([create({ status: "success", result: { success: true, name: "Discount limit" } })]);
+		expect(row.label).toBe("Created Server Script → Discount limit");
+		expect(row.labelPrefix).toBe("Created Server Script → ");
+		expect(row.target).toBe("Discount limit");
+	});
+
+	it("reads the name from a JSON string result and tolerates truncated ones", () => {
+		const [named] = buildTimelineRows([create({ status: "success", result: '{"name":"Discount limit"}' })]);
+		expect(named.label).toBe("Created Server Script → Discount limit");
+		const [cut] = buildTimelineRows([create({ status: "success", result: '{"name":"Disc' })]);
+		expect(cut.label).toBe("Created Server Script");
+		expect(cut.hasTarget).toBe(false);
+	});
+
+	it("reads the name from the stored content-parts result", () => {
+		const result = [{ text: JSON.stringify({ success: true, name: "Discount limit" }) }];
+		const [row] = buildTimelineRows([create({ status: "success", result })]);
+		expect(row.label).toBe("Created Server Script → Discount limit");
+	});
+
+	it("labels a validate_only create as Checked, not Created", () => {
+		const input = { doctype: "Server Script", validate_only: true, data: {} };
+		const result = [{ text: JSON.stringify({ success: true, validation_passed: true, doctype: "Server Script" }) }];
+		const [row] = buildTimelineRows([create({ status: "success", input, result })]);
+		expect(row.label).toBe("Checked Server Script");
+		expect(row.hasTarget).toBe(false);
+	});
+
+	it("labels a validation result as Checked even when the input flag is missing", () => {
+		const [row] = buildTimelineRows([create({ status: "success", result: { success: true, validation_passed: true } })]);
+		expect(row.label).toBe("Checked Server Script");
+	});
+
+	it("a real create with validate_only false still reads Created", () => {
+		const input = { doctype: "Server Script", validate_only: false };
+		const [row] = buildTimelineRows([create({ status: "success", input, result: { success: true, name: "X" } })]);
+		expect(row.label).toBe("Created Server Script → X");
+	});
+
+	it("pending and failed create keep the prepared wording", () => {
+		const [running] = buildTimelineRows([create({ status: "running", result: null })]);
+		expect(running.label).toBe("Prepared new record → Server Script");
+		const [failed] = buildTimelineRows([create({ status: "error", result: { success: false, error: "Nope" } })]);
+		expect(failed.label).toBe("Prepared new record → Server Script");
+	});
+
+	it("update and document actions read in the past tense", () => {
+		const update = { type: "tool_call", id: "u", tool_name: "update_document", status: "success", input: { doctype: "Client Script", name: "CS-1" }, result: { name: "CS-1" } };
+		expect(buildTimelineRows([update])[0].label).toBe("Updated Client Script → CS-1");
+		const action = (a) => ({ type: "tool_call", id: a, tool_name: "document_action", status: "success", input: { doctype: "Quotation", name: "Q-1", action: a }, result: { success: true } });
+		expect(buildTimelineRows([action("submit")])[0].label).toBe("Submitted Quotation → Q-1");
+		expect(buildTimelineRows([action("cancel")])[0].label).toBe("Cancelled Quotation → Q-1");
+		expect(buildTimelineRows([action("amend")])[0].label).toBe("Amended Quotation → Q-1");
+	});
+
+	it("failed step shows the plain reason", () => {
+		const [row] = buildTimelineRows([create({ status: "error", result: { success: false, error: "Server scripts are disabled. Ask an admin." } })]);
+		expect(row.reason).toBe("Server scripts are disabled.");
+		const [ok] = buildTimelineRows([create({ status: "success", result: { name: "X" } })]);
+		expect(ok.reason).toBe("");
+	});
+});
+
+describe("buildTimelineRows for prefixed tool names", () => {
+	it("reads a second connection's create as Created", () => {
+		const [row] = buildTimelineRows([
+			{ type: "tool_call", id: "p", tool_name: "prod_create_document", status: "success", input: { doctype: "Role" }, result: { name: "Auditor" } },
+		]);
+		expect(row.label).toBe("Created Role → Auditor");
+	});
+});
+
+describe("buildTimelineRows status of a failure payload", () => {
+	it("marks a step whose result says success false as an error", () => {
+		const [row] = buildTimelineRows([
+			{ type: "tool_call", id: "f", tool_name: "create_document", status: "success", input: { doctype: "Role" }, result: { success: false, error: "Name taken" } },
+		]);
+		expect(row.status).toBe("error");
+		expect(row.reason).toBe("Name taken");
+	});
+});
+
+describe("toolRowFrom open link", () => {
+	const write = (result, extra = {}) => ({
+		type: "tool_call",
+		id: "w1",
+		tool_name: "create_document",
+		status: "success",
+		input: { doctype: "Custom Field", data: { dt: "Customer" } },
+		result,
+		...extra,
+	});
+
+	it("carries the form to open when a successful write names one", () => {
+		const [row] = buildTimelineRows([write({ name: "Customer-po", applies_to: { doctype: "Customer", url: "/desk/customer/new" } })]);
+		expect(row.appliesTo).toEqual({ doctype: "Customer", url: "/desk/customer/new" });
+	});
+
+	it("has no link without applies_to, with an unsafe url, or on a failed write", () => {
+		expect(buildTimelineRows([write({ name: "x" })])[0].appliesTo).toBeNull();
+		expect(buildTimelineRows([write({ applies_to: { doctype: "Customer", url: "javascript:alert(1)" } })])[0].appliesTo).toBeNull();
+		const failed = write({ success: false, applies_to: { doctype: "Customer", url: "/desk/customer/new" } });
+		expect(buildTimelineRows([failed])[0].appliesTo).toBeNull();
+	});
+});

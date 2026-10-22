@@ -172,8 +172,12 @@ override_whitelisted_methods = {
 # Custom Page Renderers
 # ----------------------
 
-# Handle .well-known OAuth endpoints with custom renderer
-page_renderer = ["frappe_assistant_core.api.oauth_wellknown_renderer.WellKnownRenderer"]
+# Handle .well-known OAuth endpoints with custom renderer, and serve FAC Chat's
+# service worker at /copilot/sw.js (in scope for the SPA; see chat/service_worker.py)
+page_renderer = [
+    "frappe_assistant_core.api.oauth_wellknown_renderer.WellKnownRenderer",
+    "frappe_assistant_core.chat.service_worker.FACChatServiceWorker",
+]
 
 #
 # each overriding function accepts a `data` argument;
@@ -261,6 +265,8 @@ before_migrate = "frappe_assistant_core.utils.migration_hooks.before_migrate"
 after_migrate = [
     "frappe_assistant_core.startup.startup",
     "frappe_assistant_core.utils.migration_hooks.after_migrate",
+    # The widget's route list is cached without expiry; an upgrade can change which apps are supported.
+    "frappe_assistant_core.chat.embed.apps.clear_routes_cache",
 ]
 
 # Fixtures
@@ -365,6 +371,10 @@ app_include_css = []
 # the entry that `extend_bootinfo` reads out of the build manifest.
 extend_bootinfo = ["frappe_assistant_core.chat.widget_boot.extend_bootinfo"]
 
+# Standalone Frappe apps (Helpdesk, Insights…) render their own HTML, which app_include_js never
+# reaches. The hook adds the widget loader to apps an admin enabled; see chat/embed/inject.py.
+after_request = ["frappe_assistant_core.chat.embed.inject.inject_widget"]
+
 app_include_js = [
     _widget_asset("/assets/frappe_assistant_core/js/chat_banner.js"),
     # Diagnostics right after the banner: it records console and network from
@@ -399,6 +409,21 @@ after_install.append("frappe_assistant_core.chat.hooks.install.after_install")
 # Refresh the read-only fac_cloud_url mirror from site_config, and log loudly
 # if a registered site is being repointed (see chat/cloud_url.py).
 after_migrate.append("frappe_assistant_core.chat.cloud_url.sync_cloud_url_mirror")
+# FAC Bot in Raven: create the bot on migrate once switched on; the cached on/off state follows
+# FAC Chat Settings.
+after_migrate.append("frappe_assistant_core.integrations.raven.bot.ensure_bot_after_migrate")
+doc_events.setdefault("FAC Chat Settings", {})["on_update"] = (
+    "frappe_assistant_core.integrations.raven.bot.clear_state_cache"
+)
+# FAC Bot answers Raven DMs and @mentions; dormant unless Raven is installed and the bot exists.
+doc_events["Raven Message"] = {
+    "after_insert": "frappe_assistant_core.integrations.raven.triggers.on_insert",
+    "on_update": "frappe_assistant_core.integrations.raven.triggers.on_update",
+    "on_trash": "frappe_assistant_core.integrations.raven.triggers.on_trash",
+}
+scheduler_events["cron"].setdefault("*/5 * * * *", []).append(
+    "frappe_assistant_core.integrations.raven.sweep.finish_interrupted_replies"
+)
 
 # Permission filters for chat DocTypes — registered unconditionally; only
 # fires when someone queries these tables, which is itself a chat-on activity.
@@ -413,6 +438,13 @@ permission_query_conditions.update(
         "FAC Chat User Preferences": (
             "frappe_assistant_core.chat.utils.permissions"
             ".get_faco_user_preferences_permission_query_conditions"
+        ),
+        "FAC Chat Conversation": (
+            "frappe_assistant_core.chat.utils.permissions"
+            ".get_faco_conversation_permission_query_conditions"
+        ),
+        "FAC Chat Project": (
+            "frappe_assistant_core.chat.utils.permissions" ".get_faco_project_permission_query_conditions"
         ),
         # Zero-retention session blob: scoped to owner only (no System Manager
         # role exemption — only literal Administrator) to close the All-role IDOR.
@@ -434,6 +466,10 @@ has_permission = {
     "FAC Chat User Preferences": (
         "frappe_assistant_core.chat.utils.permissions.has_faco_user_preferences_permission"
     ),
+    "FAC Chat Conversation": (
+        "frappe_assistant_core.chat.utils.permissions.has_faco_conversation_permission"
+    ),
+    "FAC Chat Project": ("frappe_assistant_core.chat.utils.permissions.has_faco_project_permission"),
     "FAC Chat Session State": (
         "frappe_assistant_core.chat.doctype.fac_chat_session_state" ".fac_chat_session_state.has_permission"
     ),
@@ -508,6 +544,8 @@ user_data_fields = [
     {"doctype": "FAC Chat User Preferences", "filter_by": "user", "strict": False},
     {"doctype": "FAC Chat Usage Log", "filter_by": "user", "strict": False},
     {"doctype": "FAC Import Session", "filter_by": "user", "strict": False},
+    {"doctype": "FAC Chat Conversation", "filter_by": "user", "strict": False},
+    {"doctype": "FAC Chat Project", "filter_by": "user", "strict": False},
 ]
 
 # NOTE: FACO browser and document tools are discovered via the `plugins/faco/`

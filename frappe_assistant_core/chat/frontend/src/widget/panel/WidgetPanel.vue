@@ -5,6 +5,19 @@
 			<div class="wp-actions">
 				<button
 					type="button"
+					data-test="new-chat"
+					:title="t('New chat')"
+					:aria-label="t('New chat')"
+					:disabled="!canStartNewChat"
+					@click="newChat"
+				>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+						<line x1="12" y1="5" x2="12" y2="19" />
+						<line x1="5" y1="12" x2="19" y2="12" />
+					</svg>
+				</button>
+				<button
+					type="button"
 					data-test="expand"
 					:title="t('Open Full Assistant')"
 					:aria-label="t('Open Full Assistant')"
@@ -87,6 +100,7 @@
 		<InputArea
 			:is-streaming="chatStore.isStreaming"
 			:interaction-mode="chatStore.pendingInteractionBlock?.regime || null"
+			:placeholder="composerPlaceholder"
 			@send="onSend"
 			@file-upload="handleFileUpload"
 			@abort="chatStore.abortStream"
@@ -99,6 +113,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useChatStore } from "@/stores/chatStore";
 import { useUserStore } from "@/stores/userStore";
+import { useModelStore } from "@/stores/modelStore";
 import { useSpotlightStore } from "@/stores/spotlightStore";
 import { resolveComposerRoute } from "@/stores/chat/composerRouting";
 import { useMessageFileUpload } from "@/composables/useMessageFileUpload";
@@ -113,16 +128,20 @@ import BrowserToolConfirm from "./BrowserToolConfirm.vue";
 import OverageNotice from "./OverageNotice.vue";
 import WidgetPlanStrip from "./WidgetPlanStrip.vue";
 import { bridge } from "../bridge.js";
+import { getHost } from "../host/index.js";
+import { usePageContext } from "../usePageContext.js";
 import { handOffToFullPage } from "../desk/session.js";
 import { isBlocked, overageNoticeDue, markOverageNoticeShown } from "../desk/quotaGate.js";
 import { confirms, settleConfirm } from "./confirmQueue.js";
 import { t } from "./i18n.js";
+import { __ } from "@/utils/i18n";
 import { deskRouteFor } from "./deskLinks.js";
 import { isStoppedTurn, turnWaitingOn } from "@/utils/turnState";
 import SpotlightHost from "@/components/spotlight/SpotlightHost.vue";
 import NotificationHost from "@/components/notifications/NotificationHost.vue";
 
 const chatStore = useChatStore();
+const modelStore = useModelStore();
 const userStore = useUserStore();
 const spotlight = useSpotlightStore();
 const { handleFileUpload, consumeUploadedFiles, discardUploads } = useMessageFileUpload();
@@ -154,7 +173,7 @@ const latestTurn = computed(() => {
 });
 
 
-const deskUser = () => window.frappe?.session?.user || "";
+const deskUser = () => getHost().user() || "";
 
 // The boot payload carries the plan quota but not the admission flags the gate and the overage
 // notice need (credits_exhausted, in_overage, credit_balance), so read the full status once.
@@ -186,7 +205,8 @@ async function onSend({ message, files = [] }) {
 	}
 	if (route === "abort-then-send") await chatStore.abortPendingInteraction();
 	const uploaded = await consumeUploadedFiles(files);
-	await chatStore.sendMessage(message, uploaded, null, null, null, {
+	const page = getHost().sendContext();
+	await chatStore.sendMessage(message, uploaded, page ? JSON.stringify(page) : null, modelStore.currentModelId, null, {
 		skipQueue: route === "abort-then-send",
 	});
 }
@@ -220,6 +240,25 @@ function expand() {
 	window.location.assign("/copilot");
 }
 
+// The composer names the document the user is looking at, and follows Desk navigation.
+const { pageContext } = usePageContext();
+const composerPlaceholder = computed(() =>
+	pageContext.value.type === "Form" && pageContext.value.doctype
+		? __("Ask about this {0}…", [__(pageContext.value.doctype)])
+		: ""
+);
+
+// Disabled while a reply is still arriving, so a half-written answer is never abandoned by accident.
+const canStartNewChat = computed(
+	() => chatStore.messages.length > 0 && !chatStore.isStreaming && !chatStore.isSubmittingInterrupts
+);
+
+// The welcome lists sessions it loaded earlier, which can predate the chat being left; reload it so
+// that chat is offered to continue.
+async function newChat() {
+	if (await chatStore.createSession()) chatStore.loadSessions();
+}
+
 // The PanelApp watch on currentSessionId persists the choice and tells the launcher.
 async function openSession(sessionId) {
 	await chatStore.loadMessages(sessionId);
@@ -235,7 +274,7 @@ function interceptDeskLinks(event) {
 	const route = deskRouteFor(href);
 	if (!route) return;
 	event.preventDefault();
-	window.frappe.set_route(...route);
+	getHost().openDeskRoute(route, href);
 }
 
 // The launcher owns Ctrl+Shift+Space (it must work before this panel exists) and asks for the mic
@@ -295,9 +334,13 @@ onUnmounted(stopMic);
 	width: 16px;
 	height: 16px;
 }
-.wp-actions button:hover {
+.wp-actions button:hover:not(:disabled) {
 	background: var(--ql-accent-soft);
 	color: var(--ql-text);
+}
+.wp-actions button:disabled {
+	opacity: 0.4;
+	cursor: default;
 }
 /* FAC Chat's composer is laid out for the SPA's wide page: its 64px gutters and the keyboard
    hint squeeze the toolbar pills under the right-hand group at 400px. */

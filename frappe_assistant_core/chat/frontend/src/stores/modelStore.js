@@ -4,17 +4,19 @@ import { api } from "@/api/client";
 import { logger } from "@/utils/logger";
 import { EFFORT_LEVELS, LEVEL_LABELS } from "@/stores/composerModesStore";
 
-// localStorage key for persisting user's model selection
+// localStorage is a cache of the server-side choice (FAC Chat User Preferences.selected_model)
 const STORAGE_KEY = "faco_selected_model";
 
 export const useModelStore = defineStore("models", () => {
 	// State
 	const models = ref([]);
 	const modelsByTier = ref({});
-	const selectedModel = ref(null); // User's selected model (from localStorage)
-	// A surface that must not follow (or touch) FAC Chat's saved choice, e.g. the Desk widget
-	// routing automatically. While set it wins and nothing below reads or writes localStorage.
+	const selectedModel = ref(null); // User's selected model (server first, localStorage as cache)
+	// The Desk widget's in-memory choice: empty until the catalogue loads (the server then uses the
+	// saved choice), then the saved choice or auto. While isPinned nothing below reads or writes
+	// localStorage or the server row.
 	const pinned = ref(null);
+	const isPinned = ref(false);
 	const defaultModel = ref(null); // Tenant's default model (from AR)
 	const maxTierRank = ref(999);
 	const isLoading = ref(false);
@@ -108,22 +110,48 @@ export const useModelStore = defineStore("models", () => {
 		return model.tier_rank <= maxTierRank.value;
 	}
 
-	// Load selected model from localStorage
-	function loadSelectedModel() {
-		if (pinned.value) return;
+	function readCachedModel() {
 		try {
-			const stored = localStorage.getItem(STORAGE_KEY);
-			if (stored) {
-				selectedModel.value = stored;
-			}
+			return localStorage.getItem(STORAGE_KEY) || "";
 		} catch (e) {
 			logger.warn("Failed to load model from localStorage:", e);
+			return "";
 		}
+	}
+
+	// Save the choice on the server so it follows the user to another browser. Best effort:
+	// the local cache already holds it, and the next change or load retries.
+	async function saveToServer(modelId) {
+		try {
+			await api.models.setSelected(modelId || "");
+		} catch (e) {
+			logger.warn("Failed to save model on the server:", e);
+		}
+	}
+
+	// Server first. A browser that holds a choice the server has never seen (made before the
+	// server row existed) uploads it once; after that the server row is the source.
+	function loadSelectedModel(serverChoice) {
+		if (isPinned.value) return;
+		const cached = readCachedModel();
+		if (serverChoice) {
+			selectedModel.value = serverChoice;
+			if (cached !== serverChoice) saveSelectedModel(serverChoice);
+		} else if (cached) {
+			selectedModel.value = cached;
+			saveToServer(cached);
+		}
+	}
+
+	function isUsableChoice(modelId) {
+		if (modelId === "auto") return isAutoModeEnabled.value;
+		const model = models.value.find((m) => m.model_id === modelId);
+		return Boolean(model && isModelAccessible(model));
 	}
 
 	// Save selected model to localStorage
 	function saveSelectedModel(modelId) {
-		if (pinned.value) return;
+		if (isPinned.value) return;
 		try {
 			if (modelId) {
 				localStorage.setItem(STORAGE_KEY, modelId);
@@ -138,36 +166,35 @@ export const useModelStore = defineStore("models", () => {
 	// Actions
 
 	// Hold `modelId` in memory only; FAC Chat's saved selection is left exactly as it is.
-	function pinModel(modelId) {
+	function pinModel(modelId = null) {
+		isPinned.value = true;
 		pinned.value = modelId;
 		selectedModel.value = modelId;
 	}
 
-	// Set selected model (synchronous - just updates localStorage)
+	// Set selected model: updates memory and the local cache now, the server row in the background
 	function setSelectedModel(modelId) {
-		if (pinned.value) return false;
-		// Special case: "auto" is always valid if auto mode is enabled
-		if (modelId === "auto" && isAutoModeEnabled.value) {
-			selectedModel.value = modelId;
-			saveSelectedModel(modelId);
-			return true;
-		}
+		if (isPinned.value) return false;
+		if (!isUsableChoice(modelId)) return false;
+		selectedModel.value = modelId;
+		saveSelectedModel(modelId);
+		saveToServer(modelId);
+		return true;
+	}
 
-		// Validate that model exists and is accessible
-		const model = models.value.find((m) => m.model_id === modelId);
-		if (model && isModelAccessible(model)) {
-			selectedModel.value = modelId;
-			saveSelectedModel(modelId);
-			return true;
-		}
-		return false;
+	// A load-time reset (the saved model is missing from the list right now) is local only:
+	// the server row is every browser's choice and a transient gap must not wipe it.
+	function resetSelectionLocally() {
+		selectedModel.value = null;
+		saveSelectedModel(null);
 	}
 
 	// Clear selected model (reverts to default)
 	function clearSelectedModel() {
-		if (pinned.value) return;
+		if (isPinned.value) return;
 		selectedModel.value = null;
 		saveSelectedModel(null);
+		saveToServer("");
 	}
 
 	// Load available models from AR
@@ -187,30 +214,23 @@ export const useModelStore = defineStore("models", () => {
 				maxTierRank.value = result.max_tier_rank || 999;
 				autoMode.value = result.auto_mode || null;
 
-				// Load user's selection from localStorage
-				loadSelectedModel();
+				const serverChoice = result.selected_model || "";
+				if (isPinned.value) {
+					// The widget follows the saved choice without writing it anywhere, else routes automatically.
+					const choice = isUsableChoice(serverChoice) ? serverChoice : pinned.value || (isAutoModeEnabled.value ? "auto" : null);
+					pinned.value = choice;
+					selectedModel.value = choice;
+				} else {
+					loadSelectedModel(serverChoice);
+				}
 
-				// Validate stored selection is still valid (a pin is not a stored selection)
-				if (selectedModel.value && !pinned.value) {
-					// Special case: "auto" is valid if auto mode is enabled
-					if (selectedModel.value === "auto" && isAutoModeEnabled.value) {
-						// Keep auto mode selection
-					} else if (selectedModel.value === "auto" && !isAutoModeEnabled.value) {
-						// Auto mode was selected but is no longer available
-						clearSelectedModel();
-					} else {
-						const storedModel = models.value.find(
-							(m) => m.model_id === selectedModel.value
-						);
-						if (!storedModel || !isModelAccessible(storedModel)) {
-							// Stored model no longer valid, clear it
-							clearSelectedModel();
-						}
-					}
+				// A pin is not a stored selection
+				if (selectedModel.value && !isPinned.value && !isUsableChoice(selectedModel.value)) {
+					resetSelectionLocally();
 				}
 
 				// Default to auto mode if enabled and no model selected
-				if (!selectedModel.value && !pinned.value && isAutoModeEnabled.value) {
+				if (!selectedModel.value && !isPinned.value && isAutoModeEnabled.value) {
 					selectedModel.value = "auto";
 					saveSelectedModel("auto");
 				}

@@ -21,7 +21,12 @@ import frappe
 from frappe import _
 from frappe.utils import now_datetime, time_diff_in_seconds
 
-from .report_requirements import VALUE_CONSTRAINED_FIELDTYPES, discover_filter_definitions
+from .report_access import can_run_report
+from .report_requirements import (
+    PREPARED_REPORT_WAIT_SECONDS,
+    VALUE_CONSTRAINED_FIELDTYPES,
+    discover_filter_contract,
+)
 
 DEFAULT_MAX_ROWS = 500
 MAX_ROWS_CAP = 5000
@@ -36,9 +41,13 @@ def _clamp_max_rows(value: Any) -> int:
 
 
 def _limit_rows(data: list, max_rows: int, summary_only: bool, keep_total_row: bool) -> list:
-    """The rows to return. A report's totals row is its last row and survives the cut."""
+    """The rows to return. A report's totals row is its last row and survives the cut.
+
+    summary_only keeps just the totals row; callers pass it only when the report has a totals row
+    or a report_summary to stand in for the rows.
+    """
     if summary_only:
-        return []
+        return [data[-1]] if keep_total_row and data else []
     if len(data) <= max_rows:
         return data
     if keep_total_row:
@@ -90,7 +99,7 @@ class ReportTools:
                 return {"success": False, "error": f"Report '{report_name}' not found"}
 
             # Check permissions
-            if not frappe.has_permission("Report", "read", report_name):
+            if not can_run_report(report_name):
                 return {"success": False, "error": f"No permission to access report '{report_name}'"}
 
             # Get report document
@@ -101,7 +110,9 @@ class ReportTools:
             definitions = ReportTools._filter_definitions(report_doc)
 
             # Validate filters before execution
-            validation_result = ReportTools._validate_filters(filters or {}, report_doc, definitions)
+            validation_result = ReportTools._validate_filters(
+                filters or {}, report_doc, definitions if definitions is not None else {}
+            )
             if not validation_result.get("valid"):
                 return {
                     "success": False,
@@ -118,7 +129,9 @@ class ReportTools:
 
             # Execute report based on type
             if report_doc.report_type == "Query Report":
-                result = ReportTools._execute_query_report(report_doc, effective_filters)
+                result = ReportTools._execute_query_report(
+                    report_doc, effective_filters, definitions=definitions
+                )
             elif report_doc.report_type == "Script Report":
                 result = ReportTools._execute_script_report(report_doc, effective_filters, definitions)
             elif report_doc.report_type == "Report Builder":
@@ -145,12 +158,20 @@ class ReportTools:
                 # Determine which filters were auto-injected
                 auto_added = {k: v for k, v in final_filters.items() if k not in user_filter_keys}
 
+                defaulted_filters = ReportTools._defaulted_filters(final_filters, filters, definitions)
+
                 row_count = len(data)
+                has_total_row = bool(result.get("add_total_row", getattr(report_doc, "add_total_row", 0)))
+                # A report with neither a totals row nor a summary has nothing to stand in for its
+                # rows; answering with no data would send the model to add up records itself.
+                summary_unavailable = bool(summary_only) and not (
+                    has_total_row or result.get("report_summary")
+                )
                 rows = _limit_rows(
                     data,
                     _clamp_max_rows(max_rows),
-                    bool(summary_only),
-                    bool(result.get("add_total_row", getattr(report_doc, "add_total_row", 0))),
+                    bool(summary_only) and not summary_unavailable,
+                    has_total_row,
                 )
 
                 debug_info = {
@@ -162,6 +183,7 @@ class ReportTools:
                     "message": result.get("message"),
                     "filters_applied": final_filters,
                     "filters_auto_added": auto_added if auto_added else None,
+                    "defaulted_filters": defaulted_filters,
                     "raw_result_keys": list(result.keys()) if result else [],
                     "row_count": row_count,
                     "truncated": len(rows) < row_count,
@@ -171,12 +193,14 @@ class ReportTools:
                 }
                 if rows:
                     debug_info["total_count"] = row_count
-                if result.get("status") == "error":
+                # A failed Script Report returns its error without a status.
+                if result.get("status") == "error" or result.get("error"):
                     return {
                         "success": False,
                         "error": result.get("error") or _("Report generation failed"),
                         "status": "error",
                         "prepared_report_name": result.get("prepared_report_name"),
+                        "suggestion": result.get("suggestion"),
                     }
                 if result.get("status"):
                     debug_info["status"] = result["status"]
@@ -184,6 +208,12 @@ class ReportTools:
                     debug_info["prepared_report_name"] = result["prepared_report_name"]
                 if result.get("report_summary"):
                     debug_info["report_summary"] = result["report_summary"]
+                if summary_unavailable:
+                    debug_info["summary_unavailable"] = True
+                    debug_info["summary_note"] = _(
+                        "This report has no totals row or summary, so its rows are returned instead. "
+                        "Read totals from the report's own columns; do not add up rows yourself."
+                    )
                 if debug_info["truncated"] and not summary_only:
                     debug_info["truncation_note"] = _(
                         "Showing {0} of {1} rows. Pass max_rows (up to {2}) for more, or narrow the filters."
@@ -212,6 +242,22 @@ class ReportTools:
             return {"success": False, "error": str(e)}
 
     @staticmethod
+    def _defaulted_filters(final_filters: dict, supplied: dict | None, definitions: dict | None):
+        """The filters FAC filled in that the report itself declares, so the model can name them.
+
+        None when the report's filter contract is unknown: nothing can be claimed as used.
+        A filter the report never declares is not reported, because the report ignored it.
+        """
+        if definitions is None:
+            return None
+        supplied = supplied or {}
+        return {
+            key: value
+            for key, value in final_filters.items()
+            if key in definitions and value not in (None, "") and supplied.get(key) in (None, "")
+        }
+
+    @staticmethod
     def list_reports(module: str = None, report_type: str = None) -> Dict[str, Any]:
         """Get list of available reports"""
         try:
@@ -221,18 +267,14 @@ class ReportTools:
             if report_type:
                 filters["report_type"] = report_type
 
-            reports = frappe.get_all(
+            reports = frappe.get_list(
                 "Report",
                 filters=filters,
                 fields=["name", "report_name", "report_type", "module", "is_standard", "disabled"],
                 order_by="report_name",
             )
 
-            # Filter by permissions
-            accessible_reports = []
-            for report in reports:
-                if frappe.has_permission("Report", "read", report.name):
-                    accessible_reports.append(report)
+            accessible_reports = [r for r in reports if can_run_report(r.name)]
 
             return {
                 "success": True,
@@ -252,7 +294,7 @@ class ReportTools:
             if not frappe.db.exists("Report", report_name):
                 return {"success": False, "error": f"Report '{report_name}' not found"}
 
-            if not frappe.has_permission("Report", "read", report_name):
+            if not can_run_report(report_name):
                 return {"success": False, "error": f"No permission to access report '{report_name}'"}
 
             report_doc = frappe.get_doc("Report", report_name)
@@ -433,7 +475,7 @@ class ReportTools:
                 )
 
             # Poll for completion with exponential backoff
-            max_wait_time = min(report_timeout, 300)  # Cap at 5 minutes for MCP tools
+            max_wait_time = min(report_timeout, PREPARED_REPORT_WAIT_SECONDS)
             poll_interval = 2.0  # Start with 2 seconds
             max_poll_interval = 15.0  # Max 15 seconds between polls
             elapsed_time = 0
@@ -441,8 +483,10 @@ class ReportTools:
             frappe.db.commit()  # Ensure job is committed to DB
 
             while elapsed_time < max_wait_time:
-                time.sleep(poll_interval)
-                elapsed_time += poll_interval
+                # Never sleep past the cap: the last poll is shortened to fit.
+                pause = min(poll_interval, max_wait_time - elapsed_time)
+                time.sleep(pause)
+                elapsed_time += pause
 
                 # Check prepared report status - get fresh data
                 frappe.db.rollback()
@@ -493,8 +537,8 @@ class ReportTools:
                 "prepared_report_name": prepared_report_name,
                 "message": _(
                     "The report {0} is still being prepared in the background (waited {1}s). "
-                    "Ask again with the same filters in a minute or two: the retry picks up this same "
-                    "report instead of starting a new one."
+                    "Call generate_report again with the same filters in a minute or two: the retry "
+                    "picks up this same report instead of starting a new one."
                 ).format(report_doc.name, int(elapsed_time)),
                 "retry_guidance": f"Use report_name='{report_doc.name}' with the same filters to retrieve results.",
                 "wait_time_seconds": int(elapsed_time),
@@ -505,7 +549,7 @@ class ReportTools:
             raise e
 
     @staticmethod
-    def _execute_query_report(report_doc, filters, get_columns_only=False):
+    def _execute_query_report(report_doc, filters, get_columns_only=False, definitions=None):
         """Execute a Query Report"""
         from frappe.desk.query_report import run
 
@@ -526,6 +570,7 @@ class ReportTools:
                 if value is not None:
                     cleaned_filters[key] = value
             filters = cleaned_filters
+            supplied_keys = set(filters)
 
             # Add default date filters if missing - use current fiscal year dates
             if not filters.get("from_date") and not filters.get("to_date"):
@@ -581,18 +626,9 @@ class ReportTools:
             if "quotation trends" in report_name_lower and "based_on" not in filters:
                 filters["based_on"] = "Item"
 
-            # Final cleanup - ensure all filter values are strings or proper types
-            final_filters = {}
-            for key, value in filters.items():
-                if value is not None:
-                    # Convert dates to strings if they're not already
-                    if hasattr(value, "strftime"):  # datetime object
-                        final_filters[key] = value.strftime("%Y-%m-%d")
-                    elif isinstance(value, (str, int, float, bool)):
-                        final_filters[key] = value
-                    else:
-                        final_filters[key] = str(value)
-            filters = final_filters
+            filters = ReportTools._without_undeclared_defaults(filters, supplied_keys, definitions)
+
+            filters = ReportTools._normalize_filter_values(filters, definitions)
 
             result = run(
                 report_name=report_doc.name,
@@ -624,7 +660,9 @@ class ReportTools:
         if getattr(report_doc, "prepared_report", False) and not getattr(
             report_doc, "disable_prepared_report", False
         ):
-            return ReportTools._handle_prepared_report_execution(report_doc, filters)
+            return ReportTools._handle_prepared_report_execution(
+                report_doc, ReportTools._normalize_filter_values(filters, definitions)
+            )
 
         try:
             # Ensure filters is a proper dict and clean None values
@@ -637,6 +675,7 @@ class ReportTools:
                 if value is not None:
                     cleaned_filters[key] = value
             filters = cleaned_filters
+            supplied_keys = set(filters)
 
             # Add default date filters if missing - use current fiscal year dates
             if not filters.get("from_date") and not filters.get("to_date"):
@@ -701,18 +740,9 @@ class ReportTools:
             # Apply the defaults the report itself declares
             filters = ReportTools._apply_filter_defaults(report_doc, filters, definitions)
 
-            # Final cleanup - ensure all filter values are strings or proper types
-            final_filters = {}
-            for key, value in filters.items():
-                if value is not None:
-                    # Convert dates to strings if they're not already
-                    if hasattr(value, "strftime"):  # datetime object
-                        final_filters[key] = value.strftime("%Y-%m-%d")
-                    elif isinstance(value, (str, int, float, bool)):
-                        final_filters[key] = value
-                    else:
-                        final_filters[key] = str(value)
-            filters = final_filters
+            filters = ReportTools._without_undeclared_defaults(filters, supplied_keys, definitions)
+
+            filters = ReportTools._normalize_filter_values(filters, definitions)
 
             # Check if this is a prepared report (after all filter processing)
             if getattr(report_doc, "prepared_report", False) and not getattr(
@@ -771,7 +801,7 @@ class ReportTools:
         details = []
 
         if definitions is None:
-            definitions = ReportTools._filter_definitions(report_doc)
+            definitions = ReportTools._filter_definitions(report_doc) or {}
 
         for filter_key, filter_value in filters.items():
             if not filter_value:
@@ -841,16 +871,54 @@ class ReportTools:
         }
 
     @staticmethod
-    def _filter_definitions(report_doc) -> Dict[str, Any]:
-        """The report's declared filter contract, or {} when discovery finds nothing."""
+    def _filter_definitions(report_doc) -> Dict[str, Any] | None:
+        """The report's declared filter contract: {} when it declares none, None when unknown."""
         try:
-            return discover_filter_definitions(report_doc)
+            return discover_filter_contract(report_doc)
         except Exception as e:
             frappe.log_error(
                 title=_("Report Filter Discovery Error"),
                 message=f"Error discovering filters for {report_doc.name}: {str(e)}",
             )
-            return {}
+            return None
+
+    @staticmethod
+    def _normalize_filter_values(filters: dict, definitions: dict | None) -> dict:
+        """Shape filter values the way Desk sends them to a report.
+
+        Desk always sends a MultiSelectList filter as a list, and reports hand it
+        straight to ``isin()``, which takes a string for a query term: Accounts
+        Receivable fails with "'str' object has no attribute 'nodes_'". So lists
+        pass through as lists, and a single value for a MultiSelectList is wrapped.
+        """
+        definitions = definitions or {}
+        normalized = {}
+        for key, value in (filters or {}).items():
+            if value is None:
+                continue
+            if hasattr(value, "strftime"):
+                value = value.strftime("%Y-%m-%d")
+            elif isinstance(value, (list, tuple, set)):
+                value = list(value)
+            elif not isinstance(value, (str, int, float, bool)):
+                value = str(value)
+            is_multi_select = (definitions.get(key) or {}).get("fieldtype") == "MultiSelectList"
+            if is_multi_select and value and isinstance(value, str):
+                value = [value]
+            normalized[key] = value
+        return normalized
+
+    @staticmethod
+    def _without_undeclared_defaults(filters: dict, supplied_keys: set, definitions: dict | None) -> dict:
+        """Drop FAC's period/company defaults that the report does not declare.
+
+        A filter the report never reads must not reach it, nor be reported as the
+        period or company the answer used. Caller-supplied keys always stay, and an
+        unknown contract (None) keeps the defaults, since the report may read them.
+        """
+        if definitions is None:
+            return filters
+        return {key: value for key, value in filters.items() if key in supplied_keys or key in definitions}
 
     @staticmethod
     def _link_value_suggestions(doctype: str, filter_value) -> list:
@@ -881,7 +949,7 @@ class ReportTools:
         """
         try:
             if definitions is None:
-                definitions = ReportTools._filter_definitions(report_doc)
+                definitions = ReportTools._filter_definitions(report_doc) or {}
 
             for fieldname, definition in definitions.items():
                 default = definition.get("default")

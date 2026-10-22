@@ -1,6 +1,6 @@
 <template>
 	<div class="input-area-container">
-		<div class="input-column">
+		<div class="input-column" @mousedown="keepComposerFocus">
 			<!-- File Previews (above input) -->
 			<AttachedFilePreview :files="attachedFiles" @remove="removeFile" />
 
@@ -103,6 +103,7 @@ import ComposerPlusMenu from "@/components/chat/ComposerPlusMenu.vue";
 import ThinkingLevelMenu from "@/components/chat/ThinkingLevelMenu.vue";
 import AttachedFilePreview from "@/components/chat/AttachedFilePreview.vue";
 import InputToolbar from "@/components/chat/InputToolbar.vue";
+import { keepComposerFocus } from "@/composables/useComposerFocus";
 import {
 	useComposerAttachments,
 	UPLOAD_ACCEPT_ATTR,
@@ -134,6 +135,8 @@ const props = defineProps({
 	context: { type: Object, default: null },
 	initialMessage: { type: String, default: "" },
 	interactionMode: { type: String, default: null },
+	// Replaces the idle placeholder only; streaming and pending-question states keep theirs.
+	placeholder: { type: String, default: "" },
 });
 
 const emit = defineEmits(["send", "file-upload", "abort", "pick-template", "browse-templates"]);
@@ -226,7 +229,7 @@ const canSend = computed(
 const placeholderText = computed(() => {
 	if (props.interactionMode === "question") return "Type your answer…";
 	if (props.isStreaming) return "Assistant is responding — Enter queues your message";
-	return "Ask me anything…";
+	return props.placeholder || "Ask me anything…";
 });
 
 const hasMarkdown = computed(() => {
@@ -395,7 +398,12 @@ function onGlobalKeydown(e) {
 }
 
 onMounted(() => document.addEventListener("keydown", onGlobalKeydown));
-onBeforeUnmount(() => document.removeEventListener("keydown", onGlobalKeydown));
+onBeforeUnmount(() => {
+	document.removeEventListener("keydown", onGlobalKeydown);
+	// Removing a focused field fires no blur, so the phone layout (useComposerFocus) would stay
+	// collapsed after the first send swaps the welcome composer for the docked one.
+	if (document.activeElement === textInput.value) textInput.value.blur();
+});
 
 function handleStop() {
 	emit("abort");
@@ -419,6 +427,18 @@ function handleStop() {
 @media (min-width: 1024px) {
 	.input-area-container {
 		padding: 1rem 4rem max(1.25rem, env(safe-area-inset-bottom, 0px));
+	}
+}
+
+/* With the keyboard up on a phone, trim the composer's chrome and cap a long draft at about
+   four lines so the conversation keeps most of the visible height (useComposerFocus). */
+@media (max-width: 640px) {
+	:global(html.ql-composer-focused .input-area-container) {
+		padding-top: 0.5rem;
+		padding-bottom: 0.5rem;
+	}
+	:global(html.ql-composer-focused .input-textarea) {
+		max-height: 6.5rem;
 	}
 }
 

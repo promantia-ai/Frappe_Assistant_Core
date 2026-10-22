@@ -6,6 +6,8 @@
  * surfaces to the user during approval — not general-purpose formatters.
  */
 
+import { titleWord } from "@/utils/toolLabel";
+
 const MAX_VALUE_LEN = 120;
 
 // Field-name patterns that mark a value as money or a date for display.
@@ -21,6 +23,37 @@ function isPlainObject(v) {
 	return v && typeof v === "object" && !Array.isArray(v);
 }
 
+// Fields that hold code or markup. Mirrored in chat/api/current_code.py.
+export const CODE_KEYS = [
+	"script",
+	"condition",
+	"query",
+	"html",
+	"javascript",
+	"report_script",
+	"css",
+	"message",
+];
+
+export function isCodeKey(key) {
+	return CODE_KEYS.includes(key);
+}
+
+const PYTHON_KEYS = new Set(["script", "report_script", "condition"]);
+
+export function codeLanguage(key, doctype) {
+	if (PYTHON_KEYS.has(key)) return "python";
+	if (key === "javascript") return "javascript";
+	if (key === "query") return "sql";
+	if (key === "html" && doctype === "Print Format") return "django";
+	return "xml";
+}
+
+/** True for a non-empty array of plain objects, i.e. the rows of a child table. */
+export function isChildTable(value) {
+	return Array.isArray(value) && value.length > 0 && value.every(isPlainObject);
+}
+
 /**
  * Flatten a tool input dict for human display.
  *
@@ -29,7 +62,8 @@ function isPlainObject(v) {
  * ARE the meaningful detail — flatten them onto the top level so each field
  * gets its own row. Boilerplate keys (`validate_only`, `ignore_permissions`,
  * `ignore_mandatory`) are dropped so the approval card stays focused on the
- * actual changes the user is being asked to authorize.
+ * actual changes the user is being asked to authorize. A nested key that collides with a
+ * record identity key (`data.name` on an update) is kept as `new_<key>`.
  */
 export function flattenInput(input) {
 	const result = {};
@@ -47,6 +81,9 @@ export function flattenInput(input) {
 		if (isPlainObject(input[key])) {
 			for (const [fk, fv] of Object.entries(input[key])) {
 				if (!(fk in result)) result[fk] = fv;
+				// A data key that shares a name with the record's identity (a rename) is a change, not a duplicate;
+				// compared as trimmed strings so 5 and "5" are the same record, as in update_document.
+				else if (metaKeys.includes(fk) && String(result[fk]).trim() !== String(fv).trim() && !isPlainObject(fv)) result[`new_${fk}`] ??= fv;
 			}
 		}
 	}
@@ -104,7 +141,7 @@ export function formatToolName(name) {
 	return name
 		.replace(/_/g, " ")
 		.split(" ")
-		.map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+		.map(titleWord)
 		.join(" ");
 }
 
@@ -161,7 +198,7 @@ export function isMonoValue(key, value) {
  * Returns ordered [key, value] pairs (not objects) to keep render order stable.
  */
 export function splitDetailFields(flat, primaryCount = 4) {
-	const priorityOrder = ["doctype", "name", "docname", "title", "customer", "status"];
+	const priorityOrder = ["doctype", "name", "new_name", "docname", "title", "customer", "status"];
 	const entries = Object.entries(flat || {});
 	entries.sort((a, b) => {
 		const ai = priorityOrder.indexOf(a[0]);

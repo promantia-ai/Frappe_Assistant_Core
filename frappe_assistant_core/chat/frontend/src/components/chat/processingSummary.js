@@ -6,6 +6,10 @@
 
 import { isInternalTool } from "@/utils/internalTools";
 import { describeDelegation } from "./delegationOutcome";
+import { titleWord } from "@/utils/toolLabel";
+import { failureReason, toolFailed } from "@/utils/toolResult";
+
+const SUMMARY_REASON_MAX = 80;
 
 export function formatToolName(name) {
 	if (!name) return "Tool";
@@ -13,7 +17,7 @@ export function formatToolName(name) {
 		.replace(/_/g, " ")
 		.replace(/([a-z])([A-Z])/g, "$1 $2")
 		.split(" ")
-		.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+		.map(titleWord)
 		.join(" ");
 }
 
@@ -42,8 +46,9 @@ export function processingSummary(blocks, isStreaming, live = isStreaming) {
 	const ext = toolBlocks.filter((b) => !isInternalTool(b));
 	const internal = toolBlocks.filter((b) => isInternalTool(b));
 
-	const errorCount = ext.filter((b) => b.status === "error").length;
-	const errorSuffix = errorCount > 0 ? ` (${errorCount} failed)` : "";
+	const failed = ext.filter(toolFailed);
+	const firstReason = failed.map((b) => failureReason(b, SUMMARY_REASON_MAX)).find(Boolean);
+	const errorSuffix = failed.length > 0 ? ` (${failed.length} failed${firstReason ? `: ${firstReason}` : ""})` : "";
 
 	if (ext.length === 0) {
 		const delegated = delegateBlocks(internal);
@@ -86,7 +91,7 @@ export function processingSummary(blocks, isStreaming, live = isStreaming) {
 export function processingStatus(blocks, isStreaming, live = isStreaming) {
 	const list = blocks || [];
 	const toolBlocks = list.filter((b) => b.type === "tool_call");
-	if (toolBlocks.some((b) => b.status === "error")) return "error";
+	if (toolBlocks.some(toolFailed)) return "error";
 	if (!live && toolBlocks.some((b) => b.status === "running")) return "stopped";
 	const delegated = delegateBlocks(toolBlocks);
 	return delegated.length ? describeDelegation(delegated, live).status : "complete";

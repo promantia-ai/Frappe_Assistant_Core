@@ -19,7 +19,7 @@ Document Update Tool for Core Plugin.
 Updates existing Frappe documents.
 """
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
@@ -27,6 +27,12 @@ from frappe import _
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.core.security_config import get_restricted_fields
 from frappe_assistant_core.utils import document_batch
+from frappe_assistant_core.utils.customisation import (
+    customisation_result,
+    desk_url,
+    script_report_warning,
+    server_script_guard,
+)
 
 from .child_tables import ChildRowError, child_table_fields, normalize_child_rows
 
@@ -151,6 +157,31 @@ def _apply_child_table_update(
     return None
 
 
+RENAME_KEYS = ("new_name", "rename")
+
+
+def _has_rename_value(value: Any) -> bool:
+    """A value names a rename unless it is None, False or blank once stringified.
+
+    Numbers and True count; the chat card's `hasRenameValue` applies the same rule.
+    """
+    return value is not None and value is not False and str(value).strip() != ""
+
+
+def _split_rename(name: str, data: Dict[str, Any], arguments: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """Separate a rename from the field changes in an update.
+
+    A rename is `new_name` or `rename` (in `data` or beside it), or a `data["name"]` that
+    differs from the record being updated. Returns the data without those keys and whether
+    any was present. Restating the record's own name is not a rename.
+    """
+    fields = {k: v for k, v in data.items() if k not in RENAME_KEYS and k != "name"}
+    requested = any(_has_rename_value(v) for k in RENAME_KEYS for v in (data.get(k), arguments.get(k)))
+    if "name" in data and _has_rename_value(data["name"]):
+        requested = requested or str(data["name"]).strip() != str(name).strip()
+    return fields, requested
+
+
 class DocumentUpdate(BaseTool):
     """
     Tool for updating existing Frappe documents.
@@ -235,6 +266,19 @@ class DocumentUpdate(BaseTool):
             return {
                 "success": False,
                 "error": "Pass doctype, name and data for one record, or documents for several.",
+            }
+
+        data, rename_requested = _split_rename(name, data, arguments)
+        if rename_requested and not data:
+            return {
+                "success": False,
+                "error": _(
+                    "The update tool can't rename a record, and there is nothing else to change. "
+                    "Rename it in Desk: open the record and choose Rename from its menu."
+                ),
+                "error_type": "rename_not_supported",
+                "doctype": doctype,
+                "name": name,
             }
 
         # Reject direct updates to child-table doctypes. Saving a child row in isolation
@@ -345,6 +389,26 @@ class DocumentUpdate(BaseTool):
                     ),
                 }
 
+            refusal = server_script_guard(
+                doctype,
+                data,
+                current_disabled=doc.get("disabled"),
+                current_reference_doctype=doc.get("reference_doctype"),
+                current_script_type=doc.get("script_type"),
+            )
+            if refusal:
+                return refusal
+
+            # Read before the setattr loop below, which overwrites the stored values
+            warning = script_report_warning(doctype, data, current=doc)
+            if rename_requested:
+                skipped = _(
+                    "The rename was skipped: the update tool can't rename a record. The other "
+                    "changes were saved. To rename it, open the record in Desk and choose Rename "
+                    "from its menu."
+                )
+                warning = f"{warning} {skipped}" if warning else skipped
+
             # Apply updates: child tables go through helper, scalars use setattr.
             for field, value in data.items():
                 if field in table_fields:
@@ -372,6 +436,7 @@ class DocumentUpdate(BaseTool):
                 "success": True,
                 "name": doc.name,
                 "doctype": doctype,
+                "url": desk_url(doctype, doc.name),
                 "updated_fields": list(data.keys()),
                 "docstatus": updated_docstatus,
                 "state_description": "Draft" if updated_docstatus == 0 else "Unknown",
@@ -381,6 +446,8 @@ class DocumentUpdate(BaseTool):
                 "modified_by": doc.modified_by,
                 "message": f"{doctype} '{doc.name}' updated successfully",
             }
+
+            result.update(customisation_result(doctype, doc, warning))
 
             # Check if user can submit this document
             if updated_docstatus == 0:  # Only for draft documents

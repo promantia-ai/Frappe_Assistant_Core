@@ -21,6 +21,20 @@ function htmlParts(content) {
 // read only the attrs, so every one of them mounted MetricBlock with blank
 // props and rendered as an empty bordered box with no error anywhere.
 describe("metric fence dialects", () => {
+	// Live-bug repro (filming FAC Ep.13): Claude Sonnet 4.6 wrote a KPI row as a
+	// `metrics` fence holding a JSON array; the unknown fence name left it as raw
+	// JSON in a dark code block, and the headline total never showed.
+	it("reads a `metrics` fence as the same KPI row as `metric`", () => {
+		expect(
+			componentProps(
+				'```metrics\n[{"label":"Total Revenue","value":"₹9,38,720","delta":"+9.3%"},{"label":"Invoices Raised","value":"16"}]\n```'
+			)
+		).toEqual([
+			{ title: "Total Revenue", value: "₹9,38,720", change: "+9.3%", trend: "", description: "" },
+			{ title: "Invoices Raised", value: "16", change: "", trend: "", description: "" },
+		]);
+	});
+
 	it("parses the documented fence-attribute form", () => {
 		expect(
 			componentProps('```metric title="Monthly Revenue" value="₹14,25,000" change="+18%" trend="up"\n```')
@@ -212,5 +226,32 @@ describe("metric fence carrying a JSON array", () => {
 		const content = '```metric\n[{"note":"a"},{"note":"b"}]\n```';
 		expect(componentProps(content)).toEqual([]);
 		expect(htmlParts(content).join("")).toContain("note");
+	});
+
+	// Live-bug repro (MSG-2026-00872): the model wrapped a KPI row in an
+	// object, `{"cards": [...]}`, and used `note` for the sub-line. The
+	// wrapper has no label/value, so the whole row fell back to raw JSON.
+	it("unwraps an object whose only key holds the array", () => {
+		expect(
+			componentProps(
+				'```metric\n{"cards": [{"label":"Total Sales (YTD)","value":"₹4.84 Cr",' +
+					'"note":"95 submitted invoices"},{"label":"Collected","value":"₹1.82 Cr"}]}\n```'
+			)
+		).toEqual([
+			{
+				title: "Total Sales (YTD)",
+				value: "₹4.84 Cr",
+				change: "",
+				trend: "",
+				description: "95 submitted invoices",
+			},
+			{ title: "Collected", value: "₹1.82 Cr", change: "", trend: "", description: "" },
+		]);
+	});
+
+	it("keeps a multi-key object with no label/value visible as code", () => {
+		const content = '```metric\n{"cards": [{"label":"A","value":"1"}], "other": []}\n```';
+		expect(componentProps(content)).toEqual([]);
+		expect(htmlParts(content).join("")).toContain("cards");
 	});
 });

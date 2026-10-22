@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "frappe_assistant_core"
-version = "3.1.0"
+version = "3.2.0"
 description = "AI-powered ERP assistant with comprehensive MCP integration for Frappe framework"
 readme = "README.md"
 license = {text = "AGPL-3.0-or-later"}
@@ -58,6 +58,8 @@ dependencies = [
     "pymupdf>=1.24.0",  # PDF page rendering for Ollama vision OCR
     "python-magic>=0.4.27",
     "beautifulsoup4>=4.12,<5",  # Span Frappe v15 (~=4.12.2) and v16 (~=4.13.5) without forcing a downgrade
+    "markdown2>=2.4.8,<3",  # generate_document; spans Frappe v15 (~=2.4.8) and v16 (~=2.5.4)
+    "nh3>=0.3.2,<0.4",  # generate_document's sanitiser; Frappe v16 ships it (~=0.3.2) and dropped bleach; v15 has bleach only
 
     # Exact pin, not a floor. FAC and the SDK ship as a coupled pair: FAC calls
     # methods that only exist from a given release onward, and a floor lets pip
@@ -65,7 +67,7 @@ dependencies = [
     # AttributeError at runtime, in production, rather than at install time.
     # Local dev overrides this with `pip install -e apps/assistant_runtime_sdk`;
     # UAT pins an exact prerelease (e.g. ==1.6.0rc1).
-    "assistant_runtime_sdk==1.11.0",
+    "assistant_runtime_sdk==1.12.1",
 ]
 
 [project.optional-dependencies]
@@ -186,3 +188,9 @@ ignore = [
 
 [tool.bench.frappe-dependencies]
 frappe = ">=15.0.0,<17.0.0"
+
+# The FAC Chat SPA. Its build also writes the Desk widget to public/chat/widget-app.
+[tool.bench.assets]
+build_dir = "./frappe_assistant_core/chat/frontend"
+out_dir = "./frappe_assistant_core/public/chat/spa"
+index_html_path = "./frappe_assistant_core/www/copilot.html"

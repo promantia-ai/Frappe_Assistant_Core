@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { api } from "@/api/client";
+import { useProjectsStore } from "@/stores/projectsStore";
 import { logger } from "@/utils/logger";
 import { siteRefusal } from "@/utils/siteRefusal";
 
@@ -83,6 +84,12 @@ export const useUserStore = defineStore("user", () => {
 	const needsReconnect = computed(() => {
 		return userAuthStatus.value?.needs_reconnect || false;
 	});
+
+	// AR withdrew memory consent that came from a pre-ticked onboarding switch and
+	// waits for the user to confirm it (MemoryConsentPrompt).
+	const memoryConsentPending = computed(
+		() => userAuthStatus.value?.memory_consent_pending === true,
+	);
 
 	// AR is refusing gated features until the tenant re-accepts terms. Only
 	// meaningful once the site itself is registered — an unregistered site has
@@ -433,6 +440,7 @@ export const useUserStore = defineStore("user", () => {
 
 			// Store pre-fetched sessions for ChatView to consume
 			_initialSessions.value = data.sessions;
+			if (Array.isArray(data.projects)) useProjectsStore().hydrate(data.projects);
 
 			// Off the critical path: the meter renders from the hydrated team
 			// quota straight away and narrows to the personal cap once this
@@ -461,6 +469,15 @@ export const useUserStore = defineStore("user", () => {
 		const data = _initialSessions.value;
 		_initialSessions.value = null;
 		return data;
+	}
+
+	/**
+	 * Record the answer to the memory-consent confirmation. Keeping memory grants
+	 * consent; turning it off withdraws it and deletes the user's memories.
+	 */
+	async function confirmMemoryConsent(keep) {
+		await api.privacy.confirmMemoryConsent(keep);
+		userAuthStatus.value = { ...userAuthStatus.value, memory_consent_pending: false };
 	}
 
 	return {
@@ -492,11 +509,13 @@ export const useUserStore = defineStore("user", () => {
 		userInitial,
 		needsUserSetup,
 		needsReconnect,
+		memoryConsentPending,
 		userPublishingEnabled,
 
 		// Actions
 		loadUser,
 		ensureLoaded,
+		confirmMemoryConsent,
 		loadQuota,
 		loadMyCreditStatus,
 		applyQuotaFromStream,
