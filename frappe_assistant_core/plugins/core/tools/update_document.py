@@ -209,6 +209,9 @@ class DocumentUpdate(BaseTool):
             "child row updates under the table fieldname (e.g. 'items'). "
             "SEVERAL RECORDS AT ONCE: instead of doctype, name and data, pass documents, a list of "
             "{doctype, name, data} (up to 100): one approval for all, and all are updated or none. "
+            "Customisations (Custom Field, Property Setter, Server Script, Role, Workflow and the "
+            "like) and records that change the database schema are not for a list: update them one "
+            "at a time, each with doctype, name and data. "
             "Show the user the changes as a table first; the approval card then lists each one."
         )
         self.requires_permission = None  # Permission checked dynamically per DocType
@@ -239,7 +242,7 @@ class DocumentUpdate(BaseTool):
                 },
                 "documents": {
                     "type": "array",
-                    "description": "Several records in one call, instead of doctype, name and data: each {doctype, name, data}, updated in order. All are updated or none.",
+                    "description": "Several records in one call, instead of doctype, name and data: each {doctype, name, data}, updated in order. All are updated or none. Customisations and records that change the database schema are refused here: update them one at a time.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -518,7 +521,7 @@ class DocumentUpdate(BaseTool):
             if e.written:
                 # The batch was undone, with the Error Log the failed record wrote: keep one.
                 frappe.log_error(title=_("Document Update Error"), message=str(e))
-            return {"success": False, "error": str(e), "problems": e.problems}
+            return e.as_result()
         except Exception as e:
             frappe.log_error(title=_("Document Update Error"), message=frappe.get_traceback())
             return {"success": False, "error": exception_message(e)}

@@ -16,17 +16,27 @@ the commit callbacks and the realtime and webhook events it queues) is held unti
 succeeded. Each record goes through the tool's own single-record code, so with the same
 permission and field checks.
 
+Nothing inside the list may end its transaction. A controller's commit is ignored (Frappe's
+own ``_disable_transaction_control`` where Frappe has it, v16; a stand-in for commit on v15).
+A controller's full rollback, and any change to the database schema (which commits), fail the
+list instead, before they run. Customisations and the doctypes known to change the schema are
+refused before anything is written: they are made one at a time, where the customisation
+approval applies to them.
+
 What a save sends out at once, rather than at the commit, can't be held: a Notification's
 Slack or SMS message, or a job a controller enqueues straight away. A record undone with a
 failed batch may already have sent those, as a single record that fails after saving would.
 """
 
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional
 
 import frappe
 from frappe import _
 from frappe.utils import cstr
 from frappe.utils.global_search import update_global_search
+
+from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES, SCHEMA_CHANGING_DOCTYPES
 
 MAX_DOCUMENTS = 100
 SAVEPOINT = "fac_document_batch"
@@ -36,14 +46,36 @@ _UNSET = object()
 # a callback added with the list. A list that outlives its callback would never be sent again.
 _QUEUES = ("_realtime_log", "_webhook_queue")
 
+# Statements that change the schema, which MariaDB commits implicitly (Frappe's own list, less
+# START and BEGIN, which Frappe's check_implicit_commit still refuses after a write).
+_SCHEMA_STATEMENTS = frozenset(("alter", "create", "drop", "truncate"))
+
 
 class BatchProblem(Exception):
     """The list can't be written. Nothing was. ``problems`` says which records and why."""
 
-    def __init__(self, message: str, problems: Optional[List[Dict[str, Any]]] = None, written: bool = False):
+    def __init__(
+        self,
+        message: str,
+        problems: Optional[List[Dict[str, Any]]] = None,
+        written: bool = False,
+        error_type: Optional[str] = None,
+    ):
         super().__init__(message)
         self.problems = problems or []
         self.written = written  # True when a write failed (and was undone), not a check
+        self.error_type = error_type
+
+    def as_result(self) -> Dict[str, Any]:
+        """The tool's reply for it."""
+        result = {"success": False, "error": str(self), "problems": self.problems}
+        if self.error_type:
+            result["error_type"] = self.error_type
+        return result
+
+
+class SchemaChangeStopped(Exception):
+    """Raised in place of a statement that would change the schema while a list is written."""
 
 
 def given(value) -> bool:
@@ -81,7 +113,32 @@ def read_documents(arguments: Dict[str, Any], single_inputs: tuple, with_name: b
             problems.append({"document": number, "error": _("Missing {0}.").format(", ".join(missing))})
     if problems:
         raise BatchProblem(_("Nothing was written. Correct these and call again."), problems)
+    _refuse_one_at_a_time(documents, with_name)
     return documents
+
+
+def _refuse_one_at_a_time(documents: List[Dict[str, Any]], with_name: bool) -> None:
+    """Customisations and doctypes whose save changes the schema are made one at a time: as one
+    record the customisation approval applies to them, and a schema change commits, which would
+    keep half a list. Raises BatchProblem listing every such record."""
+    problems = []
+    for number, entry in enumerate(documents, start=1):
+        doctype = cstr(entry["doctype"]).strip()
+        if doctype in CUSTOMISATION_DOCTYPES:
+            problems.append(_problem(number, entry, _("A customisation: make it on its own.")))
+        elif doctype in SCHEMA_CHANGING_DOCTYPES:
+            problems.append(_problem(number, entry, _("Changes the database schema: make it on its own.")))
+    if problems:
+        inputs = _("doctype, name and data") if with_name else _("doctype and data")
+        raise BatchProblem(
+            _(
+                "Nothing was written. Customisations and records that change the database schema "
+                "can't be in documents: make each of these on its own, with {0}, one call each. "
+                "The other records may still go as a list."
+            ).format(inputs),
+            problems,
+            error_type="one_at_a_time",
+        )
 
 
 def check_access(documents: List[Dict[str, Any]], perm_type: str) -> None:
@@ -126,25 +183,17 @@ def write_all(
     conf = frappe.local.conf
     search_setting = conf.get("disable_global_search", _UNSET)
     conf["disable_global_search"] = True
-    own_commit = vars(frappe.db).get("commit", _UNSET)  # a caller's own stand-in, if any
-    frappe.db.commit = _no_commit  # a controller that commits must not end the batch early
+    guard = _TransactionGuard()
     frappe.db.savepoint(SAVEPOINT)
     results = []
     try:
-        for number, entry in enumerate(documents, start=1):
-            result = write(entry)
-            if not result.get("success"):
-                error = cstr(result.get("error")).rstrip(".")
-                raise BatchProblem(
-                    _("Document {0} ({1}) couldn't be {2}: {3}. Nothing was {2}.").format(
-                        number, _label(entry), done, error
-                    ),
-                    [_problem(number, entry, error)],
-                    written=True,
-                )
-            results.append(result)
-        if after:
-            after(results)
+        with guard.held():
+            for number, entry in enumerate(documents, start=1):
+                result = write(entry)
+                guard.check(number, entry, result, done)
+                results.append(result)
+            if after:
+                after(results)
     except Exception:
         frappe.db.rollback(save_point=SAVEPOINT)
         _run_rollback_work(callbacks)
@@ -152,10 +201,6 @@ def write_all(
         _restore_commit_queues(queues)
         raise
     finally:
-        if own_commit is _UNSET:
-            del frappe.db.commit
-        else:
-            frappe.db.commit = own_commit
         if search_setting is _UNSET:
             conf.pop("disable_global_search", None)
         else:
@@ -168,6 +213,105 @@ def write_all(
         except Exception:
             frappe.log_error(title=_("Global search entry not made"), message=frappe.get_traceback())
     return results
+
+
+class _TransactionGuard:
+    """Keeps a list's transaction whole while it is written.
+
+    - A commit is ignored: Frappe's own ``_disable_transaction_control`` where it exists (v16),
+      raised and given back exactly as it was, so a caller's own raise is kept; on v15, which has
+      no such flag, a stand-in for ``frappe.db.commit``.
+    - A full rollback is not run (it would undo what the request wrote before the list, and the
+      list's savepoint), but noted, and fails the list.
+    - A schema change is refused before it runs (it commits, even on v16, whose sql_ddl lifts
+      the flag to commit), and fails the list.
+
+    The stand-ins are set on this request's own ``frappe.db``; whatever was there before,
+    such as the dry run's own commit stand-in, is put back.
+    """
+
+    def __init__(self):
+        self.rolled_back = False
+        self.schema_change: Optional[str] = None
+
+    @contextmanager
+    def held(self):
+        db = frappe.db
+        replaced = ("commit", "rollback", "sql_ddl", "check_implicit_commit")
+        before = {name: vars(db).get(name, _UNSET) for name in replaced}
+        rollback, check_implicit_commit = db.rollback, db.check_implicit_commit
+        flag = getattr(db, "_disable_transaction_control", None)
+
+        def no_rollback(*args, save_point=None, **kwargs):
+            if save_point:
+                return rollback(*args, save_point=save_point, **kwargs)
+            self.rolled_back = True
+
+        def no_ddl(query, *args, **kwargs):
+            self._stop(query)
+
+        def no_schema_change(query, *args, **kwargs):
+            if _statement(query) in _SCHEMA_STATEMENTS:
+                self._stop(query)
+            return check_implicit_commit(query, *args, **kwargs)
+
+        if flag is None:
+            db.commit = _no_commit
+        else:
+            db._disable_transaction_control = flag + 1
+        db.rollback = no_rollback
+        db.sql_ddl = no_ddl
+        db.check_implicit_commit = no_schema_change
+        try:
+            yield
+        finally:
+            for name, value in before.items():
+                if value is _UNSET:
+                    vars(db).pop(name, None)
+                else:
+                    setattr(db, name, value)
+            if flag is not None:
+                db._disable_transaction_control = flag
+
+    def _stop(self, query: str) -> None:
+        self.schema_change = self.schema_change or cstr(query)
+        raise SchemaChangeStopped(
+            _("A change to the database schema can't be made inside a list of documents.")
+        )
+
+    def check(self, number: int, entry: Dict[str, Any], result: Dict[str, Any], done: str) -> None:
+        """After a record is written: raise BatchProblem if it failed, changed the schema or
+        rolled back, even when it reports success (a controller may catch the refusal)."""
+        if self.schema_change:
+            error = _(
+                "It would change the database schema, which commits, so it can't be in a list. "
+                "Make it on its own, then send the others as a list"
+            )
+            error_type = "schema_change_in_list"
+        elif not result.get("success"):
+            error, error_type = cstr(result.get("error")).rstrip("."), None
+        elif self.rolled_back:
+            error = _(
+                "It tried to roll back the whole transaction, which would undo more than this "
+                "list. Make it on its own"
+            )
+            error_type = "rollback_in_list"
+        else:
+            return
+        raise BatchProblem(
+            _("Document {0} ({1}) couldn't be {2}: {3}. Nothing was {2}.").format(
+                number, _label(entry), done, error
+            ),
+            [_problem(number, entry, error)],
+            written=True,
+            error_type=error_type,
+        )
+
+
+def _statement(query: Any) -> str:
+    """The statement's first word, lower case: "alter", "insert"."""
+    words = cstr(query).split(None, 1)
+    return words[0].lower() if words else ""
 
 
 def _label(entry: Dict[str, Any]) -> str:

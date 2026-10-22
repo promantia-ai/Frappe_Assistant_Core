@@ -19,11 +19,14 @@ import os
 from unittest.mock import patch
 
 import frappe
+from frappe.desk.doctype.note.note import Note
+from frappe.desk.doctype.todo.todo import ToDo
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core.tools.create_document import DocumentCreate
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.utils import document_batch
+from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES
 
 
 class TestDocumentBatch(BaseAssistantTest):
@@ -99,27 +102,27 @@ class TestDocumentBatch(BaseAssistantTest):
         self.assertEqual(self._todos(), set())
 
     def test_a_record_the_user_may_not_create_stops_the_list_before_anything_is_written(self):
+        # Language: only a System Manager creates one, and it isn't a customisation, which a
+        # list refuses for everyone before permission is even looked at.
         user = self.make_desk_user("writer")
-        self.assert_cannot(user, "create", "Role")
+        self.assert_cannot(user, "create", "Language")
         frappe.set_user(user)
+
+        def language(code):
+            return {"doctype": "Language", "data": {"language_code": code, "language_name": code}}
 
         response = self._run(
             "create_document",
-            {
-                "documents": [
-                    self._todo("Mine"),
-                    {"doctype": "Role", "data": {"role_name": f"Boss {self.tag}"}},
-                    {"doctype": "Role", "data": {"role_name": f"Chief {self.tag}"}},
-                ]
-            },
+            {"documents": [self._todo("Mine"), language(f"xa-{self.tag}"), language(f"xb-{self.tag}")]},
         )
 
         self.assertFalse(response["success"], response)
+        self.assertNotIn("error_type", response["result"])  # refused for permission, not as a customisation
         # Checked before anything is written, so every refused record is listed, not the first.
         self.assertEqual([p["document"] for p in response["result"]["problems"]], [2, 3])
         frappe.set_user("Administrator")
         self.assertEqual(self._todos(), set())
-        self.assertFalse(frappe.db.exists("Role", f"Boss {self.tag}"))
+        self.assertFalse(frappe.db.exists("Language", f"xa-{self.tag}"))
 
     def test_a_restricted_field_in_a_list_is_refused(self):
         response = self._run(
@@ -221,23 +224,29 @@ class TestDocumentBatch(BaseAssistantTest):
         self.assertEqual(len(frappe.db.after_commit._functions), callbacks_before)
         self.assertEqual(self._todos(), set())
 
-    def test_a_controller_that_commits_cannot_end_the_batch(self):
-        creator = DocumentCreate()
-        held = []
+    def test_a_controller_that_commits_cannot_make_earlier_records_permanent(self):
+        real_on_update = ToDo.on_update
 
-        def commits_then_creates(entry):
-            # A controller's own frappe.db.commit() would make the records before it permanent.
-            held.append("commit" in vars(frappe.db))
+        def commits(doc):
+            real_on_update(doc)
             frappe.db.commit()  # nosemgrep: frappe-manual-commit — the controller this test imitates
-            return creator.execute(dict(entry))
 
-        documents = [self._todo("First"), {"doctype": "Note", "data": {"content": "no title"}}]
-        with self.assertRaises(document_batch.BatchProblem):
-            document_batch.write_all(documents, commits_then_creates, "created")
+        frappe.db.savepoint("fac_test_before_the_list")
+        # The ToDo's own controller commits after it saves, as some apps' controllers do.
+        with patch.object(ToDo, "on_update", autospec=True, side_effect=commits) as on_update:
+            response = self._run(
+                "create_document",
+                {"documents": [self._todo("First"), {"doctype": "Note", "data": {"content": "no title"}}]},
+            )
 
-        self.assertEqual(held, [True, True])
-        self.assertNotIn("commit", vars(frappe.db))  # given back afterwards
+        self.assertTrue(on_update.called)
+        self.assertFalse(response["success"], response)
+        error = response["result"]["error"]
+        self.assertIn("Document 2 (Note) couldn't be created", error)
+        self.assertIn("title", error)  # record 2's own error
         self.assertEqual(self._todos(), set())
+        # Nothing was committed: the savepoint opened before the list is still there to go back to.
+        frappe.db.rollback(save_point="fac_test_before_the_list")
 
     def test_one_record_without_data_is_still_refused(self):
         # data was required before documents came in; it still is for one record.
@@ -268,6 +277,388 @@ class TestDocumentBatch(BaseAssistantTest):
 
         self.assertTrue(response["success"], response)  # a retry would create it twice
         self.assertEqual(self._todos(), {f"Written {self.tag}"})
+
+    # -- customisation and schema-changing records (#34396) ----------------------------------
+
+    def _custom_field_on_todo(self):
+        fieldname = f"fac_batch_{self.tag.lower()}"
+        self.addCleanup(frappe.clear_cache, doctype="ToDo")
+        entry = {
+            "doctype": "Custom Field",
+            "data": {
+                "dt": "ToDo",
+                "label": f"FAC batch {self.tag}",
+                "fieldname": fieldname,
+                "fieldtype": "Data",
+                "insert_after": "description",
+            },
+        }
+        return fieldname, entry
+
+    def _assert_no_column(self, fieldname):
+        # Read from the table itself, not from Frappe's cached column list.
+        self.assertNotIn(fieldname, frappe.db.get_db_table_columns("tabToDo"))
+        self.assertFalse(frappe.db.exists("Custom Field", {"dt": "ToDo", "fieldname": fieldname}))
+        self.assertFalse(frappe.get_meta("ToDo").has_field(fieldname))
+
+    def test_every_customisation_doctype_in_a_create_list_is_refused_before_anything_is_written(self):
+        doctypes = sorted(CUSTOMISATION_DOCTYPES)
+        documents = [self._todo("Plain")] + [{"doctype": doctype, "data": {}} for doctype in doctypes]
+
+        response = self._run("create_document", {"documents": documents})
+
+        self.assertFalse(response["success"], response)
+        result = response["result"]
+        self.assertEqual(result["error_type"], "one_at_a_time")
+        refused = {p["document"]: p["doctype"] for p in result["problems"]}
+        self.assertNotIn(1, refused)  # the ToDo is fine
+        for number, doctype in enumerate(doctypes, start=2):
+            with self.subTest(doctype=doctype):
+                self.assertEqual(refused.get(number), doctype)
+        self.assertEqual(self._todos(), set())
+
+    def test_a_customisation_record_in_an_update_list_is_refused(self):
+        (todo,) = self._make_todos("Keep me")
+        guest_disabled = frappe.db.get_value("Role", "Guest", "disabled")
+
+        response = self._run(
+            "update_document",
+            {
+                "documents": [
+                    {"doctype": "ToDo", "name": todo, "data": {"description": f"Changed {self.tag}"}},
+                    {"doctype": "Role", "name": "Guest", "data": {"disabled": 1}},
+                ]
+            },
+        )
+
+        self.assertFalse(response["success"], response)
+        self.assertEqual(response["result"]["error_type"], "one_at_a_time")
+        self.assertEqual(
+            [(p["document"], p["doctype"], p.get("name")) for p in response["result"]["problems"]],
+            [(2, "Role", "Guest")],
+        )
+        self.assertEqual(frappe.db.get_value("ToDo", todo, "description"), f"Keep me {self.tag}")
+        self.assertEqual(frappe.db.get_value("Role", "Guest", "disabled"), guest_disabled)
+
+    def test_a_validate_only_list_with_a_customisation_record_is_refused(self):
+        response = self._run(
+            "create_document",
+            {
+                "documents": [
+                    self._todo("Fine"),
+                    {"doctype": "Role", "data": {"role_name": f"R {self.tag}"}},
+                ],
+                "validate_only": True,
+            },
+        )
+
+        self.assertFalse(response["success"], response)
+        self.assertEqual(response["result"]["error_type"], "one_at_a_time")
+        self.assertEqual([p["document"] for p in response["result"]["problems"]], [2])
+
+    def test_the_refusal_says_to_make_each_customisation_on_its_own(self):
+        _fieldname, custom_field = self._custom_field_on_todo()
+        created = self._run(
+            "create_document",
+            {
+                "documents": [
+                    self._todo("Fine"),
+                    {"doctype": "Role", "data": {"role_name": f"R {self.tag}"}},
+                    custom_field,
+                ]
+            },
+        )
+        (todo,) = self._make_todos("Keep me")
+        updated = self._run(
+            "update_document",
+            {
+                "documents": [
+                    {"doctype": "Role", "name": "Guest", "data": {"desk_access": 0}},
+                    {"doctype": "ToDo", "name": todo, "data": {"priority": "High"}},
+                ]
+            },
+        )
+
+        error = created["result"]["error"]
+        self.assertEqual([p["document"] for p in created["result"]["problems"]], [2, 3])
+        self.assertIn("on its own", error)
+        self.assertIn("doctype and data", error)
+        self.assertIn("one call each", error)
+        self.assertIn("other records", error)  # they may still go as a list
+        self.assertIn("doctype, name and data", updated["result"]["error"])
+        self.assertFalse(frappe.db.exists("Role", f"R {self.tag}"))
+
+    def test_a_known_schema_changing_doctype_in_a_list_is_refused_up_front(self):
+        if "erpnext" not in frappe.get_installed_apps():
+            self.skipTest("Inventory Dimension is ERPNext's")
+        name = f"FAC Dimension {self.tag}"
+
+        response = self._run(
+            "create_document",
+            {
+                "documents": [
+                    self._todo("Fine"),
+                    {
+                        "doctype": "Inventory Dimension",
+                        "data": {"dimension_name": name, "reference_document": "Project"},
+                    },
+                ]
+            },
+        )
+
+        self.assertFalse(response["success"], response)
+        self.assertEqual(response["result"]["error_type"], "one_at_a_time")
+        self.assertEqual(
+            [(p["document"], p["doctype"]) for p in response["result"]["problems"]],
+            [(2, "Inventory Dimension")],
+        )
+        self.assertIn("on its own", response["result"]["error"])
+        self.assertEqual(self._todos(), set())
+        self.assertFalse(frappe.db.exists("Inventory Dimension", name))
+
+    def test_a_schema_change_inside_a_list_is_stopped_and_the_list_undone(self):
+        # Direct, past the up-front refusal: the Custom Field's own on_update reaches updatedb,
+        # as a doctype that changes the schema without being on any list would.
+        creator = DocumentCreate()
+        fieldname, custom_field = self._custom_field_on_todo()
+
+        with self.assertRaises(document_batch.BatchProblem) as raised:
+            document_batch.write_all(
+                [self._todo("Before it"), custom_field], lambda e: creator.execute(dict(e)), "created"
+            )
+
+        error = str(raised.exception)
+        self.assertEqual(raised.exception.error_type, "schema_change_in_list")
+        self.assertIn("Document 2 (Custom Field)", error)
+        self.assertIn("on its own", error)
+        self.assertIn("Nothing was created", error)
+        self.assertNotRegex(error, "(?i)savepoint|implicit commit")
+        self._assert_no_column(fieldname)
+        self.assertEqual(self._todos(), set())
+
+    def test_nothing_before_the_list_is_committed_by_a_schema_change(self):
+        creator = DocumentCreate()
+        fieldname, custom_field = self._custom_field_on_todo()
+        frappe.db.savepoint("fac_test_before_the_list")
+        (before,) = self._make_todos("Written before the list")
+
+        with self.assertRaises(document_batch.BatchProblem) as raised:
+            document_batch.write_all([custom_field], lambda e: creator.execute(dict(e)), "created")
+
+        self.assertIn("on its own", str(raised.exception))
+        self._assert_no_column(fieldname)
+        self.assertTrue(frappe.db.exists("ToDo", before))
+        # Not committed: the savepoint opened before it is still there, and going back to it
+        # takes the ToDo away.
+        frappe.db.rollback(save_point="fac_test_before_the_list")
+        self.assertFalse(frappe.db.exists("ToDo", before))
+
+    def test_a_real_error_after_a_record_is_saved_undoes_the_whole_list(self):
+        saved = []
+
+        def fails_after_saving(doc):
+            saved.append(bool(frappe.db.exists("Note", doc.name)))
+            frappe.throw(frappe._("This note can't be kept"))
+
+        # Note has no on_update of its own, so there is nothing to autospec: create=True adds one,
+        # which Document.run_method calls after the row is inserted, as any controller's would.
+        with patch.object(Note, "on_update", fails_after_saving, create=True):
+            response = self._run(
+                "create_document",
+                {
+                    "documents": [
+                        self._todo("A"),
+                        {"doctype": "Note", "data": {"title": f"B {self.tag}"}},
+                        self._todo("C"),
+                    ]
+                },
+            )
+
+        self.assertEqual(saved, [True])  # B's row was in the table when its controller raised
+        self.assertFalse(response["success"], response)
+        error = response["result"]["error"]
+        self.assertIn("Document 2 (Note)", error)
+        self.assertIn("can't be kept", error)
+        self.assertIn("Nothing was created", error)
+        self.assertEqual(self._todos(), set())
+        self.assertEqual(self._notes(), set())
+
+    def test_an_undone_list_sends_nothing_out_after_a_real_error(self):
+        # Direct, so the only events are the list's own: the tool adds an Error Log and an audit
+        # row after the list is undone, which are kept and announced.
+        creator = DocumentCreate()
+        documents = [self._todo("Undone"), {"doctype": "Note", "data": {"title": f"B {self.tag}"}}]
+        realtime_before = list(getattr(frappe.local, "_realtime_log", []))
+        callbacks_before = len(frappe.db.after_commit._functions)
+
+        def fails_after_saving(doc):
+            frappe.throw(frappe._("This note can't be kept"))
+
+        with patch("frappe.utils.global_search.sync_value_in_queue") as search_queue:
+            with patch.object(Note, "on_update", fails_after_saving, create=True):
+                with self.assertRaises(document_batch.BatchProblem):
+                    document_batch.write_all(documents, lambda e: creator.execute(dict(e)), "created")
+
+        self.assertEqual(search_queue.call_count, 0)
+        self.assertEqual(list(getattr(frappe.local, "_realtime_log", [])), realtime_before)
+        self.assertEqual(len(frappe.db.after_commit._functions), callbacks_before)
+        self.assertEqual(self._todos(), set())
+
+    def test_a_controller_rollback_fails_the_list_and_keeps_what_came_before(self):
+        (before,) = self._make_todos("Written before the list")
+        rolled_back = []
+
+        def rolls_back(doc):
+            rolled_back.append(doc.name)
+            frappe.db.rollback()  # a full rollback, then carries on as if nothing happened
+
+        with patch.object(Note, "on_update", rolls_back, create=True):
+            response = self._run(
+                "create_document",
+                {"documents": [self._todo("A"), {"doctype": "Note", "data": {"title": f"B {self.tag}"}}]},
+            )
+
+        self.assertEqual(len(rolled_back), 1)
+        self.assertFalse(response["success"], response)
+        self.assertEqual(response["result"]["error_type"], "rollback_in_list")
+        error = response["result"]["error"]
+        self.assertIn("Document 2 (Note)", error)
+        self.assertIn("Nothing was created", error)
+        self.assertNotIn("Created", error)
+        self.assertTrue(frappe.db.exists("ToDo", before))  # no real ROLLBACK ran
+        self.assertEqual(self._todos(), {f"Written before the list {self.tag}"})
+        self.assertEqual(self._notes(), set())
+
+    # -- Frappe's own transaction control (v16) ----------------------------------------------
+
+    def _needs_transaction_control(self):
+        if not hasattr(frappe.db, "_disable_transaction_control"):
+            self.skipTest("This Frappe has no _disable_transaction_control (v15)")
+
+    def test_a_list_is_written_with_transaction_control_disabled_on_v16(self):
+        self._needs_transaction_control()
+        creator = DocumentCreate()
+        before = frappe.db._disable_transaction_control
+        seen = []
+
+        def write(entry):
+            seen.append((frappe.db._disable_transaction_control, "commit" in vars(frappe.db)))
+            return creator.execute(dict(entry))
+
+        document_batch.write_all([self._todo("One"), self._todo("Two")], write, "created")
+
+        self.assertEqual(len(seen), 2)
+        for counter, commit_replaced in seen:
+            self.assertGreater(counter, before)
+            self.assertFalse(commit_replaced)
+        self.assertEqual(frappe.db._disable_transaction_control, before)
+
+    def test_transaction_control_is_given_back_after_a_failed_list(self):
+        self._needs_transaction_control()
+        creator = DocumentCreate()
+        before = frappe.db._disable_transaction_control
+
+        with self.assertRaises(document_batch.BatchProblem):
+            document_batch.write_all(
+                [self._todo("One"), {"doctype": "Note", "data": {"content": "no title"}}],
+                lambda e: creator.execute(dict(e)),
+                "created",
+            )
+        self.assertEqual(frappe.db._disable_transaction_control, before)
+
+        def raises(entry):
+            raise RuntimeError("the write itself raised")
+
+        with self.assertRaises(RuntimeError):
+            document_batch.write_all([self._todo("One")], raises, "created")
+        self.assertEqual(frappe.db._disable_transaction_control, before)
+
+    def test_a_callers_raised_transaction_control_is_kept(self):
+        self._needs_transaction_control()
+        creator = DocumentCreate()
+        frappe.db._disable_transaction_control += 1  # as Frappe does around a doc_events hook
+        try:
+            raised = frappe.db._disable_transaction_control
+            seen = []
+
+            def write(entry):
+                seen.append(frappe.db._disable_transaction_control)
+                return creator.execute(dict(entry))
+
+            document_batch.write_all([self._todo("Inside a hook")], write, "created")
+
+            self.assertGreater(seen[0], raised)
+            self.assertEqual(frappe.db._disable_transaction_control, raised)
+        finally:
+            frappe.db._disable_transaction_control -= 1
+
+    # -- the audit trail and single records (#34396) -----------------------------------------
+
+    def test_a_batch_call_is_audited_with_its_doctypes(self):
+        def target_of_last_call(tool_name):
+            return frappe.get_all(
+                "Assistant Audit Log",
+                filters={"tool_name": tool_name, "input_data": ["like", f"%{self.tag}%"]},
+                fields=["target_doctype", "target_name"],
+                order_by="creation desc",
+                limit=1,
+            )[0]
+
+        created = self._run(
+            "create_document",
+            {
+                "documents": [
+                    self._todo("One"),
+                    {"doctype": "Note", "data": {"title": f"Two {self.tag}"}},
+                    self._todo("Three"),
+                ]
+            },
+        )
+        self.assertTrue(created["success"], created)
+        self.assertEqual(target_of_last_call("create_document").target_doctype, "ToDo, Note")
+
+        (todo,) = self._make_todos("Keep me")
+        not_a_status = {"status": f"Not A Status {self.tag}"}
+        failed = self._run(
+            "update_document", {"documents": [{"doctype": "ToDo", "name": todo, "data": not_a_status}]}
+        )
+        self.assertFalse(failed["success"], failed)
+        row = target_of_last_call("update_document")
+        self.assertEqual((row.target_doctype, row.target_name), ("ToDo", todo))
+
+    def test_one_customisation_record_on_its_own_is_still_created(self):
+        role = f"FAC Single {self.tag}"
+
+        response = self._run("create_document", {"doctype": "Role", "data": {"role_name": role}})
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(response["result"]["name"], role)
+        self.assertTrue(frappe.db.exists("Role", role))
+
+    def test_one_customisation_record_on_its_own_is_still_updated(self):
+        role = frappe.get_doc({"doctype": "Role", "role_name": f"FAC Single {self.tag}", "desk_access": 1})
+        role.insert()
+
+        response = self._run(
+            "update_document", {"doctype": "Role", "name": role.name, "data": {"desk_access": 0}}
+        )
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(frappe.db.get_value("Role", role.name, "desk_access"), 0)
+
+    def test_the_list_descriptions_say_customisations_go_one_at_a_time(self):
+        for tool_name in ("create_document", "update_document"):
+            tool = self.registry.get_tool(tool_name)
+            texts = {
+                "description": tool.description,
+                "documents": tool.inputSchema["properties"]["documents"]["description"],
+            }
+            for where, text in texts.items():
+                with self.subTest(tool=tool_name, where=where):
+                    self.assertIn("one at a time", text)
+                    self.assertIn("customisation", text.lower())
+                    self.assertIn("schema", text.lower())
+                    self.assertNotIn("any doctypes", text.lower())
 
     # -- update_document ---------------------------------------------------------------------
 
@@ -393,8 +784,10 @@ class TestDocumentBatch(BaseAssistantTest):
 
     def test_a_record_the_user_may_not_change_stops_the_update_list(self):
         (others,) = self._make_todos("Administrator's")
+        # Language "en" is on every site; only a System Manager may change it.
+        english = frappe.db.get_value("Language", "en", "language_name")
         user = self.make_desk_user("updater")
-        self.assert_cannot(user, "write", "Role", "System Manager")
+        self.assert_cannot(user, "write", "Language", "en")
         frappe.set_user(user)
         # A user may create a ToDo that names them.
         mine = (
@@ -408,15 +801,16 @@ class TestDocumentBatch(BaseAssistantTest):
             {
                 "documents": [
                     {"doctype": "ToDo", "name": mine, "data": {"priority": "High"}},
-                    {"doctype": "Role", "name": "System Manager", "data": {"disabled": 1}},
-                    {"doctype": "Role", "name": "Guest", "data": {"disabled": 1}},
+                    {"doctype": "Language", "name": "en", "data": {"language_name": f"Changed {self.tag}"}},
+                    {"doctype": "Language", "name": "en", "data": {"enabled": 0}},
                 ]
             },
         )
 
         self.assertFalse(response["success"], response)
+        self.assertNotIn("error_type", response["result"])  # refused for permission, not as a customisation
         self.assertEqual([p["document"] for p in response["result"]["problems"]], [2, 3])
         frappe.set_user("Administrator")
         self.assertNotEqual(frappe.db.get_value("ToDo", mine, "priority"), "High")
-        self.assertFalse(frappe.db.get_value("Role", "System Manager", "disabled"))
+        self.assertEqual(frappe.db.get_value("Language", "en", "language_name"), english)
         self.assertTrue(others)
