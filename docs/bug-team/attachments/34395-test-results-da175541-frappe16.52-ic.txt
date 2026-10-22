@@ -1,0 +1,36 @@
+FAC feature/data-migration @ da175541 - migration test modules
+Frappe 16.52.0, ERPNext 16.14.0, India Compliance 16.3.2, site assistant.runtime, 2026-10-22
+
+apply_import_preset              ran   48  failures   1  errors   1   tree_aliases=0 blogger=10 hsn=0
+apply_import_preset_xml          ran   30  failures   1  errors   1   tree_aliases=0 blogger=10 hsn=0
+document_batch                   ran   25  failures   0  errors   2   tree_aliases=0 blogger=20 hsn=0
+extract_file_content_encoding    ran    2  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+extract_file_content_xml         ran    8  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+import_dry_run                   ran   30  failures  11  errors   2   tree_aliases=26 blogger=10 hsn=0
+import_failures                  ran   27  failures  26  errors   0   tree_aliases=98 blogger=0 hsn=0
+import_fixes                     ran   35  failures   3  errors  22   tree_aliases=92 blogger=20 hsn=0
+import_google_sheet              ran   19  failures   1  errors  16   tree_aliases=4 blogger=160 hsn=0
+import_guardrails                ran   32  failures   7  errors   2   tree_aliases=26 blogger=0 hsn=0
+import_mapping                   ran   22  failures   0  errors   3   tree_aliases=0 blogger=30 hsn=0
+import_masters                   ran   29  failures  10  errors   9   tree_aliases=40 blogger=10 hsn=0
+import_opening_balances          ran  130  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+import_opening_invoices          ran   83  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+import_opening_stock             ran   78  failures   0  errors  78   tree_aliases=0 blogger=0 hsn=624
+import_plan                      ran   35  failures   9  errors   4   tree_aliases=30 blogger=0 hsn=5
+import_presets                   ran   58  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+import_run                       ran   36  failures  33  errors   0   tree_aliases=130 blogger=0 hsn=0
+import_session                   ran   36  failures   0  errors  36   tree_aliases=0 blogger=360 hsn=0
+import_tally_xml                 ran   25  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+import_undo                      ran   96  failures  77  errors   6   tree_aliases=222 blogger=0 hsn=40
+import_update                    ran   38  failures   8  errors   3   tree_aliases=18 blogger=0 hsn=16
+json_xml_attachments             ran    2  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+migration_report                 ran   21  failures  12  errors   1   tree_aliases=48 blogger=0 hsn=8
+plan_openings                    ran   27  failures   0  errors  15   tree_aliases=0 blogger=0 hsn=120
+run_migration_plan               ran   28  failures  25  errors   0   tree_aliases=200 blogger=0 hsn=0
+system_skill_manifest            ran   19  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+undo_import_tools                ran   47  failures  48  errors   0   tree_aliases=126 blogger=0 hsn=0
+untrusted_output                 ran    8  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+upload_magic_bytes               ran   16  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+upload_size_limit                ran    3  failures   0  errors   0   tree_aliases=0 blogger=0 hsn=0
+
+TOTAL ran 1093  failures 272  errors 201

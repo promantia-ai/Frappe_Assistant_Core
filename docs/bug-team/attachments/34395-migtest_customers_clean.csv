@@ -1,0 +1,33 @@
+Cust Name,Party Group,Region,Customer Type,GSTIN No.,Contact No,E-mail
+MIGTEST Trader 01,commercial ,Karnataka,Company,29AAACM1001K1ZU,9845000001,buyer1@migtest.example
+MIGTEST Trader 02,Retail,INDIA,Individual,29AAACM1002K1ZT,9845000002,buyer2@migtest.example
+MIGTEST Trader 03,Wholesale,Maharashtra,Pvt Ltd,,9845000003,buyer3@migtest.example
+MIGTEST Trader 04,Individual,India,Company,29AAACM1004K1ZR,9845000004,buyer4@migtest.example
+MIGTEST Trader 05,Retail,Karnataka,Individual,29AAACM1005K1ZQ,9845000005,buyer5@migtest.example
+MIGTEST Trader 06,Commercial,India,Company,,9845000006,buyer6@migtest.example
+MIGTEST Trader 07,commercial ,Karnataka,Company,29AAACM1007K1ZZ,9845000007,buyer7@migtest.example
+MIGTEST Trader 08,Retail,INDIA,Individual,29AAACM1008K1ZN,9845000008,buyer8@migtest.example
+MIGTEST Trader 09,Wholesale,Maharashtra,Pvt Ltd,,9845000009,buyer9@migtest.example
+MIGTEST Trader 10,Individual,India,Company,29AAACM1010K1ZT,9845000010,buyer10@migtest.example
+MIGTEST Trader 11,Retail,Karnataka,Individual,29AAACM1011K1ZS,9845000011,buyer11-at-migtest
+MIGTEST Trader 12,Commercial,India,Company,,9845000012,buyer12@migtest.example
+MIGTEST Trader 13,commercial ,Karnataka,Company,29AAACM1013K1ZQ,9845000013,buyer13@migtest.example
+MIGTEST Trader 14,Retail,INDIA,Individual,29AAACM1014K1ZP,9845000014,buyer14@migtest.example
+MIGTEST Trader 15,Wholesale,Maharashtra,Pvt Ltd,,9845000015,buyer15@migtest.example
+MIGTEST Trader 16,Individual,India,Company,29AAACM1016K1ZN,9845000016,buyer16@migtest.example
+MIGTEST Trader 17,Retail,Karnataka,Individual,29AAACM1017K1ZM,9845000017,buyer17@migtest.example
+MIGTEST Trader 18,Commercial,India,Company,,9845000018,buyer18@migtest.example
+MIGTEST Trader 19,commercial ,Karnataka,Company,29AAACM1019K1ZK,9845000019,buyer19@migtest.example
+MIGTEST Trader 20,Retail,INDIA,Individual,29AAACM1020K1ZR,9845000020,buyer20@migtest.example
+MIGTEST Trader 21,Wholesale,Maharashtra,Pvt Ltd,,9845000021,buyer21@migtest.example
+MIGTEST Trader 22,Individual,India,Company,29AAACM1022K1ZP,9845000022,buyer22@migtest.example
+MIGTEST Trader 23,Retail,Karnataka,Individual,29AAACM1023K1ZO,9845000023,buyer23@migtest.example
+MIGTEST Trader 24,Commercial,India,Company,,9845000024,buyer24@migtest.example
+MIGTEST Trader 25,commercial ,Karnataka,Company,29AAACM1025K1ZM,9845000025,buyer25@migtest.example
+MIGTEST Trader 26,Retail,INDIA,Individual,29AAACM1026K1ZL,9845000026,buyer26@migtest.example
+MIGTEST Trader 27,Wholesale,Maharashtra,Pvt Ltd,,9845000027,buyer27@migtest.example
+MIGTEST Trader 28,Individual,India,Company,29AAACM1028K1ZJ,9845000028,buyer28@migtest.example
+MIGTEST Trader 29,Retail,Karnataka,Individual,29AAACM1029K1ZI,9845000029,buyer29@migtest.example
+MIGTEST Trader 30,Commercial,India,Company,,9845000030,buyer30@migtest.example
+MIGTEST Trader 05,Commercial,India,Company,,9845099999,dup@migtest.example
+,Commercial,India,Company,,,

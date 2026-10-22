@@ -1,0 +1,100 @@
+{
+ "success": true,
+ "result": {
+  "success": true,
+  "session": "IMP-2026-12839",
+  "status": "Dry Run Failed",
+  "message": "0 rows ready, 32 would fail. Nothing was written.",
+  "checked_on": "2026-10-22 13:12:25.714884",
+  "doctype": "Customer",
+  "import_type": "Insert New Records",
+  "total_rows": 32,
+  "records": 32,
+  "ready": 0,
+  "failed": 32,
+  "excluded": 0,
+  "imported": 0,
+  "unchanged": 0,
+  "duplicate_key": "customer_name",
+  "groups": [
+   {
+    "id": "Gd40591",
+    "cause": "Rejected by ERPNext",
+    "error": "AttributeError",
+    "message": "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'",
+    "count": 31,
+    "examples": [
+     {
+      "row": 2,
+      "values": {
+       "Cust Name": "MIGTEST Trader 01",
+       "Party Group": "commercial",
+       "Region": "Karnataka",
+       "Customer Type": "Company",
+       "GSTIN No.": "29AAACM1001K1ZU"
+      }
+     },
+     {
+      "row": 3,
+      "values": {
+       "Cust Name": "MIGTEST Trader 02",
+       "Party Group": "Retail",
+       "Region": "INDIA",
+       "Customer Type": "Individual",
+       "GSTIN No.": "29AAACM1002K1ZT"
+      }
+     },
+     {
+      "row": 4,
+      "values": {
+       "Cust Name": "MIGTEST Trader 03",
+       "Party Group": "Wholesale",
+       "Region": "Maharashtra",
+       "Customer Type": "Pvt Ltd",
+       "GSTIN No.": ""
+      }
+     }
+    ],
+    "explanation": "31 rows rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'",
+    "fixes": [
+     {
+      "action": "leave_out",
+      "rows": 31
+     }
+    ],
+    "fix_in_file": true
+   },
+   {
+    "id": "Gc74e04",
+    "cause": "Duplicate in the file",
+    "field": "customer_name",
+    "label": "Customer Name",
+    "message": "Customer Name appears more than once in the file.",
+    "count": 1,
+    "examples": [
+     {
+      "row": 32,
+      "values": {
+       "Cust Name": "MIGTEST Trader 05",
+       "Party Group": "Commercial",
+       "Region": "India",
+       "Customer Type": "Company",
+       "GSTIN No.": ""
+      }
+     }
+    ],
+    "explanation": "1 row: the Customer Name repeats one earlier in the file, and only the first can be imported.",
+    "fixes": [
+     {
+      "action": "leave_out",
+      "rows": 1
+     }
+    ],
+    "fix_in_file": true
+   }
+  ],
+  "groups_total": 2,
+  "masters_plan": []
+ },
+ "execution_time": 0.5826830863952637
+}

@@ -1,0 +1,275 @@
+Starting test run with parameters: site=assistant.runtime, module=frappe_assistant_core.tests.test_import_dry_run, verbose=False, tests=(), force=False, profile=False, failfast=False, skip_before_tests=False, debug=False, selected_categories=[]
+View detailed logs (using --verbose): /Users/clinton/frappe/bench/frappe-bench/logs/frappe.testing.log
+
+Running 18 integration tests for frappe_assistant_core
+
+frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport
+   [31m ✖ [0m test_a_clean_file_is_ready_to_import
+   [32m ✔ [0m test_a_doctype_whose_side_effects_cant_be_held_back_is_refused
+   [31m ✖ [0m test_a_file_only_in_the_chat_asks_for_the_file_then_continues_with_it
+   [32m ✔ [0m test_a_file_with_other_columns_is_not_linked
+   [31m ✖ [0m test_a_group_shows_at_most_three_example_rows
+   [31m ✖ [0m test_a_large_file_is_checked_in_the_background
+   [32m ✔ [0m test_an_unmapped_session_is_refused
+   [31m ✖ [0m test_another_users_session_is_refused
+   [31m ✖ [0m test_checking_again_after_a_fix_reports_only_remaining_failures
+   [31m ✖ [0m test_controller_rules_the_preview_misses_are_caught
+   [32m ✔ [0m test_duplicates_in_the_file_and_in_erpnext_are_their_own_groups
+   [31m ✖ [0m test_every_row_is_checked_and_failures_are_grouped_by_cause
+   [32m ✔ [0m test_held_back_swallows_commits_jobs_and_events_then_restores_them
+   [32m ✔ [0m test_nothing_is_written
+   [31m ✖ [0m test_rows_left_out_are_not_checked
+   [31m ✖ [0m test_the_session_holds_the_summary_the_full_list_and_a_step
+   [32m ✔ [0m test_the_session_keeps_no_row_of_the_file
+   [32m ✔ [0m test_tool_is_registered_and_raises_no_approval_card
+
+
+======================================================================
+ ERROR  test_a_group_shows_at_most_three_example_rows (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_a_group_shows_at_most_three_example_rows)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 165, in test_a_group_shows_at_most_three_example_rows
+    link = self._group(self._check(session), "Missing link")
+    rows = [['Row 0 09fe58', 'Retial 09fe58', 'Company', ''], ['Row 1 09fe58', 'Retial 09fe58', 'Company', ''], ['Row 2 09fe58', 'Retial 09fe58', 'Company', ''], ['Row 3 09fe58', 'Retial 09fe58', 'Company', ''], ['Row 4 09fe58', 'Retial 09fe58', 'Company', '']]
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_a_group_shows_at_most_three_example_rows>
+    session = 'IMP-2026-12827'
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 118, in _group
+    return next(g for g in result["groups"] if g["cause"] == cause)
+    cause = 'Missing link'
+    result = {'success': True, 'session': 'IMP-2026-12827', 'status': 'Dry Run Failed', 'message': '0 rows ready, 5 would fail. Nothing was written.', 'checked_on': '2026-10-22 12:33:47.908191', 'doctype': 'Customer', 'import_type': 'Insert New Records', 'total_rows': 5, 'records': 5, 'ready': 0, 'failed': 5, 'excluded': 0, 'imported': 0, 'duplicate_key': 'customer_name', 'groups': [{'id': 'Gd40591', 'cause': 'Rejected by ERPNext', 'error': 'AttributeError', 'message': "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'count': 5, 'examples': [{'row': 2, 'values': {'Customer Name': 'Row 0 09fe58', 'Customer Group': 'Retial 09fe58', 'Customer Type': 'Company'}}, {'row': 3, 'values': {'Customer Name': 'Row 1 09fe58', 'Customer Group': 'Retial 09fe58', 'Customer Type': 'Company'}}, {'row': 4, 'values': {'Customer Name': 'Row 2 09fe58', 'Customer Group': 'Retial 09fe58', 'Customer Type': 'Company'}}], 'explanation': "5 rows rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'fixes': [{'action': 'leave_out', 'rows': 5}], 'fix_in_file': True}], 'masters_plan': []}
+StopIteration
+
+======================================================================
+ ERROR  test_another_users_session_is_refused (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_another_users_session_is_refused)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 374, in test_another_users_session_is_refused
+    frappe.set_user(self.make_throwaway_user("other", roles=("Blogger",)))
+                    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_another_users_session_is_refused>
+    session = 'IMP-2026-12830'
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/base_test.py", line 285, in make_throwaway_user
+    ).insert(ignore_permissions=True)
+      ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+    email = 'other-37df60a8@example.com'
+    prefix = 'other'
+    roles = ('Blogger',)
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_another_users_session_is_refused>
+  File "/Users/clinton/frappe/bench/frappe-bench/apps/frappe/frappe/model/document.py", line 480, in insert
+    self._validate_links()
+    ~~~~~~~~~~~~~~~~~~~~^^
+    ignore_if_duplicate = False
+    ignore_links = None
+    ignore_mandatory = None
+    ignore_permissions = True
+    self = <User: doctype=User unsaved>
+    set_child_names = True
+    set_name = None
+  File "/Users/clinton/frappe/bench/frappe-bench/apps/frappe/frappe/model/document.py", line 1223, in _validate_links
+    frappe.throw(_("Could not find {0}").format(msg), frappe.LinkValidationError)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    cancelled_links = []
+    d = <HasRole: doctype=Has Role unsaved>
+    invalid_links = [('role', 'Blogger', 'Row #1: Role: Blogger')]
+    msg = 'Row #1: Role: Blogger'
+    result = ([('role', 'Blogger', 'Row #1: Role: Blogger')], [])
+    self = <User: doctype=User unsaved>
+  File "/Users/clinton/frappe/bench/frappe-bench/apps/frappe/frappe/utils/messages.py", line 159, in throw
+    msgprint(
+    ~~~~~~~~^
+    	msg,
+     ^^^^
+    ...<7 lines>...
+    	allow_dangerous_html=allow_dangerous_html,
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+    allow_dangerous_html = False
+    as_list = False
+    exc = <class 'frappe.exceptions.LinkValidationError'>
+    is_minimizable = False
+    msg = 'Could not find Row #1: Role: Blogger'
+    primary_action = None
+    title = None
+    wide = False
+  File "/Users/clinton/frappe/bench/frappe-bench/apps/frappe/frappe/utils/messages.py", line 118, in msgprint
+    _raise_exception()
+    ~~~~~~~~~~~~~~~~^^
+    _raise_exception = <function msgprint.<locals>._raise_exception at 0x122df5430>
+    alert = False
+    allow_dangerous_html = False
+    as_list = False
+    as_table = False
+    clean_html = <function clean_html at 0x10949b690>
+    indicator = 'red'
+    inspect = <module 'inspect' from '/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/inspect.py'>
+    is_minimizable = False
+    msg = 'Could not find Row #1: Role: Blogger'
+    out = {'message': 'Could not find Row #1: Role: Blogger', 'as_table': False, 'title': 'Message', 'indicator': 'red', 'raise_exception': 1, '__frappe_exc_id': 'c810d0c8f894e0ea9bf45c9296bf55c510a2e89919ea1753c0d793ac'}
+    primary_action = None
+    raise_exception = <class 'frappe.exceptions.LinkValidationError'>
+    realtime = False
+    title = None
+    wide = False
+  File "/Users/clinton/frappe/bench/frappe-bench/apps/frappe/frappe/utils/messages.py", line 59, in _raise_exception
+    raise exc
+    exc = LinkValidationError('Could not find Row #1: Role: Blogger')
+    inspect = <module 'inspect' from '/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/inspect.py'>
+    msg = 'Could not find Row #1: Role: Blogger'
+    out = {'message': 'Could not find Row #1: Role: Blogger', 'as_table': False, 'title': 'Message', 'indicator': 'red', 'raise_exception': 1, '__frappe_exc_id': 'c810d0c8f894e0ea9bf45c9296bf55c510a2e89919ea1753c0d793ac'}
+    raise_exception = <class 'frappe.exceptions.LinkValidationError'>
+frappe.exceptions.LinkValidationError: Could not find Row #1: Role: Blogger
+
+======================================================================
+ FAIL  test_a_clean_file_is_ready_to_import (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_a_clean_file_is_ready_to_import)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 216, in test_a_clean_file_is_ready_to_import
+    self.assertEqual((result["ready"], result["failed"], result["status"]), (1, 0, "Ready to Import"))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    result = {'success': True, 'session': 'IMP-2026-12823', 'status': 'Dry Run Failed', 'message': '0 rows ready, 1 would fail. Nothing was written.', 'checked_on': '2026-10-22 12:33:47.478108', 'doctype': 'Customer', 'import_type': 'Insert New Records', 'total_rows': 1, 'records': 1, 'ready': 0, 'failed': 1, 'excluded': 0, 'imported': 0, 'duplicate_key': 'customer_name', 'groups': [{'id': 'Gd40591', 'cause': 'Rejected by ERPNext', 'error': 'AttributeError', 'message': "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'count': 1, 'examples': [{'row': 2, 'values': {'Customer Name': 'Clean 9cd4e2', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}], 'explanation': "1 row rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'fixes': [{'action': 'leave_out', 'rows': 1}], 'fix_in_file': True}], 'masters_plan': []}
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_a_clean_file_is_ready_to_import>
+    session = 'IMP-2026-12823'
+AssertionError: Tuples differ: (0, 1, 'Dry Run Failed') != (1, 0, 'Ready to Import')
+
+First differing element 0:
+0
+1
+
+- (0, 1, 'Dry Run Failed')
++ (1, 0, 'Ready to Import')
+
+======================================================================
+ FAIL  test_a_file_only_in_the_chat_asks_for_the_file_then_continues_with_it (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_a_file_only_in_the_chat_asks_for_the_file_then_continues_with_it)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 348, in test_a_file_only_in_the_chat_asks_for_the_file_then_continues_with_it
+    self.assertEqual(result["ready"], 1)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+    file_doc = <File: doctype=File ffa3af5516>
+    result = {'success': True, 'session': 'IMP-2026-12825', 'status': 'Dry Run Failed', 'message': '0 rows ready, 1 would fail. Nothing was written.', 'checked_on': '2026-10-22 12:33:47.756446', 'doctype': 'Customer', 'import_type': 'Insert New Records', 'total_rows': 1, 'records': 1, 'ready': 0, 'failed': 1, 'excluded': 0, 'imported': 0, 'duplicate_key': 'customer_name', 'groups': [{'id': 'Gd40591', 'cause': 'Rejected by ERPNext', 'error': 'AttributeError', 'message': "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'count': 1, 'examples': [{'row': 2, 'values': {'Customer Name': 'Chat fe59f8', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}], 'explanation': "1 row rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'fixes': [{'action': 'leave_out', 'rows': 1}], 'fix_in_file': True}], 'masters_plan': []}
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_a_file_only_in_the_chat_asks_for_the_file_then_continues_with_it>
+    session = 'IMP-2026-12825'
+    started = {'success': True, 'result': {'success': True, 'session_id': 'IMP-2026-12825', 'file_name': 'customers.csv', 'sheet': None, 'columns': ['Customer Name', 'Customer Group', 'Customer Type', 'Notes'], 'row_count': 1, 'sheets': [{'name': None, 'columns': ['Customer Name', 'Customer Group', 'Customer Type', 'Notes'], 'row_count': 1}], 'target_doctype': None, 'status': 'File Read'}, 'execution_time': 0.0031731128692626953}
+AssertionError: 0 != 1
+
+======================================================================
+ FAIL  test_a_large_file_is_checked_in_the_background (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_a_large_file_is_checked_in_the_background)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 282, in test_a_large_file_is_checked_in_the_background
+    self.assertEqual(json.loads(doc.validation_summary)["failed"], 6)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    again = {'success': True, 'session': 'IMP-2026-12828', 'state': 'running', 'done': 0, 'total_rows': 7, 'message': 'Checking every row in the background. Read the session with get_document to see progress; the result will be in validation_summary.'}
+    doc = <FACImportSession: doctype=FAC Import Session IMP-2026-12828>
+    enqueue = <MagicMock name='enqueue' id='4873582112'>
+    progress = {'done': 0, 'started_on': '2026-10-22 12:33:47.999953', 'state': 'queued', 'step': 'Dry Run', 'total': 7}
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_a_large_file_is_checked_in_the_background>
+    session = 'IMP-2026-12828'
+    started = {'success': True, 'session': 'IMP-2026-12828', 'state': 'running', 'done': 0, 'total_rows': 7, 'message': 'Checking every row in the background. Read the session with get_document to see progress; the result will be in validation_summary.'}
+AssertionError: 7 != 6
+
+======================================================================
+ FAIL  test_checking_again_after_a_fix_reports_only_remaining_failures (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_checking_again_after_a_fix_reports_only_remaining_failures)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 242, in test_checking_again_after_a_fix_reports_only_remaining_failures
+    self.assertEqual((result["ready"], result["failed"]), (3, 4))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    result = {'success': True, 'session': 'IMP-2026-12831', 'status': 'Dry Run Failed', 'message': '0 rows ready, 7 would fail. Nothing was written.', 'checked_on': '2026-10-22 12:33:48.237375', 'doctype': 'Customer', 'import_type': 'Insert New Records', 'total_rows': 7, 'records': 7, 'ready': 0, 'failed': 7, 'excluded': 0, 'imported': 0, 'duplicate_key': 'customer_name', 'previous': {'failed': 7, 'fixed': 0}, 'groups': [{'id': 'Gd40591', 'cause': 'Rejected by ERPNext', 'error': 'AttributeError', 'message': "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'count': 5, 'examples': [{'row': 2, 'values': {'Customer Name': 'Alpha 660e3c', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}, {'row': 3, 'values': {'Customer Name': 'Beta 660e3c', 'Customer Group': 'Retial 660e3c', 'Customer Type': 'Company'}}, {'row': 4, 'values': {'Customer Name': 'Gamma 660e3c', 'Customer Group': 'Retial 660e3c', 'Customer Type': 'Company'}}], 'explanation': "5 rows rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'fixes': [{'action': 'leave_out', 'rows': 5}], 'fix_in_file': True}, {'id': 'Gc74e04', 'cause': 'Duplicate in the file', 'field': 'customer_name', 'label': 'Customer Name', 'message': 'Customer Name appears more than once in the file.', 'count': 1, 'examples': [{'row': 6, 'values': {'Customer Name': 'Alpha 660e3c', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}], 'explanation': '1 row: the Customer Name repeats one earlier in the file, and only the first can be imported.', 'fixes': [{'action': 'leave_out', 'rows': 1}], 'fix_in_file': True}, {'id': 'G39fcef', 'cause': 'Already in ERPNext', 'field': 'customer_name', 'label': 'Customer Name', 'message': 'A Customer with this Customer Name already exists.', 'count': 1, 'examples': [{'row': 7, 'values': {'Customer Name': 'Existing 660e3c', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}], 'explanation': '1 row: a record with this Customer Name is already in ERPNext, so importing would duplicate it.', 'fixes': [{'action': 'leave_out', 'rows': 1}], 'fix_in_file': True}], 'masters_plan': []}
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_checking_again_after_a_fix_reports_only_remaining_failures>
+    session = 'IMP-2026-12831'
+AssertionError: Tuples differ: (0, 7) != (3, 4)
+
+First differing element 0:
+0
+3
+
+- (0, 7)
++ (3, 4)
+
+======================================================================
+ FAIL  test_controller_rules_the_preview_misses_are_caught (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_controller_rules_the_preview_misses_are_caught)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 148, in test_controller_rules_the_preview_misses_are_caught
+    self.assertEqual(rejected["error"], "ValidationError")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    rejected = {'id': 'Gd40591', 'cause': 'Rejected by ERPNext', 'error': 'AttributeError', 'message': "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'count': 5, 'examples': [{'row': 2, 'values': {'Customer Name': 'Alpha d60f05', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}, {'row': 3, 'values': {'Customer Name': 'Beta d60f05', 'Customer Group': 'Retial d60f05', 'Customer Type': 'Company'}}, {'row': 4, 'values': {'Customer Name': 'Gamma d60f05', 'Customer Group': 'Retial d60f05', 'Customer Type': 'Company'}}], 'explanation': "5 rows rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'fixes': [{'action': 'leave_out', 'rows': 5}], 'fix_in_file': True}
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_controller_rules_the_preview_misses_are_caught>
+    session = 'IMP-2026-12832'
+AssertionError: 'AttributeError' != 'ValidationError'
+- AttributeError
++ ValidationError
+
+
+======================================================================
+ FAIL  test_every_row_is_checked_and_failures_are_grouped_by_cause (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_every_row_is_checked_and_failures_are_grouped_by_cause)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 136, in test_every_row_is_checked_and_failures_are_grouped_by_cause
+    self.assertEqual((result["total_rows"], result["ready"], result["failed"]), (7, 1, 6))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    result = {'success': True, 'session': 'IMP-2026-12834', 'status': 'Dry Run Failed', 'message': '0 rows ready, 7 would fail. Nothing was written.', 'checked_on': '2026-10-22 12:33:48.563443', 'doctype': 'Customer', 'import_type': 'Insert New Records', 'total_rows': 7, 'records': 7, 'ready': 0, 'failed': 7, 'excluded': 0, 'imported': 0, 'duplicate_key': 'customer_name', 'groups': [{'id': 'Gd40591', 'cause': 'Rejected by ERPNext', 'error': 'AttributeError', 'message': "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'count': 5, 'examples': [{'row': 2, 'values': {'Customer Name': 'Alpha 7be090', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}, {'row': 3, 'values': {'Customer Name': 'Beta 7be090', 'Customer Group': 'Retial 7be090', 'Customer Type': 'Company'}}, {'row': 4, 'values': {'Customer Name': 'Gamma 7be090', 'Customer Group': 'Retial 7be090', 'Customer Type': 'Company'}}], 'explanation': "5 rows rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'fixes': [{'action': 'leave_out', 'rows': 5}], 'fix_in_file': True}, {'id': 'Gc74e04', 'cause': 'Duplicate in the file', 'field': 'customer_name', 'label': 'Customer Name', 'message': 'Customer Name appears more than once in the file.', 'count': 1, 'examples': [{'row': 6, 'values': {'Customer Name': 'Alpha 7be090', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}], 'explanation': '1 row: the Customer Name repeats one earlier in the file, and only the first can be imported.', 'fixes': [{'action': 'leave_out', 'rows': 1}], 'fix_in_file': True}, {'id': 'G39fcef', 'cause': 'Already in ERPNext', 'field': 'customer_name', 'label': 'Customer Name', 'message': 'A Customer with this Customer Name already exists.', 'count': 1, 'examples': [{'row': 7, 'values': {'Customer Name': 'Existing 7be090', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}], 'explanation': '1 row: a record with this Customer Name is already in ERPNext, so importing would duplicate it.', 'fixes': [{'action': 'leave_out', 'rows': 1}], 'fix_in_file': True}], 'masters_plan': []}
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_every_row_is_checked_and_failures_are_grouped_by_cause>
+    session = 'IMP-2026-12834'
+AssertionError: Tuples differ: (7, 0, 7) != (7, 1, 6)
+
+First differing element 1:
+0
+1
+
+- (7, 0, 7)
+?     ^  ^
+
++ (7, 1, 6)
+?     ^  ^
+
+
+======================================================================
+ FAIL  test_rows_left_out_are_not_checked (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_rows_left_out_are_not_checked)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 256, in test_rows_left_out_are_not_checked
+    self.assertEqual((result["ready"], result["failed"], result["excluded"]), (1, 4, 2))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    result = {'success': True, 'session': 'IMP-2026-12836', 'status': 'Dry Run Failed', 'message': '0 rows ready, 5 would fail, 2 left out. Nothing was written.', 'checked_on': '2026-10-22 12:33:48.780961', 'doctype': 'Customer', 'import_type': 'Insert New Records', 'total_rows': 7, 'records': 7, 'ready': 0, 'failed': 5, 'excluded': 2, 'imported': 0, 'duplicate_key': 'customer_name', 'groups': [{'id': 'Gd40591', 'cause': 'Rejected by ERPNext', 'error': 'AttributeError', 'message': "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'count': 3, 'examples': [{'row': 2, 'values': {'Customer Name': 'Alpha 41066e', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}, {'row': 5, 'values': {'Customer Name': 'Delta 41066e', 'Customer Group': '', 'Customer Type': 'Company'}}, {'row': 8, 'values': {'Customer Name': 'Eps 41066e', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Robot'}}], 'explanation': "3 rows rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'fixes': [{'action': 'leave_out', 'rows': 3}], 'fix_in_file': True}, {'id': 'Gc74e04', 'cause': 'Duplicate in the file', 'field': 'customer_name', 'label': 'Customer Name', 'message': 'Customer Name appears more than once in the file.', 'count': 1, 'examples': [{'row': 6, 'values': {'Customer Name': 'Alpha 41066e', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}], 'explanation': '1 row: the Customer Name repeats one earlier in the file, and only the first can be imported.', 'fixes': [{'action': 'leave_out', 'rows': 1}], 'fix_in_file': True}, {'id': 'G39fcef', 'cause': 'Already in ERPNext', 'field': 'customer_name', 'label': 'Customer Name', 'message': 'A Customer with this Customer Name already exists.', 'count': 1, 'examples': [{'row': 7, 'values': {'Customer Name': 'Existing 41066e', 'Customer Group': 'FAC Dry Run Group', 'Customer Type': 'Company'}}], 'explanation': '1 row: a record with this Customer Name is already in ERPNext, so importing would duplicate it.', 'fixes': [{'action': 'leave_out', 'rows': 1}], 'fix_in_file': True}], 'masters_plan': [], 'left_out': [{'reason': 'Left out by the user', 'count': 2, 'rows': '3-4'}]}
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_rows_left_out_are_not_checked>
+    session = 'IMP-2026-12836'
+AssertionError: Tuples differ: (0, 5, 2) != (1, 4, 2)
+
+First differing element 0:
+0
+1
+
+- (0, 5, 2)
+?  ^  ^
+
++ (1, 4, 2)
+?  ^  ^
+
+
+======================================================================
+ FAIL  test_the_session_holds_the_summary_the_full_list_and_a_step (frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport.test_the_session_holds_the_summary_the_full_list_and_a_step)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/-Users-clinton-frappe-bench-frappe-bench/5d2636fb-e57e-476b-903a-0001c8620612/scratchpad/fac-dm/frappe_assistant_core/tests/test_import_dry_run.py", line 194, in test_the_session_holds_the_summary_the_full_list_and_a_step
+    self.assertEqual((summary["ready"], summary["failed"]), (1, 6))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    doc = <FACImportSession: doctype=FAC Import Session IMP-2026-12837>
+    self = <frappe_assistant_core.tests.test_import_dry_run.TestDryRunImport testMethod=test_the_session_holds_the_summary_the_full_list_and_a_step>
+    session = 'IMP-2026-12837'
+    summary = {'checked_on': '2026-10-22 12:33:48.889048', 'doctype': 'Customer', 'duplicate_key': 'customer_name', 'excluded': 0, 'failed': 7, 'groups': [{'cause': 'Rejected by ERPNext', 'count': 5, 'error': 'AttributeError', 'example_rows': [2, 3, 4], 'explanation': "5 rows rejected by ERPNext: 'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'", 'fix_in_file': True, 'fixes': [{'action': 'leave_out', 'rows': 5}], 'id': 'Gd40591', 'message': "'types.SimpleNamespace' object has no attribute '_uses_tree_aliases'"}, {'cause': 'Duplicate in the file', 'count': 1, 'example_rows': [6], 'explanation': '1 row: the Customer Name repeats one earlier in the file, and only the first can be imported.', 'field': 'customer_name', 'fix_in_file': True, 'fixes': [{'action': 'leave_out', 'rows': 1}], 'id': 'Gc74e04', 'label': 'Customer Name', 'message': 'Customer Name appears more than once in the file.'}, {'cause': 'Already in ERPNext', 'count': 1, 'example_rows': [7], 'explanation': '1 row: a record with this Customer Name is already in ERPNext, so importing would duplicate it.', 'field': 'customer_name', 'fix_in_file': True, 'fixes': [{'action': 'leave_out', 'rows': 1}], 'id': 'G39fcef', 'label': 'Customer Name', 'message': 'A Customer with this Customer Name already exists.'}], 'import_type': 'Insert New Records', 'imported': 0, 'masters_plan': [], 'message': '0 rows ready, 7 would fail. Nothing was written.', 'ready': 0, 'records': 7, 'session': 'IMP-2026-12837', 'status': 'Dry Run Failed', 'total_rows': 7}
+AssertionError: Tuples differ: (0, 7) != (1, 6)
+
+First differing element 0:
+0
+1
+
+- (0, 7)
++ (1, 6)
+
+----------------------------------------------------------------------
+Ran 18 tests in 2.172s
+
+FAILED (failures=8, errors=2)
