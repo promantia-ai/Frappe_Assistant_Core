@@ -68,7 +68,7 @@ class TestDryRunImport(BaseAssistantTest):
                 }
             ).insert()
         self.existing = f"Existing {self.tag}"
-        self._name_by_series()  # so a repeated customer name is no clash of record names
+        self.name_customers_by("Naming Series")  # so a repeated customer name is no clash of record names
         frappe.get_doc(
             {"doctype": "Customer", "customer_name": self.existing, "customer_group": GROUP}
         ).insert()
@@ -311,12 +311,6 @@ class TestDryRunImport(BaseAssistantTest):
 
     # -- #34398: only a record's name or a unique field is a duplicate key ---------------------
 
-    def _name_by_series(self):
-        """Customers named by their naming series, whatever the site's Selling Settings say."""
-        previous = frappe.defaults.get_global_default("cust_master_name") or "Customer Name"
-        frappe.defaults.set_global_default("cust_master_name", "Naming Series")
-        self.addCleanup(frappe.defaults.set_global_default, "cust_master_name", previous)
-
     def _other_session(self, doctype, header, rows, mapping):
         """A session for another DocType, with a one-column or wider CSV."""
         content = ("\n".join([",".join(header)] + [",".join(row) for row in rows]) + "\n").encode()
@@ -384,7 +378,7 @@ class TestDryRunImport(BaseAssistantTest):
     def test_a_name_that_is_the_records_name_is_refused_by_erpnext(self):
         # Named by its customer name, a Customer's name is the field: ERPNext's own insert, which
         # the check runs, refuses a second one. (setUp named customers by series.)
-        frappe.defaults.set_global_default("cust_master_name", "Customer Name")
+        self.name_customers_by("Customer Name")
         frappe.get_doc({"doctype": "Customer", "customer_name": f"Named {self.tag}", "customer_group": GROUP}).insert()
         session = self._session([[f"Named {self.tag}", GROUP, "Company", ""]])
 

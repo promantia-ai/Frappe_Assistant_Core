@@ -63,6 +63,21 @@ class BaseAssistantTest(IntegrationTestCase):
 
     SHOW_TRANSACTION_COMMIT_WARNINGS = True
 
+    def name_customers_by(self, mode: str) -> None:
+        """Customers are named by ``mode`` ("Customer Name" or "Naming Series") for this test.
+
+        Only what Customer.autoname reads is patched: the default is never written, because a
+        commit later in the test (an import's row-by-row commits) would make it permanent.
+        """
+        real = frappe.defaults.get_global_default
+
+        def get_global_default(key, *args, **kwargs):
+            return mode if key == "cust_master_name" else real(key, *args, **kwargs)
+
+        patcher = patch.object(frappe.defaults, "get_global_default", get_global_default)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @classmethod
     def setUpClass(cls):
         """Set up class-level test environment.

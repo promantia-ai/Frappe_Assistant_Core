@@ -458,10 +458,7 @@ class TestImportFailures(ImportRunCase):
         self.assertEqual((result["ready"], result["imported"]), (2, 0), result)
 
     def test_a_corrected_file_that_brings_back_a_changed_imported_row_is_a_new_record(self):
-        previous = frappe.defaults.get_global_default("cust_master_name")
-        if previous != "Naming Series":  # this import commits row by row: put the setting back
-            frappe.defaults.set_global_default("cust_master_name", "Naming Series")
-            self.addCleanup(frappe.defaults.set_global_default, "cust_master_name", previous or "")
+        self.name_customers_by("Naming Series")
         session, _checked, _first = self._partly_imported()
         n = self._names()
         _out, _file_doc, rows = self._failed_rows(session)
