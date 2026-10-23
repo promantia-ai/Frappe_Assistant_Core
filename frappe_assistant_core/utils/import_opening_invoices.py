@@ -267,12 +267,30 @@ def is_totals_row(cells: Dict[str, str]) -> bool:
 def invoice_key(invoices: Dict[str, Any], cells: Dict[str, str]) -> str:
     """What says a row is in, matched against the invoices earlier imports made: the invoice
     number (with the supplier for purchases, as suppliers reuse numbers), or, without one, the
-    party, date and amount as the file writes them. Never the row's number: the sheet can change."""
+    party, date and amount as they resolve: the party's name, the ISO date and the amount to the
+    currency's decimals, so a value map or a date written another way still finds it (#34434).
+    Never the row's number: the sheet can change."""
     party = cstr(cells.get("party")).strip().casefold()
     number = cstr(cells.get("invoice_number")).strip().casefold()
     if number:
         return f"{party}|{number}" if invoices.get("invoice_type") == "Purchase" else number
+    kind = "Purchase" if invoices.get("invoice_type") == "Purchase" else "Sales"
+    party_type = invoices.get("party_type") or ("Supplier" if kind == "Purchase" else "Customer")
+    found = find_party(party_type, cstr(cells.get("party")).strip())
+    if found:
+        party = found.name.casefold()
     date, amount = cstr(cells.get("posting_date")).strip(), cstr(cells.get("outstanding_amount")).strip()
+    try:
+        date = date_of(date) or ""
+    except ValueError:
+        pass  # not a date: the row fails its check, and the key keeps the text
+    try:
+        precision = (
+            frappe.get_precision(invoices.get("doctype") or INVOICE_DOCTYPES[kind], "outstanding_amount") or 2
+        )
+        amount = f"{flt(opening_stock.number(amount), precision):.{precision}f}"
+    except ValueError:
+        pass
     return f"{party}|{date}|{amount}"
 
 
@@ -538,8 +556,9 @@ def _number_used(invoices: Dict[str, Any], line: Ready) -> bool:
 
 def _already_opened(invoices: Dict[str, Any], own: set):
     """How many submitted opening invoices ERPNext already has for a party, date and amount,
-    leaving out ``own`` (this session's): an invoice without a number is known only by those, so
-    the same file brought in by another session would otherwise post it twice."""
+    leaving out ``own`` (this session's invoices that a row of the file finds by its key): an
+    invoice without a number is known only by those, so the same file brought in by another
+    session, or a row whose key changed, would otherwise post it twice."""
     known: Dict[tuple, int] = {}
     precision = _precision(invoices)
 
@@ -587,13 +606,22 @@ def _check_lines(
         _fiscal_years(invoices["company"]),
         imported_keys(session),
     )
-    opened = _already_opened(invoices, set(invoices.get("created") or {}))
-    ready, first_of, counts, seen = [], {}, {}, {}
-    for line in read_lines(session) if lines is None else lines:
+    lines = read_lines(session) if lines is None else lines
+    keys, counts = {}, {}
+    for line in lines:
         base = invoice_key(invoices, line.cells)
-        numbered = bool(line.cells.get("invoice_number"))
         counts[base] = counts.get(base, 0) + 1
-        key = base if numbered else f"{base}#{counts[base]}"  # the same invoice twice without numbers
+        # the same invoice twice without numbers
+        keys[line.row] = base if line.cells.get("invoice_number") else f"{base}#{counts[base]}"
+    # This session's own invoices count too, but for those a row of the file finds by its key: a
+    # key that no longer finds its invoice would otherwise post it twice (#34434).
+    found = set(keys.values())
+    created = invoices.get("created") or {}
+    opened = _already_opened(invoices, {name for name, entry in created.items() if entry.get("key") in found})
+    ready, first_of, seen = [], {}, {}
+    for line in lines:
+        numbered = bool(line.cells.get("invoice_number"))
+        key = keys[line.row]
         if line.row in excluded:
             checker.mark(line.row, "excluded")
             continue

@@ -460,8 +460,9 @@ class TestReadingLines(OpeningInvoicesCase):
         self.assertEqual(opening_invoices.invoice_key(sales, numbered), "inv-1")
         self.assertEqual(opening_invoices.invoice_key(purchase, numbered), "acme|inv-1")
         bare = {"party": "Acme", "posting_date": "2026-01-01", "outstanding_amount": "1,250"}
-        self.assertEqual(opening_invoices.invoice_key(sales, bare), "acme|2026-01-01|1,250")
-        self.assertEqual(opening_invoices.invoice_key(purchase, bare), "acme|2026-01-01|1,250")
+        # without a number: the party, the ISO date and the amount to the currency's decimals (#34434)
+        self.assertEqual(opening_invoices.invoice_key(sales, bare), "acme|2026-01-01|1250.00")
+        self.assertEqual(opening_invoices.invoice_key(purchase, bare), "acme|2026-01-01|1250.00")
 
     def test_lines_have_every_mapped_field_with_value_maps_applied(self):
         session = self._session(
@@ -1326,6 +1327,65 @@ class TestSignoffReviewFixes(OpeningInvoicesCase):
         )
 
         self.assertEqual((result["ready"], result["failed"]), (1, 1), result)
+
+    # -- #34434: an unnumbered invoice is known by its resolved values ----------------------------
+
+    def _rules(self, session, excluded=(), value_maps=()):
+        doc = self._doc(session)
+        doc.excluded_rows = frappe.as_json(list(excluded))
+        doc.transformation_rules = frappe.as_json({"value_maps": list(value_maps)})
+        doc.save()
+
+    def _opening_invoices(self, customer):
+        return frappe.db.count("Sales Invoice", {"customer": customer, "is_opening": "Yes", "docstatus": 1})
+
+    def test_a_value_map_added_after_a_partial_import_does_not_post_it_again(self):
+        # The ticket's test: import part of the file, add a value map, import the rest.
+        session = self._session([f"{self.customer},,{self.date},,10", f"{self.customer2},,{self.date},,20"])
+        self.assertTrue(self._setup(session)["success"])
+        self._rules(session, excluded=[3])
+        first = self._check(session)
+        self.assertTrue(self._run("import_opening_invoices", self._card(session, first))["success"])
+
+        # "10" now reads "10.00": the same invoice, written another way
+        amount = {"parent": "Sales Invoice", "field": "outstanding_amount", "label": "Amount"}
+        self._rules(session, value_maps=[{**amount, "from": "10", "to": "10.00"}])
+        again = self._check(session)
+
+        self.assertEqual((again["imported"], again["ready"], again["failed"]), (1, 1, 0), again)
+        self.assertTrue(self._run("import_opening_invoices", self._card(session, again))["success"])
+        self.assertEqual(
+            (self._opening_invoices(self.customer), self._opening_invoices(self.customer2)), (1, 1)
+        )
+
+    def test_the_sessions_own_invoice_no_row_matches_still_counts(self):
+        # An own invoice whose row the key no longer finds (a key from before) is ERPNext's all the same.
+        session, _report = self._imported([f"{self.customer},,{self.date},,10"])
+        doc = self._doc(session)
+        options = frappe.parse_json(doc.template_options)
+        for entry in options["opening_invoices"]["created"].values():
+            entry["key"] = "an older key"
+        doc.db_set("template_options", frappe.as_json(options))
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (0, 1), result)
+        self.assertIn(opening_invoices.CAUSE_ALREADY_OPENED, self._groups(result))
+
+    def test_the_key_of_an_unnumbered_row_is_its_party_iso_date_and_rounded_amount(self):
+        session = self._session([f"{self.customer},,{self.date},,10"])
+        self.assertTrue(self._setup(session)["success"])
+        invoices = opening_invoices.settings(self._doc(session))
+        cells = {"party": self.customer, "posting_date": self.date, "outstanding_amount": "10"}
+
+        key = opening_invoices.invoice_key(invoices, cells)
+
+        self.assertEqual(
+            key, opening_invoices.invoice_key(invoices, {**cells, "outstanding_amount": "10.001"})
+        )
+        self.assertNotEqual(
+            key, opening_invoices.invoice_key(invoices, {**cells, "outstanding_amount": "10.01"})
+        )
 
     # -- the report compares what was brought in, not what is still owed --------------------------
 
