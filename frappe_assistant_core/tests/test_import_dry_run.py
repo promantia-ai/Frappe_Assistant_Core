@@ -363,7 +363,12 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertNotIn("Missing link", [g["cause"] for g in result["groups"]])
         self.assertEqual(result["previous"], {"failed": 6, "fixed": 2})
         attached = frappe.get_all(
-            "File", filters={"attached_to_doctype": "FAC Import Session", "attached_to_name": session}
+            "File",
+            filters={
+                "attached_to_doctype": "FAC Import Session",
+                "attached_to_name": session,
+                "attached_to_field": "validation_results",  # beside the session's copy (#34405)
+            },
         )
         self.assertEqual(len(attached), 1)  # the old result file is replaced, not kept
 
@@ -947,12 +952,7 @@ class TestDryRunImport(BaseAssistantTest):
         self._check_fails(session, "Map the columns first")
 
     def test_a_file_only_in_the_chat_asks_for_the_file_then_continues_with_it(self):
-        started = self._run(
-            "start_import_session",
-            {"file_name": "customers.csv", "columns": list(MAPPING), "row_count": 1},
-        )
-        session = started["result"]["session_id"]
-        self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+        session = self._chat_session()
 
         self._check_fails(session, "Upload it in File Manager")
 
@@ -967,14 +967,10 @@ class TestDryRunImport(BaseAssistantTest):
         result = self._check(session, file_url=file_doc.file_url)
         self.assertEqual(result["ready"], 1)
         doc = frappe.get_doc("FAC Import Session", session)
-        self.assertEqual((doc.file_source, doc.source_file), ("Site File", file_doc.name))
+        self.assertEqual((doc.file_source, doc.original_file), ("Site File", file_doc.name))
 
     def test_a_file_with_other_columns_is_not_linked(self):
-        started = self._run(
-            "start_import_session", {"file_name": "customers.csv", "columns": list(MAPPING), "row_count": 1}
-        )
-        session = started["result"]["session_id"]
-        self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
+        session = self._chat_session()
         other = frappe.get_doc(
             {"doctype": "File", "file_name": "other.csv", "content": b"Name\nX\n", "is_private": 1}
         ).insert()
@@ -984,13 +980,30 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertFalse(frappe.db.get_value("FAC Import Session", session, "source_file"))
 
     def _chat_session(self):
-        """A mapped session whose file stayed in the chat."""
-        started = self._run(
-            "start_import_session", {"file_name": "customers.csv", "columns": list(MAPPING), "row_count": 1}
+        """A mapped session whose file stayed in the chat. Only sessions started before #34405
+        are: start_import_session now asks for such a file to be uploaded first. Made as it made
+        them."""
+        from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import (
+            engine_write,
         )
-        session = started["result"]["session_id"]
-        self._run("set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"})
-        return session
+
+        doc = frappe.get_doc(
+            {
+                "doctype": "FAC Import Session",
+                "user": frappe.session.user,
+                "file_name": "customers.csv",
+                "file_source": "Chat Attachment",
+                "sheets": frappe.as_json([{"name": None, "columns": list(MAPPING), "row_count": 1}]),
+                "status": "File Read",
+            }
+        )
+        doc.log_step("Read File", "Success", "Read 1 rows and 4 columns.", rows_ok=1)
+        engine_write(doc).insert()
+        mapped = self._run(
+            "set_column_mapping", {"session": doc.name, "mapping": MAPPING, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        return doc.name
 
     def _upload(self, rows):
         return frappe.get_doc(
@@ -1004,7 +1017,7 @@ class TestDryRunImport(BaseAssistantTest):
         result = self._check(session, file_id=file_doc.name)
 
         self.assertEqual(result["ready"], 1)
-        self.assertEqual(frappe.db.get_value("FAC Import Session", session, "source_file"), file_doc.name)
+        self.assertEqual(frappe.db.get_value("FAC Import Session", session, "original_file"), file_doc.name)
 
     def test_a_file_the_user_cannot_read_is_not_linked_by_its_id(self):
         user = self.make_throwaway_user("clerk", roles=("Sales Master Manager", "Desk User"))

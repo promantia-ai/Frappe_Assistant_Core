@@ -243,7 +243,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
 
     def test_a_link_with_a_file_is_refused(self):
         with _google() as get:
-            self._start_fails("only", google_sheets_url=LINK, file_name="customers.csv")
+            self._start_fails("only", google_sheets_url=LINK, file_id="8f3a2b1c9d")
             self._start_fails("only", google_sheets_url=LINK, file_url="/private/files/customers.csv")
 
         get.assert_not_called()

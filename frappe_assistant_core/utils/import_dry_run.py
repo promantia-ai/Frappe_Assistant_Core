@@ -47,11 +47,14 @@ from rq import Queue
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.utils.import_session import (
     FileProblem,
+    attach_session_copy,
+    discard_session_copy,
     import_target_problem,
     read_sheet_rows,
     read_spreadsheet,
     readable_session_file,
     row_limit_problem,
+    save_session_copy,
 )
 
 SESSION_DOCTYPE = "FAC Import Session"
@@ -176,15 +179,16 @@ def link_site_file(session, file_doc, sheet_url: Optional[str] = None) -> None:
     corrected one, as the failed-rows file came back (#33994), or a fresh copy of its Google
     Sheet (#34006): the same columns, perhaps with the ones that file added after them, which
     are not imported. ``file_doc`` is a File the user may read (find_site_file), or the copy
-    ``sheet_url`` was read into."""
+    ``sheet_url`` was read into. Like a new session, the session reads its own copy of it (#34405)."""
     from frappe_assistant_core.utils.import_failures import own_columns
 
     try:
-        read = read_spreadsheet(file_doc, session.sheet or None)
+        read = read_spreadsheet(file_doc, session.sheet or None, keep_rows=True)
     except FileProblem:
         # A corrected file saved from the CSV FACO gave has its own sheet name: its columns decide.
-        read = read_spreadsheet(file_doc)
-    expected = _session_columns(session)
+        read = read_spreadsheet(file_doc, keep_rows=True)
+    # Older sessions stored their headings as written; the copy's are unique (#34405).
+    expected = unique_headers(_session_columns(session))
     columns = read.chosen.columns
     if expected and own_columns(columns) != own_columns(expected):
         raise FileProblem(
@@ -208,7 +212,9 @@ def link_site_file(session, file_doc, sheet_url: Optional[str] = None) -> None:
     for link in session.data_imports:
         # A Data Import recorded before source_file was kept is of the file the session had.
         link.source_file = link.source_file or session.source_file
-    session.source_file = file_doc.name
+    copy = save_session_copy(file_doc.file_name, read.chosen)
+    session.source_file = copy.name
+    session.original_file = None if sheet_url else file_doc.name
     session.file_source = "Google Sheet" if sheet_url else "Site File"
     session.source_url = sheet_url
     session.sheet = read.chosen.name  # a workbook saved as CSV, say, has no sheet names
@@ -218,7 +224,12 @@ def link_site_file(session, file_doc, sheet_url: Optional[str] = None) -> None:
     else:
         linked = _("Linked {0} from this site for checking.").format(file_doc.file_name)
     session.log_step("Link File", "Success", linked)
-    session.save()
+    try:
+        session.save()
+    except Exception:
+        discard_session_copy(copy)  # the session kept its file
+        raise
+    attach_session_copy(copy, session.name)
 
 
 def row_count(session) -> int:

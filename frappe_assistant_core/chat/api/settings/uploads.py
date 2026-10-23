@@ -124,10 +124,23 @@ def _magic_bytes_match(content: bytes, claimed_mime: str) -> bool:
         return head.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
     # text/json/xml/csv/md — no signature, but a NUL in the first 8 KB means
     # binary. UTF-16 text (e.g. Excel's "Unicode Text" export) is full of NULs,
-    # so a UTF-16 BOM lets it through.
+    # so after a UTF-16 BOM the first 8 KB must read as UTF-16 text instead (#34404).
     if content.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return True
+        return _reads_as_utf16_text(content[:8192])
     return b"\x00" not in content[:8192]
+
+
+def _reads_as_utf16_text(head: bytes) -> bool:
+    """Whether ``head`` (BOM first) decodes as UTF-16 with no control character but tab and line ends.
+    The sample's cut may split a character in two at its end, so that last half is let go."""
+    even = head[: len(head) - len(head) % 2]
+    for sample in (even, even[:-2]):
+        try:
+            text = sample.decode("utf-16")
+        except UnicodeDecodeError:
+            continue
+        return not any(ord(c) < 32 and c not in "\t\r\n" for c in text)
+    return False
 
 
 def _sanitize_upload_filename(original_filename: str) -> str:
