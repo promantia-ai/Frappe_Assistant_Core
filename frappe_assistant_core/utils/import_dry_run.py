@@ -102,6 +102,7 @@ CAUSE_REJECTED = "Rejected by ERPNext"
 CAUSE_NO_MATCH = "No match"
 CAUSE_MANY_MATCHES = "More than one match"
 CAUSE_SAME_RECORD = "Same record twice"
+CAUSE_FETCHED = "Comes from a linked record"  # a fetch_from field: saving copies it back
 
 
 class DryRunProblem(Exception):
@@ -541,7 +542,7 @@ class _Checker:
         self.title_df = _title_field(session, header, self.key_df)
         self.seen_titles: Dict[str, int] = {}
         self.shared_rows: List[int] = []
-        self.groups:Dict[Tuple, Dict[str, Any]] = {}
+        self.groups: Dict[Tuple, Dict[str, Any]] = {}
         self.rows: List[Dict[str, Any]] = []
         self.matches = matches  # None unless updating on match fields: row → matching records
         self.seen_records: Dict[str, int] = {}
@@ -577,6 +578,7 @@ class _Checker:
             # Checked beside the row's other problems too: a duplicate under a row with a typo would
             # otherwise show only once the typo is fixed, a second round of questions.
             problems += self._duplicate_problems(payload)
+            problems += self._fetched_problems(payload)
         record, changed = self._record(payload), []
         if not problems and record:
             from frappe_assistant_core.utils import import_update
@@ -891,6 +893,48 @@ class _Checker:
             message = _("A {0} with {1} '{2}' already exists.").format(_(self.doctype), label, value)
             return [((CAUSE_ALREADY_EXISTS, self.key_df.fieldname), {**info, "message": message})]
         return []
+
+    def _fetched_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
+        """An update can't change a field Frappe fetches from a linked record (``fetch_from``, not
+        ``fetch_if_empty``) while the record has that link set: every save copies the linked
+        record's value back, and Data Import would still report the row a success."""
+        record = self._record(payload) if self.matches is not None else None
+        if not record:
+            return []
+        from frappe_assistant_core.utils import import_update
+
+        meta = frappe.get_meta(self.doctype)
+        problems = []
+        for field, value in payload.doc.items():
+            df = meta.get_field(field)
+            if not df or not df.fetch_from or df.fetch_if_empty or "." not in df.fetch_from:
+                continue
+            if not cstr(value).strip():  # a blank cell is no change
+                continue
+            link_field = df.fetch_from.split(".")[0]
+            link_df = meta.get_field(link_field)
+            linked = frappe.db.get_value(self.doctype, record, link_field)
+            if not link_df or not linked:
+                continue
+            if import_update._same(df, frappe.db.get_value(self.doctype, record, field), value):
+                continue
+            message = _(
+                "{0} on {1} {2} comes from its {3} {4}, so an import can't change it here. Change it on the {5}."
+            ).format(
+                _(df.label),
+                _(self.doctype),
+                record,
+                _(link_df.label),
+                linked,
+                _(link_df.options or link_df.label),
+            )
+            problems.append(
+                (
+                    (CAUSE_FETCHED, field),
+                    {"cause": CAUSE_FETCHED, "field": field, "label": _(df.label), "message": message},
+                )
+            )
+        return problems
 
     def _note_shared_title(self, payload) -> None:
         """Remember a row whose title repeats an earlier row's or a record in ERPNext. Two records
