@@ -452,7 +452,7 @@ class TestTheRowLimit(GuardrailCase):
         self.assertFalse(reply["success"], reply)
         self.assertIn("Split it", json.dumps(reply))
         after = self._doc(session)
-        self.assertEqual((after.source_file, len(after.steps)), (file_doc.name, steps))
+        self.assertEqual((after.original_file, len(after.steps)), (file_doc.name, steps))
 
     def test_the_patch_sets_the_default_on_an_existing_site(self):
         from frappe_assistant_core.patches.v3_1 import set_max_import_rows
@@ -484,11 +484,13 @@ class TestTheLogRecordsTheFile(GuardrailCase):
         self.assertTrue(all(s.file for s in steps), by_step)
 
     def test_a_chat_file_records_its_name(self):
-        reply = self._run(
-            "start_import_session",
-            {"file_name": "in-chat.csv", "columns": list(run_tests.MAPPING), "row_count": 2},
-        )
-        self.assertEqual(self._doc(reply["result"]["session_id"]).steps[0].file, "in-chat.csv")
+        # Sessions started before #34405 kept only the name of a file that stayed in the chat.
+        doc = frappe.new_doc("FAC Import Session")
+        doc.update({"file_name": "in-chat.csv", "file_source": "Chat Attachment"})
+
+        doc.log_step("Read File", "Success", "Read 2 rows and 3 columns.")
+
+        self.assertEqual(doc.steps[0].file, "in-chat.csv")
 
 
 class TestRefusedBeforeAnyWork(GuardrailCase):

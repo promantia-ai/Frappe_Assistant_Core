@@ -65,7 +65,7 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 }
 ```
 
-- **Rows** are numbered as in the spreadsheet: row 1 is the header, so the first data row is row 2.
+- **Rows** are numbered as in the spreadsheet: row 1 is the header, so the first data row is row 2. When the headings were below a title row (`header_row` from `start_import_session`), rows count from the heading row.
 - **`cause`** is one of: `Missing link`, `Not an allowed option`, `Wrong date format`, `Invalid value`, `Duplicate in the file`, `Already in ERPNext`, `Rejected by ERPNext` (the DocType's own rules; `error` is the exception type).
 - **`previous`** appears on a second check: how many rows failed last time, and how many of those now pass.
 - **`status`** becomes `Ready to Import` when nothing fails, else `Dry Run Failed`. Then `message` also says the file is ready, with the final count.

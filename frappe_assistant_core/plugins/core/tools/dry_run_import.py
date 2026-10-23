@@ -168,7 +168,7 @@ class DryRunImport(BaseTool):
                 frappe.log_error(title=_("Failed Rows File Error"), message=frappe.get_traceback())
                 return {"success": False, "error": str(e), "session": session_name}
 
-        copy = None  # a Google Sheet's fresh copy, deleted unless the session takes it
+        copy = None  # a Google Sheet's fresh download, deleted once read
         try:
             if dry_run.is_running(session):
                 if fixes:
@@ -193,8 +193,8 @@ class DryRunImport(BaseTool):
                     )
                 dry_run.check_status(session)  # a session that can't be checked keeps its file
                 before = session.source_file
+                # The session reads its own copy of it now (#34405): a Google Sheet's download goes.
                 dry_run.link_site_file(session, new_file, sheet_url or None)
-                copy = None  # the session's file now
                 if before and not _same_content(before, session.source_file):
                     notice = import_fixes.forget_left_out(session)
             if fixes and session.status not in import_failures.AFTER_CHECK:
@@ -261,8 +261,11 @@ class DryRunImport(BaseTool):
 
 
 def _is_sessions_file(session, file_doc) -> bool:
-    """Whether ``file_doc`` holds the same bytes as the session's file."""
-    return bool(session.source_file) and _same_content(session.source_file, file_doc.name)
+    """Whether ``file_doc`` holds the same bytes as the session's file: its own copy, or the file
+    the user gave, which the copy was read from (#34405)."""
+    return any(
+        name and _same_content(name, file_doc.name) for name in (session.source_file, session.original_file)
+    )
 
 
 def _same_content(file_a: str, file_b: str) -> bool:

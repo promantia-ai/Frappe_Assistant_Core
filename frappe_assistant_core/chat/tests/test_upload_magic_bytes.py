@@ -90,6 +90,12 @@ class TestTextMagicBytes(unittest.TestCase):
             with self.subTest(codec=codec):
                 self.assertTrue(_magic_bytes_match(bom + CSV.encode(codec), "text/csv"))
 
+    def test_rejects_binary_behind_a_utf16_bom(self):
+        # A byte-order mark alone isn't text: what follows it must read as UTF-16 text (#34404).
+        for bom in (b"\xff\xfe", b"\xfe\xff"):
+            with self.subTest(bom=bom):
+                self.assertFalse(_magic_bytes_match(bom + EXE, "text/csv"))
+
 
 class TestSpreadsheetUpload(BaseAssistantTest):
     def _upload(self, content: bytes, file_name: str, content_type: str) -> dict:

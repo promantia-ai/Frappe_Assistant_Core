@@ -148,7 +148,8 @@ check listed, created with `create_document`, `documents` and `import_session`.
 
 ## Files the tools can take
 
-`.csv`, `.xlsx` or `.xls`, with the column headers in row 1 and **one kind of record per file**. A
+`.csv`, `.xlsx` or `.xls`, with a row of column headings (a title row above them is fine) and
+**one kind of record per file**. A
 workbook with several sheets is one session per sheet.
 
 - **A Google Sheets link**: pass it to `start_import_session` as `google_sheets_url`; one tab per

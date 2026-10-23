@@ -380,7 +380,7 @@ class TestImportFailures(ImportRunCase):
             (result["status"], result["ready"], result["imported"]), ("Ready to Import", 2, 0), result
         )
         doc = self._doc(session)
-        self.assertEqual(doc.source_file, corrected.name)
+        self.assertEqual(doc.original_file, corrected.name)  # read into the session's copy (#34405)
         mapping = frappe.parse_json(doc.template_options)["column_to_field_map"]
         self.assertEqual((mapping["3"], mapping["4"]), ("Don't Import", "Don't Import"))  # the added columns
 
@@ -394,9 +394,9 @@ class TestImportFailures(ImportRunCase):
         self.assertEqual([d.purpose for d in doc.data_imports], ["Import", "Import"])
         self.assertEqual(
             [d.source_file for d in doc.data_imports],
-            [first_file := doc.data_imports[0].source_file, corrected.name],
+            [first_file := doc.data_imports[0].source_file, doc.source_file],
         )
-        self.assertNotEqual(first_file, corrected.name)
+        self.assertNotEqual(first_file, doc.source_file)
         self.assertEqual(response["result"]["created_in_all"], 4)
         self.assertEqual(doc.status, "Completed")
 

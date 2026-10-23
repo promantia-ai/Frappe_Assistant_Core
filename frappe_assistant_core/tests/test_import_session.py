@@ -4,7 +4,7 @@ start_import_session tool.
 
 A session is the server-side record of one file moving through a data migration:
 its details, the mapping, the fixes, the validation results and a log of every
-step. The file itself stays where the user attached it; no copy is saved.
+step. The sheet is read once into a private copy the session owns (#34405).
 """
 
 import datetime
@@ -112,14 +112,14 @@ class TestImportSession(BaseAssistantTest):
         self.assertEqual(len(result["sample_rows"]), 10)
         self.assertEqual(result["sample_rows"][0], ["Customer 1", "Retail", "India"])
         doc = frappe.get_doc("FAC Import Session", result["session_id"])
-        self.assertEqual(doc.source_file, file_doc.name)
+        self.assertEqual(doc.original_file, file_doc.name)
         self.assertEqual(doc.user, self.user)
         self.assertEqual(doc.status, "File Read")
 
     def test_session_records_the_file_name_and_when_it_started(self):
         before = frappe.utils.now_datetime().replace(microsecond=0)
 
-        result = self._start(file_name="customers.csv", columns=["Name"], row_count=3)
+        result = self._start(file_id=self._upload("customers.csv", CSV_CONTENT).name)
 
         doc = frappe.get_doc("FAC Import Session", result["session_id"])
         self.assertEqual(doc.file_name, "customers.csv")
@@ -207,17 +207,16 @@ class TestImportSession(BaseAssistantTest):
 
         self.assertEqual(result["sample_rows"][0], ["2026-04-01", "12"])
 
-    # -- no copy of the file is kept ------------------------------------------------------
+    # -- the session's own copy of the sheet (#34405) ------------------------------------------
 
-    def test_a_site_file_is_read_but_no_copy_is_saved(self):
+    def test_a_site_file_is_read_into_one_private_copy_for_the_session(self):
         file_doc = self._upload("customers.csv", CSV_CONTENT)
 
         session_id = self._start(file_url=file_doc.file_url)["session_id"]
 
-        self.assertEqual(self._new_files(), {file_doc.name})
         doc = frappe.get_doc("FAC Import Session", session_id)
-        self.assertEqual(doc.source_file, file_doc.name)
-        self.assertEqual(doc.file_source, "Site File")
+        self.assertEqual(self._new_files(), {file_doc.name, doc.source_file})
+        self.assertEqual((doc.original_file, doc.file_source), (file_doc.name, "Site File"))
 
     def test_no_row_of_the_file_is_stored_on_the_session(self):
         # The session is the audit record; the rows stay in the file. Samples go to the
@@ -236,56 +235,21 @@ class TestImportSession(BaseAssistantTest):
 
     # -- a file that stays in the chat (Claude, ChatGPT) -----------------------------------
 
-    def test_details_of_a_chat_attachment_are_recorded_without_a_file(self):
-        # Claude or ChatGPT reads the attachment itself and passes only its details.
-        result = self._start(
-            file_name="customers.xlsx",
-            sheet="Customers",
-            columns=["Customer Name", "Customer Group"],
+    def test_a_file_only_in_the_chat_is_refused_until_it_is_uploaded(self):
+        # Its rows would reach the session only through the model reading them all (#34405).
+        response = self._start_fails(
+            "upload",
+            file_name="customers.csv",
+            columns=["Name"],
             row_count=15,
+            sample_rows=[["Grant Plastics"]],
         )
 
-        self.assertEqual(self._new_files(), set())
-        doc = frappe.get_doc("FAC Import Session", result["session_id"])
-        self.assertEqual(doc.file_source, "Chat Attachment")
-        self.assertFalse(doc.source_file)
-        self.assertEqual((doc.file_name, doc.sheet), ("customers.xlsx", "Customers"))
-        self.assertEqual(
-            frappe.parse_json(doc.sheets),
-            [{"name": "Customers", "columns": ["Customer Name", "Customer Group"], "row_count": 15}],
-        )
-        self.assertEqual([(s.step, s.outcome) for s in doc.steps], [("Read File", "Success")])
-        self.assertIn("15 rows", doc.steps[0].message)
-
-    def test_a_chat_attachment_needs_its_columns_and_row_count(self):
-        self._start_fails("columns", file_name="customers.xlsx", row_count=15)
-        self._start_fails("row_count", file_name="customers.xlsx", columns=["Name"])
-
+        self.assertNotIn("Grant Plastics", frappe.as_json(response))
         self.assertEqual(self._new_sessions(), 0)
 
-    def test_rows_sent_from_the_chat_are_not_stored(self):
-        # An assistant may still send rows; they are neither stored nor echoed back.
-        result = self._start(
-            file_name="customers.csv", columns=["Name"], row_count=15, sample_rows=[["Grant Plastics"]]
-        )
-
-        stored = frappe.db.get_value("FAC Import Session", result["session_id"], "sheets")
-        self.assertNotIn("Grant Plastics", stored)
-        self.assertNotIn("Grant Plastics", frappe.as_json(result))
-
-    def test_chat_attachment_target_permission_is_checked_first(self):
-        self._start_fails(
-            "permission to create Currency",
-            file_name="currencies.csv",
-            columns=["Currency Name"],
-            row_count=1,
-            target_doctype="Currency",
-        )
-
-        self.assertEqual(self._new_sessions(), 0)
-
-    def test_neither_a_file_url_nor_a_file_name_is_refused(self):
-        self._start_fails("file_name")
+    def test_neither_a_file_id_nor_a_link_is_refused(self):
+        self._start_fails("file_id")
 
     # -- criterion 4: permission on the target doctype, before any work -------------------
 
@@ -343,7 +307,7 @@ class TestImportSession(BaseAssistantTest):
 
         self.assertEqual((result["file_name"], result["row_count"]), ("customers.csv", 25))
         self.assertEqual(
-            frappe.db.get_value("FAC Import Session", result["session_id"], "source_file"), file_doc.name
+            frappe.db.get_value("FAC Import Session", result["session_id"], "original_file"), file_doc.name
         )
 
     def test_another_users_private_file_cannot_be_read_by_its_id(self):

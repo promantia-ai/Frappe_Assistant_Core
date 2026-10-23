@@ -39,6 +39,9 @@ from frappe_assistant_core.utils.import_session import (
     _as_text,
     _describe_read_error,
     _iter_sheets,
+    csv_delimiter,
+    decode_csv,
+    file_bytes,
 )
 
 PARSERS = (
@@ -498,22 +501,15 @@ def _content(file_doc) -> bytes:
         raise FileProblem(_("Only .csv, .xlsx or .xls files can be imported."))
     if (file_doc.file_size or 0) > MAX_FILE_SIZE:
         raise FileProblem(_("The file is larger than 50 MB."))
-    content = file_doc.get_content()
-    return content.encode("utf-8") if isinstance(content, str) else content
+    return file_bytes(file_doc)
 
 
 def _csv_rows(content: bytes) -> Iterator[List[str]]:
     """A CSV's rows with cells as written, one at a time. Frappe's reader strips every cell, which
-    loses the leading spaces that mark groups by indent. QuickBooks Desktop writes cp1252."""
-    try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        text = content.decode("cp1252", errors="replace")
-    try:
-        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
-    except csv.Error:
-        dialect = csv.excel
-    return (list(row) for row in csv.reader(io.StringIO(text), dialect))
+    loses the leading spaces that mark groups by indent. QuickBooks Desktop writes cp1252, Excel's
+    "Unicode Text" UTF-16 (#34404)."""
+    text = decode_csv(content, fallbacks=("cp1252",))
+    return (list(row) for row in csv.reader(io.StringIO(text), delimiter=csv_delimiter(text)))
 
 
 def _sheet_rows(file_doc) -> Iterator[Tuple[Optional[str], Iterator[List[str]]]]:

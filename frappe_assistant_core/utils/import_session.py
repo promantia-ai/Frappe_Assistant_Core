@@ -12,11 +12,17 @@ may import into a target DocType, and reading a spreadsheet.
 
 Cells are read as text, the way Data Import will see them. The assistant gets the
 headers, row counts and a few sample rows; the session stores only the headers and
-row counts. No row of the file is saved.
+row counts. The sheet it works on is read once into a private CSV the session owns, and
+every later step reads that copy (#34405).
 """
 
+import codecs
+import csv
 import datetime
+import inspect
 import io
+import itertools
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -35,6 +41,9 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # same ceiling as chat uploads
 # A Google Sheet's download: seconds to connect and between two pieces, and in all.
 DOWNLOAD_TIMEOUT = (10, 30)
 DOWNLOAD_SECONDS = 120
+HEADER_SEARCH_ROWS = 20  # how far down a sheet its headings are looked for (#34403)
+FIRST_ROWS_SHOWN = 5  # a sheet's top rows, shown when its headings can't be found for sure
+DELIMITERS = (",", ";", "\t", "|")  # a CSV's, in the order a tie goes
 
 
 @dataclass
@@ -45,6 +54,10 @@ class SheetSummary:
     columns: List[str] = field(default_factory=list)
     row_count: int = 0
     sample_rows: List[List[str]] = field(default_factory=list)
+    header_row: int = 1  # the sheet's row holding the headings, counted from 1 (#34403)
+    header_sure: bool = True  # False when rows above the headings hold several values too
+    first_rows: List[List[str]] = field(default_factory=list)  # the top rows, when not on row 1
+    rows: Optional[List[List[str]]] = None  # the headings and every row under them, when kept
 
     def as_dict(self) -> Dict[str, Any]:
         """What the session stores: no sample rows, so no data from the file."""
@@ -207,10 +220,14 @@ def readable_session_file(session):
     raise FileProblem(_("File not found, or you don't have access to it."))
 
 
-def read_spreadsheet(file_doc, sheet: Optional[str] = None) -> SpreadsheetRead:
+def read_spreadsheet(
+    file_doc, sheet: Optional[str] = None, header_row: Optional[int] = None, keep_rows: bool = False
+) -> SpreadsheetRead:
     """Summarise every sheet of ``file_doc`` and choose the one to work on.
 
-    The chosen sheet is ``sheet`` when given, else the first sheet with rows.
+    The chosen sheet is ``sheet`` when given, else the first sheet with rows. Its headings are on
+    ``header_row`` (counted from 1) when given, else found below any title row (#34403). With
+    ``keep_rows``, the chosen sheet keeps its rows, for the session's own copy.
     """
     extension = (file_doc.get_extension()[1] or "").lstrip(".").lower()
     if extension not in SUPPORTED_EXTENSIONS:
@@ -219,17 +236,23 @@ def read_spreadsheet(file_doc, sheet: Optional[str] = None) -> SpreadsheetRead:
         raise FileProblem(_("The file is larger than 50 MB."))
 
     try:
-        content = file_doc.get_content()
-        if isinstance(content, str):
-            content = content.encode("utf-8")
-        # Sheets stream past, so a large workbook is never held in memory as rows.
-        sheets = [_summarise(name, rows) for name, rows in _iter_sheets(content, extension)]
+        content = file_bytes(file_doc)
+        # Sheets stream past, so a large workbook is never held in memory as rows: only the
+        # sheet the session may work on is kept.
+        sheets: List[SheetSummary] = []
+        for name, rows in _iter_sheets(content, extension):
+            found = any(s.columns and s.row_count for s in sheets)
+            mine = extension == "csv" or (name == sheet if sheet else not found)
+            sheets.append(_summarise(name, rows, header_row if mine else None, keep_rows and mine))
         chosen = _choose(sheets, sheet if extension != "csv" else None)
     except FileProblem:
         raise
     except Exception as e:
         raise FileProblem(_("Could not read the file: {0}").format(_describe_read_error(e)))
 
+    for summary in sheets:
+        if summary is not chosen:
+            summary.rows = None
     return SpreadsheetRead(sheets=sheets, chosen=chosen)
 
 
@@ -243,9 +266,7 @@ def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
     if extension not in SUPPORTED_EXTENSIONS:
         raise FileProblem(_("Only .csv, .xlsx or .xls files can be imported."))
     try:
-        content = file_doc.get_content()
-        if isinstance(content, str):
-            content = content.encode("utf-8")
+        content = file_bytes(file_doc)
         names = []
         for name, rows in _iter_sheets(content, extension):
             names.append(name)
@@ -260,6 +281,78 @@ def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
             sheet, ", ".join(str(name) for name in names)
         )
     )
+
+
+def file_bytes(file_doc) -> bytes:
+    """The file as it is stored. Frappe's get_content decodes text itself: v15 as UTF-8 only,
+    v16 trying windows-1250 too, which reads UTF-16 as garbage (#34404)."""
+    if "encodings" in inspect.signature(file_doc.get_content).parameters:
+        content = file_doc.get_content(encodings=())  # Frappe 16: no decoding
+    else:
+        content = file_doc.get_content()  # Frappe 15: bytes, unless they are UTF-8
+    return content.encode("utf-8") if isinstance(content, str) else content
+
+
+def decode_csv(content: bytes, fallbacks: Tuple[str, ...] = ("windows-1250", "windows-1252")) -> str:
+    """A CSV's text (#34404). A byte-order mark names UTF-16, as Excel's "Unicode Text" writes
+    it, or UTF-8; else UTF-8, then each fallback in turn, the last of which never fails."""
+    if content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return content.decode("utf-16")
+    for encoding in ("utf-8-sig", *fallbacks[:-1]):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode(fallbacks[-1], errors="replace")
+
+
+def csv_delimiter(text: str) -> str:
+    """The CSV's delimiter: a comma, a semicolon (Excel in much of Europe), a tab or a pipe (#34404).
+
+    The one that splits the most of the first rows into the same number of columns, more than
+    one. csv.Sniffer gives up on a title row above the table, which has no delimiter at all.
+    """
+    sample = text[:65536].splitlines()[:50]
+    best, best_rows = ",", 0
+    for delimiter in DELIMITERS:
+        counts = [len(row) for row in csv.reader(sample, delimiter=delimiter) if any(c.strip() for c in row)]
+        if not counts:
+            continue
+        width = max(set(counts), key=lambda n: (counts.count(n), n))
+        if width > 1 and counts.count(width) > best_rows:
+            best, best_rows = delimiter, counts.count(width)
+    return best
+
+
+def save_session_copy(file_name: str, chosen: SheetSummary):
+    """The sheet a session works on, as a private CSV of its own (#34405): its headings found and
+    made unique, its text decoded, written once. Every later step reads this copy, so the file the
+    user gave may go (chat retention deletes a chat's attachments) while the session carries on."""
+    buffer = io.StringIO()
+    csv.writer(buffer, lineterminator="\n").writerows(chosen.rows or [chosen.columns])
+    return frappe.get_doc(
+        {
+            "doctype": "File",
+            # never the name of a file the session writes itself, which is replaced by name:
+            # a corrected failed-rows file, uploaded again, is called the same as the next one
+            "file_name": f"{os.path.splitext(file_name or '')[0] or 'import'} - session copy.csv",
+            "content": buffer.getvalue().encode("utf-8"),
+            "is_private": 1,
+        }
+    ).insert()
+
+
+def attach_session_copy(copy, session_name: str) -> None:
+    """Attach the session's own copy to it, so it lives and goes with the session."""
+    frappe.db.set_value(
+        "File", copy.name, {"attached_to_doctype": "FAC Import Session", "attached_to_name": session_name}
+    )
+
+
+def discard_session_copy(copy) -> None:
+    """Delete a session copy no session took. The disk file stays while another File shares it."""
+    if copy:
+        frappe.delete_doc("File", copy.name, force=True, ignore_permissions=True)
 
 
 def _all_text_rows(rows: Iterable) -> List[List[str]]:
@@ -287,7 +380,7 @@ def _choose(sheets: List[SheetSummary], sheet: Optional[str]) -> SheetSummary:
     for summary in sheets:
         if summary.columns and summary.row_count:
             return summary
-    raise FileProblem(_("The file has no rows to import. Row 1 must hold the column headers."))
+    raise FileProblem(_("The file has no rows to import."))
 
 
 def _describe_read_error(e: Exception) -> str:
@@ -301,9 +394,7 @@ def _describe_read_error(e: Exception) -> str:
 def _iter_sheets(content: bytes, extension: str) -> Iterator[Tuple[Optional[str], Iterable]]:
     """Yield (sheet name, rows) pairs. Rows hold raw cell values."""
     if extension == "csv":
-        from frappe.utils.csvutils import read_csv_content
-
-        yield None, read_csv_content(content)
+        yield None, _csv_cells(content)
     elif extension == "xlsx":
         from openpyxl import load_workbook
 
@@ -319,6 +410,13 @@ def _iter_sheets(content: bytes, extension: str) -> Iterator[Tuple[Optional[str]
         book = xlrd.open_workbook(file_contents=content)
         for xls_sheet in book.sheets():
             yield xls_sheet.name, (_xls_row(book, xls_sheet, i) for i in range(xls_sheet.nrows))
+
+
+def _csv_cells(content: bytes) -> Iterator[List[str]]:
+    """A CSV's rows, decoded and split on its own delimiter, cells trimmed as Frappe trims them."""
+    text = decode_csv(content)
+    for row in csv.reader(io.StringIO(text, newline=""), delimiter=csv_delimiter(text)):
+        yield [cell.strip() for cell in row]
 
 
 def _xls_row(book, xls_sheet, index: int) -> list:
@@ -337,37 +435,82 @@ def _xls_row(book, xls_sheet, index: int) -> list:
     return values
 
 
-def _text_rows(rows: Iterable) -> Iterator[List[str]]:
-    """The header, then every non-blank data row, as text cut to the header's width.
+def _heading_index(top: List[List[str]]) -> Tuple[int, bool]:
+    """Where a sheet's headings are among its top rows (0-based), and whether that is sure (#34403).
 
-    Trailing empty header cells are formatting, not columns.
+    Exports from Tally, Busy or Zoho put a title (the company, the report) above them. The
+    headings are the first row filling more than half the table's width, taken both as most rows'
+    width and as the widest row's. When the two disagree (a few "Period: ..." rows above a short
+    table, say), or rows above the guess hold several values, it isn't sure: the user is asked.
     """
+    filled = [sum(1 for cell in row if cell.strip()) for row in top]
+    counts = [n for n in filled if n]
+    if not counts:
+        return 0, True
+    most = max(set(counts), key=lambda n: (counts.count(n), n))
+    by_most, by_widest = (next(i for i, n in enumerate(filled) if n * 2 > w) for w in (most, max(counts)))
+    return by_widest, by_most == by_widest and all(n <= 1 for n in filled[:by_widest])
+
+
+def _summarise(
+    name: Optional[str], rows: Iterable, header_row: Optional[int] = None, keep: bool = False
+) -> SheetSummary:
+    """One sheet: its headings (on ``header_row``, else found), then every non-blank data row
+    counted, as text cut to the headings' width. Trailing empty heading cells are formatting, not
+    columns. With ``keep``, the headings and every row under them are kept, blank rows in place."""
+    from frappe_assistant_core.utils.import_dry_run import unique_headers
+
+    rows = iter(rows)
+    top = [
+        [_as_text(v) for v in raw] for raw in itertools.islice(rows, max(HEADER_SEARCH_ROWS, header_row or 0))
+    ]
+    if header_row:
+        index, sure = header_row - 1, True
+        if not any(any(cell.strip() for cell in row) for row in top):
+            index = 0  # an empty sheet, before the one with rows
+        elif index >= len(top) or not any(cell.strip() for cell in top[index]):
+            raise FileProblem(
+                _("Row {0} is blank: give the row that holds the column headings.").format(header_row)
+            )
+    else:
+        index, sure = _heading_index(top)
+    summary = SheetSummary(name=name, header_row=index + 1, header_sure=sure)
+    if index or not sure:
+        summary.first_rows = [_trimmed(row) for row in top[: max(FIRST_ROWS_SHOWN, index + 2)]]
+    kept: Optional[List[List[str]]] = [] if keep else None
+
     width = None
-    for raw in rows:
-        values = [_as_text(v) for v in raw]
+    for values in itertools.chain(top[index:], ([_as_text(v) for v in raw] for raw in rows)):
         if width is None:
             width = max((i + 1 for i, v in enumerate(values) if v), default=0)
-            yield values[:width]
-            continue
-        if not any(values):
+            summary.columns = [str(title) for title in unique_headers(values[:width])]
+            if kept is not None:
+                kept.append(summary.columns)
             continue
         row = values[:width]
-        yield row + [""] * (width - len(row))
-
-
-def _summarise(name: Optional[str], rows: Iterable) -> SheetSummary:
-    summary = SheetSummary(name=name)
-    for index, row in enumerate(_text_rows(rows)):
-        if index == 0:
-            summary.columns = row
+        row += [""] * (width - len(row))
+        if kept is not None:
+            kept.append(row)
+        if not any(values):
             continue
         summary.row_count += 1
         if len(summary.sample_rows) < SAMPLE_SIZE:
             summary.sample_rows.append(row)
+
     if not summary.columns:
         summary.row_count = 0
         summary.sample_rows = []
+    if kept is not None:
+        while len(kept) > 1 and not any(kept[-1]):
+            kept.pop()  # formatted but empty rows at the end of a sheet
+        summary.rows = kept
     return summary
+
+
+def _trimmed(row: List[str]) -> List[str]:
+    """A row without its trailing empty cells."""
+    end = max((i + 1 for i, v in enumerate(row) if v.strip()), default=0)
+    return row[:end]
 
 
 def _as_text(value: Any) -> str:
@@ -396,14 +539,18 @@ def holding_session(file_name: str) -> Optional[str]:
     """The import session that holds File ``file_name``, or None (#34003). The import tools read
     that file, showing the model its headers, samples and summaries only, never all its rows.
     Frappe keeps identical bytes once, so a copy uploaded again (a new File with the same
-    file_url) is held too."""
+    file_url) is held too. Both are held: the file the user gave, and the session's own copy of
+    it (#34405)."""
     file_url = frappe.db.get_value("File", file_name, "file_url")
     copies = frappe.get_all("File", filters={"file_url": file_url}, pluck="name") if file_url else []
-    return frappe.db.get_value(
-        "FAC Import Session",
-        {"source_file": ["in", list({file_name, *copies})], "status": ["!=", "Cancelled"]},
-        "name",
-    )
+    names = list({file_name, *copies})
+    for fieldname in ("source_file", "original_file"):
+        held = frappe.db.get_value(
+            "FAC Import Session", {fieldname: ["in", names], "status": ["!=", "Cancelled"]}, "name"
+        )
+        if held:
+            return held
+    return None
 
 
 def max_import_rows() -> int:

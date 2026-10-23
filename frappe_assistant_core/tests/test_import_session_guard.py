@@ -155,6 +155,7 @@ class TestWritesToAnExistingSession(SessionGuardCase):
             "file_name": "forged.csv",
             "started_on": "2020-01-01 00:00:00",
             "source_file": other_file,
+            "original_file": other_file,
             "file_source": "Google Sheet",
             "source_url": "https://example.com/forged.csv",
             "sheet": "Other",

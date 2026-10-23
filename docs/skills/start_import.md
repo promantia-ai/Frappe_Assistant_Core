@@ -63,7 +63,7 @@ The approval card shows `doctype`, `rows` and `import_type`, so the user sees wh
 
 When the session has more than one Data Import (rows tried again, or a corrected file), the reply also has `runs` (each Data Import with its `created` and `failed`) and `created_in_all`, and `message` ends "In all, 248 records imported over 2 Data Imports."
 
-Row numbers are the user's own spreadsheet rows (row 1 is the header).
+Row numbers are the user's own spreadsheet rows (row 1 is the header; when the headings were below a title row, rows count from the heading row).
 
 ## When it stops
 
