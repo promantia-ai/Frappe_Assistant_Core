@@ -16,7 +16,8 @@ Pass exactly what the last check reported, so the approval card shows it: `sessi
 
 - `documents`: the Stock Reconciliations made.
 - `warehouses`: per warehouse, the file's quantity and value next to ERPNext's (from the stock ledger) and the
-  difference. `differences` lists the warehouses that don't match. Show this table.
+  difference. The file's value is the file's own, so what rounding the rate changed shows as a difference.
+  `differences` lists the warehouses that don't match. Show this table.
 - `pending`: documents ERPNext is still submitting in the background (more than 100 rows). Call again later
   with the same values: nothing is created twice. A document is `pending` while its submit waits in the
   queue or runs; it fails only when ERPNext says the submit failed, or after two hours out of the queue.

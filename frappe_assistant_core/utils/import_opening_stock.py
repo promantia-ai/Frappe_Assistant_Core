@@ -318,8 +318,9 @@ CAUSE_SAME_ITEM = "Same item and warehouse"
 CAUSE_HAS_STOCK = "Already has stock"
 CAUSE_ROUNDED_RATE = "Value changed by rounding"
 # ERPNext keeps a valuation rate to its field's precision, so a row is posted as qty x the rounded
-# rate. Up to this far from the file's value is rounding; further, the row needs a decision.
-ROUNDING_TOLERANCE = 1
+# rate. Up to this many of the currency's smallest unit (1.00 at 2 decimals) from the file's value
+# is rounding; further, the row needs a decision (#34435).
+ROUNDING_UNITS = 100
 NEW_CAUSES = (
     CAUSE_TOTALS_ROW,
     CAUSE_NOT_STOCK,
@@ -359,6 +360,7 @@ class Ready:
     serial_no: str = ""
     expiry_date: str = ""
     after_file: str = ""  # in a migration plan: the earlier file that brings its item
+    file_value: Optional[float] = None  # the file's own value, before the rate was rounded (#34435)
 
 
 def check_can_run(session) -> None:
@@ -565,13 +567,14 @@ def _line_problem(
     if rate and amount:
         # The Value is what the books hold: a Rate beside it is often rounded for show (Tally's).
         rate = amount / qty
+    file_value = 0.0
     if rate:
         # What ERPNext will post: the totals, the approval card and the document use it.
         precision = _rate_precision()
         kept = flt(rate, precision)
         file_value = amount or qty * rate
         posted = qty * kept
-        if abs(posted - file_value) > ROUNDING_TOLERANCE:
+        if abs(posted - file_value) > rounding_allowed(_currency_precision()):
             return _problem(
                 CAUSE_ROUNDED_RATE,
                 "valuation_rate",
@@ -614,6 +617,7 @@ def _line_problem(
         "\n".join(serials),
         cells.get("expiry_date", ""),
         item.brought_by or "",
+        file_value,
     )
 
 
@@ -662,16 +666,30 @@ def _rate_precision() -> int:
     return cint(frappe.new_doc("Stock Reconciliation Item").precision("valuation_rate"))
 
 
+def _currency_precision() -> int:
+    """The decimals of an opening stock row's amount: the company currency's."""
+    return cint(frappe.get_precision(ITEM_TABLE, "amount") or 2)
+
+
+def rounding_allowed(precision: int) -> float:
+    """How far a row's posted value may be from the file's, as rounding, at ``precision``."""
+    return flt(ROUNDING_UNITS * 10**-precision, precision)
+
+
 def _totals(ready: List[Ready]) -> Dict[str, Any]:
+    """Per warehouse: the quantity and the value ERPNext will post, and the file's own value
+    (``file_value``), which the report compares the ledger with."""
     warehouses: Dict[str, Dict[str, Any]] = {}
     for line in ready:
-        entry = warehouses.setdefault(line.warehouse, {"qty": 0, "value": 0, "rows": 0})
+        entry = warehouses.setdefault(line.warehouse, {"qty": 0, "value": 0, "file_value": 0, "rows": 0})
         entry["qty"] += line.qty
         entry["value"] += line.qty * line.valuation_rate
+        entry["file_value"] += line.qty * line.valuation_rate if line.file_value is None else line.file_value
         entry["rows"] += 1
-    precision = frappe.get_precision(ITEM_TABLE, "amount") or 2
+    precision = _currency_precision()
     for entry in warehouses.values():
         entry["qty"], entry["value"] = flt(entry["qty"], 6), flt(entry["value"], precision)
+        entry["file_value"] = flt(entry["file_value"], precision)
     return {
         "total_qty": flt(sum(e["qty"] for e in warehouses.values()), 6),
         "total_value": flt(sum(e["value"] for e in warehouses.values()), precision),
@@ -787,7 +805,8 @@ ISOLATE_LIMIT = 20  # rows a chunk's check singles out before it fails the rest 
 
 
 def _draft_error(stock: Dict[str, Any], lines: List[Ready]) -> Optional[Exception]:
-    """None when ERPNext accepts ``lines`` as a draft Opening Stock, else why not. Rolled back."""
+    """None when ERPNext accepts ``lines`` as an Opening Stock, inserted and submitted, else why
+    not: some refusals come only on submit (#34435). Rolled back."""
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
     frappe.clear_messages()
@@ -795,7 +814,12 @@ def _draft_error(stock: Dict[str, Any], lines: List[Ready]) -> Optional[Exceptio
         frappe.db.savepoint(SAVEPOINT)
         try:
             _ensure_batches(lines)
-            build_document(stock, lines).insert()
+            doc = build_document(stock, lines).insert()
+            # submit() hands more than 100 rows to a background queue; _submit() is the same
+            # submission in this request, as the opening balances check does.
+            doc._submit()
+            if doc.docstatus != 1:
+                frappe.throw(_("The Stock Reconciliation was not submitted."))
             return None
         except Exception as e:
             return e
@@ -805,7 +829,7 @@ def _draft_error(stock: Dict[str, Any], lines: List[Ready]) -> Optional[Exceptio
 
 
 def _erpnext_check(session, ready: List[Ready], checker: _StockChecker) -> List[Ready]:
-    """Insert each chunk as a draft inside a savepoint, rolled back: ERPNext's own validation.
+    """Insert and submit each chunk inside a savepoint, rolled back: ERPNext's own validation.
     When it refuses a chunk and names a row ("Row #3"), that row fails alone, under its place in
     the sheet, and the rest are tried again. Otherwise the whole chunk fails together."""
     from frappe_assistant_core.utils import import_dry_run as dry_run
@@ -1231,22 +1255,23 @@ def report(session) -> Dict[str, Any]:
         for warehouse, held in (created.get(name) or {}).items():
             entry = file_side.setdefault(warehouse, {"qty": 0, "value": 0, "rows": 0})
             entry["qty"] += held["qty"]
-            entry["value"] += held["value"]
+            # the file's own value: what rounding the rate changed shows as a difference (#34435)
+            entry["value"] += held.get("file_value", held["value"])
             entry["rows"] += held["rows"]
 
     ledger = ledger_by_warehouse(submitted)
-    precision = frappe.get_precision(ITEM_TABLE, "valuation_rate") or 2
+    precision = _currency_precision()
     warehouses, differences = {}, []
     for warehouse, expected in file_side.items():
         got = ledger.get(warehouse) or frappe._dict(qty=0, value=0)
         entry = {
             "file_qty": expected["qty"],
-            "file_value": expected["value"],
+            "file_value": flt(expected["value"], precision),
             "erpnext_qty": flt(got.qty, 6),
-            "erpnext_value": flt(got.value, 2),
+            "erpnext_value": flt(got.value, precision),
         }
         entry["difference_qty"] = flt(entry["erpnext_qty"] - entry["file_qty"], 6)
-        entry["difference_value"] = flt(entry["erpnext_value"] - entry["file_value"], 2)
+        entry["difference_value"] = flt(entry["erpnext_value"] - entry["file_value"], precision)
         tolerance = 0.5 * 10 ** (-precision) * max(expected.get("rows") or 1, 1)
         if entry["difference_qty"] or abs(entry["difference_value"]) > tolerance:
             differences.append(warehouse)

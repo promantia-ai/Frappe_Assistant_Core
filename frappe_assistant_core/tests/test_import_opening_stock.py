@@ -287,7 +287,9 @@ class TestOpeningStockCheck(OpeningStockCase):
         self.assertEqual((result["ready"], result["failed"], result["status"]), (2, 0, "Ready to Import"))
         totals = result["opening_stock"]
         self.assertEqual((totals["total_qty"], totals["total_value"]), (7, 65))
-        self.assertEqual(totals["warehouses"][self.stores], {"qty": 5, "value": 50, "rows": 1})
+        self.assertEqual(
+            totals["warehouses"][self.stores], {"qty": 5, "value": 50, "file_value": 50, "rows": 1}
+        )
         self.assertEqual(frappe.db.count("Stock Reconciliation"), before)  # nothing written
 
     def test_each_problem_is_its_own_group(self):
@@ -358,6 +360,20 @@ class TestOpeningStockCheck(OpeningStockCase):
         self.assertEqual((result["ready"], result["failed"]), (0, 1), result)
         group = self._causes(result)[opening_stock.CAUSE_ROUNDED_RATE]
         self.assertIn("12300", group["message"].replace(",", ""))
+
+    def test_the_rounding_allowed_follows_the_currencys_decimals(self):
+        # A hundred of the currency's smallest unit: 1.00 at 2 decimals, 0.100 at 3 (#34435).
+        from unittest.mock import patch
+
+        with patch.object(opening_stock, "_currency_precision", return_value=3):
+            # 100 / 3 at 2 rate decimals is posted as 99.99: 0.01 off, within 0.1
+            self.assertEqual(self._valued(3, 100)["ready"], 1)
+        # 100.40 / 100 kept as 1.00 posts 100.00: 0.40 off, rounding at 2 decimals, not at 3
+        self.assertEqual(self._valued(100, 100.4)["ready"], 1)
+        with patch.object(opening_stock, "_currency_precision", return_value=3):
+            result = self._valued(100, 100.4)
+        self.assertIn(opening_stock.CAUSE_ROUNDED_RATE, self._causes(result))
+        self.assertEqual((opening_stock.rounding_allowed(2), opening_stock.rounding_allowed(3)), (1, 0.1))
 
     def _rate_and_value(self, qty, rate, value):
         # The Tally preset maps both: its Rate is shown rounded, its Value is qty x the exact rate
@@ -485,6 +501,37 @@ class TestErpnextValidation(OpeningStockCase):
         rejected = next(g for g in result["groups"] if g["cause"] == "Rejected by ERPNext")
         self.assertEqual(rejected["count"], 1)
         self.assertEqual(result["status"], "Dry Run Failed")
+
+    def test_a_refusal_erpnext_gives_only_on_submit_fails_the_check(self):
+        # #34435: ERPNext checks some things only when the document is submitted.
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._setup(session)
+
+        with patch.object(
+            StockReconciliation,
+            "on_submit",
+            side_effect=frappe.ValidationError("Refused on submit for a test"),
+        ):
+            result = self._check(session)
+
+        rejected = next(g for g in result["groups"] if g["cause"] == "Rejected by ERPNext")
+        self.assertIn("Refused on submit", rejected["message"])
+        self.assertEqual(result["status"], "Dry Run Failed")
+
+    def test_the_submit_the_check_tries_leaves_nothing_behind(self):
+        session = self._session([f"{self.item},{self.stores},5,10"])
+        self._setup(session)
+        tables = ("Stock Reconciliation", "Stock Ledger Entry", "GL Entry", "Repost Item Valuation", "Bin")
+        before = {dt: frappe.db.count(dt) for dt in tables}
+
+        result = self._check(session)
+
+        self.assertEqual(result["ready"], 1, result)
+        self.assertEqual({dt: frappe.db.count(dt) for dt in tables}, before)
 
     def test_a_large_sheet_is_split_into_documents_of_a_thousand_rows(self):
         lines = [opening_stock.Ready(n, f"X{n:05}", "W", 1, 1) for n in range(2, 2502)]
@@ -789,12 +836,30 @@ class TestOpeningStockReport(OpeningStockCase):
         self.assertEqual(report["status"], "Completed")
         self.assertIn("matches", report["message"])
 
+    def test_the_report_shows_what_rounding_the_rate_changed(self):
+        # 100 / 3 is posted as 3 x 33.33: the books hold 99.99, the file said 100 (#34435).
+        session = self._session([f"{self.item},{self.stores},3,100"], header="Item,Warehouse,Qty,Value")
+        self._setup(
+            session,
+            columns={"Item": "item_code", "Warehouse": "warehouse", "Qty": "qty", "Value": "amount"},
+        )
+        result = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual(result["ready"], 1, result)
+        self.assertTrue(self._run("import_opening_stock", self._card(session, result))["success"])
+
+        report = opening_stock.report(self._doc(session))
+
+        stores = report["warehouses"][self.stores]
+        self.assertEqual((stores["file_value"], stores["erpnext_value"]), (100, 99.99))
+        self.assertEqual(stores["difference_value"], -0.01)
+        self.assertEqual(report["differences"], [self.stores])
+
     def test_a_difference_is_listed(self):
         session, _report = self._imported([f"{self.item},{self.stores},5,10"])
         doc = self._doc(session)
         options = frappe.parse_json(doc.template_options)
         held = options["opening_stock"]["created"][doc.created_records[0].record_name]
-        held[self.stores]["value"] = 60  # the file said 60
+        held[self.stores]["file_value"] = 60  # the file said 60
         doc.db_set("template_options", frappe.as_json(options))
 
         report = opening_stock.report(self._doc(session))
