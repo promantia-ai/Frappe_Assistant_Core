@@ -300,3 +300,85 @@ class TestImportToolsAreListed(ImportToolTestCase):
         for name in ("get_import_schema", "set_column_mapping"):
             with self.subTest(tool=name):
                 self.assertEqual(detect_tool_category(self.registry.get_tool(name)), "read_only")
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's DocTypes")
+class TestWhatAnInsertStillNeeds(ImportToolTestCase):
+    """#34408: what the mapping says an insert still needs, and child fields it can't set."""
+
+    @staticmethod
+    def _required_when(result):
+        return {r["field"]: r for r in result.get("required_when") or []}
+
+    def test_a_prompt_named_doctype_needs_its_id_on_insert(self):
+        # Issue Type is named by what the user types: Data Import refuses a row without it.
+        session = self._session("Issue Type Name,Notes\nBilling,x\n", "issue_types.csv")
+
+        without = self._map(
+            session, {"Issue Type Name": "Don't Import", "Notes": "description"}, doctype="Issue Type"
+        )
+        mapped = self._map(session, {"Issue Type Name": "name", "Notes": "description"}, doctype="Issue Type")
+
+        self.assertIn("name", [m["field"] for m in without["missing_required"]])
+        self.assertNotIn("name", [m["field"] for m in mapped["missing_required"]])
+
+    def test_a_field_required_when_the_rows_meet_its_condition_is_named(self):
+        # Bank Account's account and company are required when it is a company account.
+        session = self._session("Account Name,Bank,Company Account\nMain,HDFC,1\nPetty,HDFC,0\n", "banks.csv")
+
+        result = self._map(
+            session,
+            {"Account Name": "account_name", "Bank": "bank", "Company Account": "is_company_account"},
+            doctype="Bank Account",
+        )
+
+        when = self._required_when(result)
+        self.assertEqual((when["account"]["when"], when["account"]["sample_rows"]), ("is_company_account", 1))
+        self.assertIn("company", when)
+        self.assertIn("may be required", result["summary"])
+
+    def test_a_condition_no_sample_row_meets_is_not_named(self):
+        session = self._session("Account Name,Bank,Company Account\nMain,HDFC,0\nPetty,HDFC,0\n", "banks.csv")
+
+        result = self._map(
+            session,
+            {"Account Name": "account_name", "Bank": "bank", "Company Account": "is_company_account"},
+            doctype="Bank Account",
+        )
+
+        self.assertNotIn("account", self._required_when(result))
+
+    def test_a_condition_written_for_the_browser_is_named_as_possible(self):
+        # Email Template's response: "eval:!doc.use_html" is JavaScript, not worked out here.
+        session = self._session("Name,Subject,Use HTML\nWelcome,Hi,0\n", "templates.csv")
+
+        result = self._map(
+            session, {"Name": "name", "Subject": "subject", "Use HTML": "use_html"}, doctype="Email Template"
+        )
+
+        response = self._required_when(result)["response"]
+        self.assertEqual((response["when"], response["sample_rows"]), ("eval:!doc.use_html", None))
+
+    def test_the_schema_says_when_a_field_is_required(self):
+        fields = {
+            f["fieldname"]: f
+            for f in self._run("get_import_schema", {"doctype": "Bank Account"})["result"]["fields"]
+        }
+
+        self.assertEqual(fields["account"]["required_when"], "is_company_account")
+
+    def test_a_hidden_or_read_only_child_field_is_named_as_such(self):
+        # Customer's Sales Team: Contact No is hidden, Allocated Amount read-only.
+        session = self._session("Customer Name,Contact No,Allocated\nAcme,98450,10\n", "customers.csv")
+
+        for column, field, why in (
+            ("Contact No", "sales_team.contact_no", "hidden"),
+            ("Allocated", "sales_team.allocated_amount", "read-only"),
+        ):
+            with self.subTest(field=field):
+                result = self._map(
+                    session, {"Customer Name": "customer_name", column: field}, doctype="Customer"
+                )
+                self.assertTrue(
+                    any(why in p and "Sales Team" in p for p in result.get("problems") or []), result
+                )
