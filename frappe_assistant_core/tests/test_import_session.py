@@ -400,15 +400,18 @@ class TestImportSession(BaseAssistantTest):
         by_url = self._start(file_url=upload["file_url"])
         by_id = self._start(file_id=upload["name"], file_url=upload["file_url"])
 
+        copies = set()
         for result in (by_url, by_id):
             self.assertEqual((result["file_name"], result["row_count"]), ("customers.csv", 26))
             self.assertEqual(result["columns"], ["Customer Name", "Customer Group", "Territory"])
             doc = frappe.get_doc("FAC Import Session", result["session_id"])
             self.assertEqual(
-                (doc.source_file, doc.user, doc.status), (upload["name"], self.user, "File Read")
+                (doc.original_file, doc.user, doc.status), (upload["name"], self.user, "File Read")
             )
-        # The session reads the chat's own file: no copy is made.
-        self.assertEqual(self._new_files(), {upload["name"]})
+            copies.add(doc.source_file)
+        # Each session reads its own copy of the chat's file (#34405): chat retention may delete it.
+        self.assertEqual(self._new_files(), {upload["name"], *copies})
+        self.assertNotIn(upload["name"], copies)
 
     def test_another_users_chat_file_cannot_open_a_session(self):
         frappe.set_user(self.make_desk_user("other"))
