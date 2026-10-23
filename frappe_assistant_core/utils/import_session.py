@@ -535,18 +535,41 @@ def _as_text(value: Any) -> str:
 DEFAULT_MAX_IMPORT_ROWS = 50000
 
 
-def holding_session(file_name: str) -> Optional[str]:
-    """The import session that holds File ``file_name``, or None (#34003). The import tools read
-    that file, showing the model its headers, samples and summaries only, never all its rows.
-    Frappe keeps identical bytes once, so a copy uploaded again (a new File with the same
-    file_url) is held too. Both are held: the file the user gave, and the session's own copy of
-    it (#34405)."""
+#: A session holds its file while it is being worked on (#34437): a check, an import, a retry of
+#: failed rows, an undo. Once it is Completed, Failed, Undone or Cancelled, the file is free again.
+HOLDING_STATUSES = (
+    "File Read",
+    "Mapped",
+    "Dry Run Failed",
+    "Ready to Import",
+    "Importing",
+    "Partially Completed",
+    "Undoing",
+    "Partially Undone",
+)
+
+
+def holding_session(file_name: str, user: Optional[str] = None) -> Optional[str]:
+    """The open import session of ``user`` (default: the current one) that holds File
+    ``file_name``, or None (#34003, #34437). The import tools read that file, showing the model its
+    headers, samples and summaries only, never all its rows. Both are held: the file the user gave,
+    and the session's own copy of it (#34405).
+
+    Frappe keeps identical bytes once, so the same file uploaded again by the same user (a new File
+    with the same file_url) is held too. Another user's upload of the same bytes is theirs to read,
+    and their reply never names this user's session."""
     file_url = frappe.db.get_value("File", file_name, "file_url")
     copies = frappe.get_all("File", filters={"file_url": file_url}, pluck="name") if file_url else []
     names = list({file_name, *copies})
     for fieldname in ("source_file", "original_file"):
         held = frappe.db.get_value(
-            "FAC Import Session", {fieldname: ["in", names], "status": ["!=", "Cancelled"]}, "name"
+            "FAC Import Session",
+            {
+                fieldname: ["in", names],
+                "user": user or frappe.session.user,
+                "status": ["in", HOLDING_STATUSES],
+            },
+            "name",
         )
         if held:
             return held
