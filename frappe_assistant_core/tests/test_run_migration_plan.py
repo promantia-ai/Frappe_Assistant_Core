@@ -407,9 +407,13 @@ class TestAPlanWithALargeFile(ImportRunCase):
         content = ("Name\n" + "".join(f"{code}\n" for code in self.codes)).encode()
         started = self._run("start_import_session", {"file_url": self._file("brands.csv", content).file_url})
         session = started["result"]["session_id"]
-        mapped = self._run("set_column_mapping", {"session": session, "mapping": {"Name": "brand"}, "doctype": "Brand"})
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": {"Name": "brand"}, "doctype": "Brand"}
+        )
         self.assertTrue(mapped["success"], mapped)
-        plan = self._run("plan_migration", {"sessions": [session], "failure_rule": "leave_out"})["result"]["plan"]
+        plan = self._run("plan_migration", {"sessions": [session], "failure_rule": "leave_out"})["result"][
+            "plan"
+        ]
         return plan, session
 
     def _ready(self, plan, rows):
@@ -421,7 +425,9 @@ class TestAPlanWithALargeFile(ImportRunCase):
             import_dry_run.run_job(session.name, user)
 
         answers = [{"id": "plan:failure_rule", "rule": "leave_out"}]
-        with self._each_row_commits(), patch.object(import_dry_run, "enqueue", side_effect=check_now) as queued:
+        with self._each_row_commits(), patch.object(
+            import_dry_run, "enqueue", side_effect=check_now
+        ) as queued:
             ready = self._run("plan_questions", {"plan": plan, "answers": answers})["result"]
             if rows > import_dry_run.BACKGROUND_ROWS:
                 self.assertFalse(ready["ready"], ready)
