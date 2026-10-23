@@ -215,6 +215,32 @@ class TestFileContentIsFenced(GuardrailCase):
         outside = {k: v for k, v in payload.items() if k not in ("problems", "columns", "error")}
         self.assertNotIn(INJECTION, json.dumps(outside))
 
+    def test_an_argument_error_is_fac_s_own_message_and_comes_back_unfenced(self):
+        # "Invalid type for field session" says nothing the file said: fenced, it told the model
+        # to read its own validation message as file data (e2e finding, #34003).
+        file_doc = self._file("guard.csv", (f"{INJECTION},Customer Group\nAcme,All\n").encode())
+        session = self._run("start_import_session", {"file_id": file_doc.name})["result"]["session_id"]
+
+        for tool_name, arguments in (
+            ("set_column_mapping", {"session": 123, "mapping": {}}),
+            ("dry_run_import", {"session": 123}),
+            ("set_column_mapping", {"mapping": {}}),  # the required session is missing
+        ):
+            with self.subTest(tool_name=tool_name, arguments=arguments):
+                payload = self._mcp(tool_name, arguments)
+
+                self.assertFalse(payload["success"], payload)
+                self.assertNotIn(f"<{FENCE}>", payload["error"])
+                self.assertRegex(payload["error"], r"Invalid type for field session|Missing required field")
+
+        # what the file says stays fenced in the same tool
+        payload = self._mcp(
+            "set_column_mapping",
+            {"session": session, "mapping": {INJECTION: "no_such_field"}, "doctype": "Customer"},
+        )
+        self.assertFalse(payload["success"], payload)
+        self.assertFencedWherever(payload)
+
     def _checked(self, rows):
         session = self._run("start_import_session", {"file_id": self._csv(rows).name})["result"]["session_id"]
         self._run(
