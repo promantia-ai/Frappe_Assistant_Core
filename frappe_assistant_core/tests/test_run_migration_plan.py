@@ -87,6 +87,36 @@ class TestRunMigrationPlan(ImportRunCase):
             [frappe.db.get_value(SESSION, s, "status") for s in (groups, items)], ["Completed"] * 2
         )
 
+    def test_another_users_session_in_the_plan_is_never_imported(self):
+        plan, _groups, _items = self._ready_plan()
+        g3 = f"G3 {self.tag}"
+        theirs = self._mapped(
+            "their-groups.csv",
+            f"Name,Parent,Is Group\n{g3},All Item Groups,0\n".encode(),
+            "Item Group",
+            {"Name": "item_group_name", "Parent": "parent_item_group", "Is Group": "is_group"},
+        )
+        checked = self._run("dry_run_import", {"session": theirs})["result"]
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+        # Another user's session, put in this plan: inserts and saves refuse that (#34429), so a
+        # direct database write stands in for any way round them.
+        other = self.make_throwaway_user("other", roles=("Desk User",))
+        frappe.db.set_value(SESSION, theirs, {"user": other, "migration_plan": plan})
+        before = frappe.db.get_value(SESSION, theirs, ["status", "validated_fingerprint"], as_dict=True)
+
+        self.assertEqual(import_plan.card_figures(import_plan.get_plan(plan))["rows"], 4)  # 2 groups, 2 items
+        response = self._approve(plan)
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(import_plan.get_plan(plan).status, "Completed")
+        self.assertFalse(frappe.db.exists("Item Group", g3))
+        self.assertEqual(
+            frappe.db.get_value(SESSION, theirs, ["status", "validated_fingerprint"], as_dict=True), before
+        )
+        self.assertFalse(frappe.get_all("FAC Import Session Data Import", filters={"parent": theirs}))
+        self.assertFalse(frappe.get_all("FAC Import Session Record", filters={"parent": theirs}))
+        self.assertNotIn(theirs, frappe.as_json(import_plan.get_plan(plan).progress))
+
     def test_the_card_must_match_the_plan(self):
         plan, _groups, _items = self._ready_plan()
 

@@ -28,6 +28,7 @@ from frappe import _
 from frappe.core.doctype.data_import.importer import Importer
 from rq.timeouts import JobTimeoutException
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.utils import import_dry_run, import_failures, import_fixes, import_run
@@ -132,7 +133,9 @@ class ImportRunCase(BaseAssistantTest):
         return self._run("start_import", self._card(session, checked, **changes))
 
     def _doc(self, session):
-        return frappe.get_doc("FAC Import Session", session)
+        # The session as the import tools hold it (load_session): the engine's own copy, so a
+        # test can set up what an earlier step writes (#34400).
+        return engine_session(session)
 
     def _imported(self):
         return set(

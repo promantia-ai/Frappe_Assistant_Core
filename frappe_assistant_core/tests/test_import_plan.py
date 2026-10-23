@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import frappe
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import PLAN_FIELDS
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest, item_hsn_fields
 from frappe_assistant_core.utils import import_opening_stock, import_plan
@@ -198,6 +199,45 @@ class TestThePlanOnItsFirstSession(ImportPlanCase):
 
         self.assertEqual(frappe.db.get_value(SESSION, group, "plan_position"), 2)
         self.assertEqual(import_plan.get_plan(plan).failure_rule, "stop")
+
+    def test_the_owner_cannot_change_a_plan_field_on_save(self):
+        item, group = self._two()
+        plan = self._plan([item, group])
+        owner = self.make_throwaway_user("owner", roles=("Desk User",))
+        frappe.db.set_value(SESSION, group, "user", owner)  # the plan's file is its user's own
+        before = frappe.db.get_value(SESSION, group, PLAN_FIELDS, as_dict=True)
+        frappe.set_user(owner)
+        doc = frappe.get_doc(SESSION, group)
+        doc.migration_plan, doc.plan_position, doc.plan_reason = None, 9, "Mine now."
+
+        try:
+            doc.save()
+        except frappe.PermissionError:
+            pass
+
+        frappe.set_user("Administrator")
+        self.assertEqual(frappe.db.get_value(SESSION, group, PLAN_FIELDS, as_dict=True), before)
+        self.assertEqual(before.migration_plan, plan)
+
+    def test_children_leaves_out_another_users_session_in_the_plan(self):
+        item, group = self._two()
+        plan = self._plan([item, group])
+        ordered = [s.name for s in import_plan.children(import_plan.get_plan(plan))]
+        theirs = self._session(
+            "more-groups.csv", ["Name"], [[f"H {self.tag}"]], "Item Group", {"Name": "item_group_name"}
+        )
+        # Another user's session can't be inserted or saved into a plan (#34429): a direct database
+        # write stands in for any way round that.
+        frappe.db.set_value(
+            SESSION,
+            theirs,
+            {"user": self.make_throwaway_user("other", roles=("Desk User",)), "migration_plan": plan},
+        )
+
+        children = [s.name for s in import_plan.children(import_plan.get_plan(plan))]
+
+        self.assertEqual(ordered, [group, item])
+        self.assertEqual(children, ordered)
 
     def test_a_stop_asked_while_the_run_saves_the_plan_stays_asked(self):
         item, group = self._two()

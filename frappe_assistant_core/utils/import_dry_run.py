@@ -43,6 +43,7 @@ from frappe.core.doctype.data_import.importer import (
 )
 from frappe.utils import cstr, now_datetime, strip_html
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.utils.import_session import (
     FileProblem,
     import_target_problem,
@@ -283,7 +284,7 @@ def run_job(session_name: str, user: str) -> None:
         frappe.db.commit()
     except Exception as e:
         frappe.db.rollback()
-        session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+        session = engine_session(session_name)
         session.progress = _progress("failed", 0, row_count(session))
         session.log_step("Dry Run", "Failed", _("The check stopped: {0}").format(_message_of(e)))
         session.save()
@@ -306,7 +307,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     from frappe_assistant_core.utils.import_failures import imported_rows
     from frappe_assistant_core.utils.import_fixes import apply_value_maps
 
-    session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    session = engine_session(session_name)
     file_doc = readable_session_file(session)
     sheet_rows = read_sheet_rows(file_doc, session.sheet or None)
     _real_size(len(sheet_rows) - 1, in_background=commit_progress)
@@ -1194,7 +1195,7 @@ def _checking() -> Dict[str, str]:
 
 
 def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) -> Dict[str, Any]:
-    session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    session = engine_session(session_name)
     counts = {"ready": 0, "failed": 0, "excluded": 0, "imported": 0, "unchanged": 0}
     for row in checker.rows:
         counts[row["status"]] += 1

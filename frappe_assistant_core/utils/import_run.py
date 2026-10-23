@@ -35,6 +35,7 @@ from frappe.utils import cstr, strip_html
 from frappe.utils.background_jobs import enqueue, is_job_enqueued
 from frappe.utils.scheduler import is_scheduler_inactive
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.utils import import_dry_run as dry_run
 from frappe_assistant_core.utils import import_failures, import_fixes, import_update
 from frappe_assistant_core.utils.import_session import (
@@ -381,7 +382,7 @@ def _next_level(session_name: str, data_import: str) -> bool:
     """Once a Data Import of the session ended: the rows whose parent rows it imported, in a new
     Data Import. When none is left, a ready row still not imported makes the import partial.
     Returns whether a next level started."""
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = engine_session(session_name)
     rows = _checked_rows(session)
     if session.status not in FINISHED_STATUS.values() or not any(row.get("after") for row in rows):
         return False
@@ -430,7 +431,7 @@ def _next_level(session_name: str, data_import: str) -> bool:
 def record_result(session_name: str, data_import: str) -> Dict[str, Any]:
     """Where the Data Import ended, recorded on the session: its status, the counts on its
     Data Import row, and the step log. Returns the result, as FACO reports it."""
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = engine_session(session_name)
     result = result_of(session, data_import)
     link = next((d for d in reversed(session.data_imports) if d.data_import == data_import), None)
     if link:
@@ -454,6 +455,9 @@ def record_result(session_name: str, data_import: str) -> Dict[str, Any]:
 def result_of(session, data_import: str) -> Dict[str, Any]:
     """The Data Import's result in the session's terms: created, failed and skipped counts, the
     failed rows by reason, the rows left out, and what FACO says."""
+    if not import_failures.own_import(session, data_import):
+        # Never another user's Data Import: its counts and failure messages aren't this user's.
+        raise frappe.PermissionError(_("Data Import {0} isn't this session's.").format(data_import))
     di = frappe.get_doc("Data Import", data_import)
     logs = frappe.get_all(
         "Data Import Log",

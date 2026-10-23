@@ -780,7 +780,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     own validation of the entry, the result stored the dry run's way, with the totals."""
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = dry_run.engine_session(session_name)
     balances = settings(session)
     file_doc = readable_session_file(session)
     lines = read_lines(session)

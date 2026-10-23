@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 import frappe
 from frappe import _
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_write
 from frappe_assistant_core.core.base_tool import BaseTool
 from frappe_assistant_core.utils.import_session import (
     FileProblem,
@@ -226,7 +227,7 @@ class StartImportSession(BaseTool):
             _("Read {0} rows and {1} columns{2}.").format(chosen.row_count, len(chosen.columns), where),
             rows_ok=chosen.row_count,
         )
-        session.insert()
+        engine_write(session).insert()  # the engine's own session (#34400)
         return session
 
 

@@ -211,7 +211,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     the ready rows, the result stored the dry run's way, with the totals."""
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = dry_run.engine_session(session_name)
     invoices = settings(session)
     file_doc = readable_session_file(session)
     checker = _InvoiceChecker(invoices["doctype"])
@@ -951,7 +951,7 @@ def create_job(session_name: str, user: str) -> None:
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the import
     try:
-        session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+        session = dry_run.engine_session(session_name)
         lines = ready_lines(session)
         # What the user approved is what the last check found: the same rows, and nothing the
         # check depends on changed since (the fingerprint leaves out the failures create() reset).
@@ -1012,7 +1012,7 @@ def _keep(session_name: str, created: Dict[str, Any], failed: Dict[str, Any], do
 def _import(session_name: str, lines: List[Ready], commit: bool) -> None:
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = dry_run.engine_session(session_name)
     invoices = settings(session)
     created, failed = dict(invoices.get("created") or {}), {}
     position, total = len(session.created_records), len(lines)
@@ -1046,7 +1046,7 @@ def _import(session_name: str, lines: List[Ready], commit: bool) -> None:
 def _finish(session_name: str, total: int, failed: Dict[str, Any]) -> None:
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = dry_run.engine_session(session_name)
     made = total - len(failed)
     if not failed:
         session.status = "Completed"
@@ -1069,7 +1069,7 @@ def _stopped(session_name: str, reason: str) -> None:
 
     if frappe.db.get_value(dry_run.SESSION_DOCTYPE, session_name, "status") != "Importing":
         return  # it finished (or was stopped already) in the meantime
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = dry_run.engine_session(session_name)
     session.status = "Partially Completed" if settings(session).get("created") else "Failed"
     last = frappe.parse_json(session.progress or "{}") or {}
     session.progress = _progress("stopped", last.get("done") or 0, last.get("total") or 0)

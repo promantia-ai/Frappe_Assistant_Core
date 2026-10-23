@@ -684,7 +684,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     the ready rows, the result stored the dry run's way, with the totals."""
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = dry_run.engine_session(session_name)
     file_doc = readable_session_file(session)
     checker = _StockChecker()
     ready = _check_lines(session, checker)
@@ -1060,7 +1060,7 @@ def create_job(session_name: str, user: str) -> None:
     from frappe_assistant_core.utils import import_fixes
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the import
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = dry_run.engine_session(session_name)
     lines = ready_lines(session)
     # What the user approved is what the last check found: the same rows, and nothing the
     # check depends on changed since.
@@ -1154,7 +1154,7 @@ def _stopped(session_name: str, reason: str) -> None:
     """A background import that stopped before its end: what it committed is in."""
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
-    session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
+    session = dry_run.engine_session(session_name)
     if session.status != "Importing":
         return
     session.status = "Partially Completed" if documents(session) else "Failed"

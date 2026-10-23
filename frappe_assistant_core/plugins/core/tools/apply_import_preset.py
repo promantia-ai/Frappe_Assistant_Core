@@ -24,6 +24,7 @@ from typing import Any, Dict, List
 import frappe
 from frappe import _
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_write
 from frappe_assistant_core.core.base_tool import BaseTool
 from frappe_assistant_core.utils import import_presets as presets
 from frappe_assistant_core.utils import import_tally_xml as tally_xml
@@ -496,7 +497,7 @@ class ApplyImportPreset(BaseTool):
             rows_ok=len(rows.rows),
         )
         session.log_step("Apply Preset", "Success", _dropped_text(cleaned.dropped))
-        session.insert()
+        engine_write(session).insert()  # the engine's own session (#34400)
         frappe.db.set_value(
             "File",
             cleaned_file.name,

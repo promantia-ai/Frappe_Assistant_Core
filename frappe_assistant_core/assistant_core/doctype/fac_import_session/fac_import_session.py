@@ -15,13 +15,17 @@ the mapping, the fixes and the validation results between messages. Its step
 log records what was done, by whom, and what failed.
 """
 
-from typing import Optional
+from typing import Any, List, Optional
 
 import frappe
+from frappe import _
+from frappe.model import no_value_fields, table_fields
 from frappe.model.document import Document
-from frappe.utils import now_datetime
+from frappe.utils import cint, flt, get_datetime, getdate, now_datetime
 
 from frappe_assistant_core.chat.utils.permissions import _doc_owner_or_admin, _user_or_admin
+
+SESSION_DOCTYPE = "FAC Import Session"
 
 #: The migration plan's fields (#34351): written only by import_plan, with db.set_value.
 PLAN_FIELDS = (
@@ -36,8 +40,62 @@ PLAN_FIELDS = (
     "plan_importing_now",
 )
 
+#: What a new session may be given by anyone: whose it is, and when it was made (its default).
+#: Every other field is the import engine's.
+NEW_SESSION_FIELDS = ("user", "started_on")
+
+
+def engine_write(doc):
+    """Mark ``doc`` as the import engine's own copy: its saves may change the session's fields.
+    The mark is a document flag, which no request body, frappe.client call or document tool
+    can set (Frappe drops a "flags" key from the values it is given)."""
+    doc.flags.fac_import_engine = True
+    return doc
+
+
+def engine_session(name: str):
+    """The session ``name``, loaded by the import engine for its own writes."""
+    return engine_write(frappe.get_doc(SESSION_DOCTYPE, name))
+
 
 class FACImportSession(Document):
+    def validate(self):
+        # Every field is the engine's state: the dry run's verdict, the mapping, the file, the
+        # Data Imports and the undo list (#34400). Only the engine writes them, for everyone
+        # (System Managers too): a session changed by hand would import what was never checked.
+        if self.flags.fac_import_engine:
+            return
+        changed = self._changed_by_hand()
+        if changed:
+            frappe.throw(
+                _("Only the import tools can change an import session: {0} can't be set by hand.").format(
+                    ", ".join(changed)
+                ),
+                frappe.PermissionError,
+            )
+
+    def _changed_by_hand(self) -> List[str]:
+        """The engine-owned fields this save would change. A new session may set only its user,
+        so it joins no plan and carries no verdict (#34429); the plan's fields of a saved one are
+        put back by before_save, so they are left to it."""
+        if self.is_new():
+            before, skip = frappe.new_doc(self.doctype), NEW_SESSION_FIELDS
+        else:
+            before, skip = self.get_doc_before_save() or frappe.get_doc(self.doctype, self.name), PLAN_FIELDS
+        changed = []
+        for df in self.meta.fields:
+            if df.fieldname in skip:
+                continue
+            if df.fieldtype in table_fields:  # a Table is in no_value_fields too
+                same = _rows(self, df) == _rows(before, df)
+            elif df.fieldtype in no_value_fields:
+                continue
+            else:
+                same = _comparable(df, self.get(df.fieldname)) == _comparable(df, before.get(df.fieldname))
+            if not same:
+                changed.append(df.fieldname)
+        return changed
+
     def before_save(self):
         # A plan's run saves a file's session it read before it moved the plan on: that copy must
         # not write the plan's old values back.
@@ -67,6 +125,36 @@ class FACImportSession(Document):
                 "message": message,
             },
         )
+
+
+def _comparable(df, value) -> Any:
+    """A field's value as the database keeps it: Desk sends dates and JSON as text, and blank
+    for nothing, so an untouched form compares equal."""
+    if df.fieldtype in ("Int", "Check"):
+        return cint(value)
+    if df.fieldtype in ("Float", "Currency", "Percent"):
+        return flt(value)
+    if value in (None, ""):
+        return None
+    if df.fieldtype == "Datetime":
+        return get_datetime(value)
+    if df.fieldtype == "Date":
+        return getdate(value)
+    if df.fieldtype == "JSON" and isinstance(value, str):
+        try:
+            return frappe.parse_json(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _rows(doc, table_df) -> List[tuple]:
+    """A child table's rows, in order, by their own fields' values."""
+    fields = [df for df in frappe.get_meta(table_df.options).fields if df.fieldtype not in no_value_fields]
+    return [
+        tuple(_comparable(df, row.get(df.fieldname)) for df in fields)
+        for row in doc.get(table_df.fieldname) or []
+    ]
 
 
 # Same rule as FAC Chat Message: a session is visible to its user and to System Managers.

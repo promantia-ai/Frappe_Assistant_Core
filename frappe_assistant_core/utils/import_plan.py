@@ -178,17 +178,21 @@ def load_plan(name: str):
 
 
 def children(plan) -> List[Any]:
-    """The plan's sessions in its order; one not ordered yet goes last, oldest first."""
+    """The plan's sessions in its order; one not ordered yet goes last, oldest first. Only its
+    user's: another user's session is never imported under this plan's approval (#34429)."""
     rows = frappe.get_all(
         SESSION_DOCTYPE,
-        filters={"migration_plan": plan.name},
+        filters={
+            "migration_plan": plan.name,
+            "user": frappe.db.get_value(SESSION_DOCTYPE, plan.name, "user"),
+        },
         fields=["name", "plan_position"],
         order_by="creation",
     )
     place = {row.name: row.plan_position for row in rows if row.plan_position}
     oldest = {row.name: i for i, row in enumerate(rows)}
     names = sorted(oldest, key=lambda name: place.get(name, len(place) + 1 + oldest[name]))
-    return [frappe.get_doc(SESSION_DOCTYPE, name) for name in names]
+    return [dry_run.engine_session(name) for name in names]
 
 
 def _set_order(ordered: List[Dict[str, Any]]) -> None:
@@ -281,7 +285,7 @@ def create_planned(plan) -> List[Dict[str, Any]]:
                         )
                     )
                 results.append(result)
-            import_fixes.link_created(frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name), results)
+            import_fixes.link_created(dry_run.engine_session(session_name), results)
             made += results
     except Exception:
         frappe.db.rollback(save_point=MASTERS_SAVEPOINT)

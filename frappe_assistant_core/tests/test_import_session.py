@@ -13,6 +13,7 @@ import io
 import frappe
 from openpyxl import Workbook
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
@@ -403,8 +404,9 @@ class TestImportSession(BaseAssistantTest):
         file_doc = self._upload("customers.csv", CSV_CONTENT)
         session_id = self._start(file_url=file_doc.file_url)["session_id"]
         # Production writes these through the mapping, rules and dry-run tools of
-        # #33989-#33991; set directly here to prove a later turn reads them back.
-        doc = frappe.get_doc("FAC Import Session", session_id)
+        # #33989-#33991; set directly here, as the engine's own copy, to prove a later turn reads
+        # them back.
+        doc = engine_session(session_id)
         doc.template_options = frappe.as_json({"column_to_field_map": {"0": "customer_name"}})
         doc.transformation_rules = frappe.as_json([{"type": "trim", "column": "*"}])
         doc.validation_summary = frappe.as_json({"ok": 20, "failed": 5})

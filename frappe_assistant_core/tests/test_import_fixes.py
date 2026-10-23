@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 import frappe
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.utils import import_dry_run, import_fixes
@@ -110,7 +111,9 @@ class TestImportFixes(BaseAssistantTest):
         return next(g for g in result["groups"] if g["cause"] == cause)
 
     def _doc(self, session):
-        return frappe.get_doc("FAC Import Session", session)
+        # The session as the import tools hold it (load_session): the engine's own copy, so a
+        # test can set up what an earlier step writes (#34400).
+        return engine_session(session)
 
     def test_fixes_wait_for_a_check_of_the_file_the_session_has_now(self):
         # A corrected file is linked and its check, queued for a large file, fails: the session

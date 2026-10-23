@@ -9,6 +9,7 @@ import unittest
 import frappe
 from frappe.utils import nowdate
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest, item_hsn_fields
 from frappe_assistant_core.utils import import_opening_stock as opening_stock
@@ -124,7 +125,9 @@ class OpeningStockCase(BaseAssistantTest):
         return self._run("set_opening_stock", arguments)
 
     def _doc(self, session):
-        return frappe.get_doc("FAC Import Session", session)
+        # The session as the import tools hold it (load_session): the engine's own copy, so a
+        # test can set up what an earlier step writes (#34400).
+        return engine_session(session)
 
     def _ready(self, lines):
         """A session whose sheet passed the check, with that check's reply."""

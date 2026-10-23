@@ -30,6 +30,7 @@ from pypika import Case
 from pypika import functions as fn
 from pypika.terms import Tuple as Row
 
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.utils.savepoint import open_savepoint, release_savepoint, rollback_to_savepoint
 
 # Accounts Frozen Till: on each Company in Frappe v16, in Accounts Settings in v15.
@@ -1172,7 +1173,7 @@ def undo_job(session_name: str, user: str, mode: str) -> None:
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
     frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the undo
-    session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    session = engine_session(session_name)
     if session.status != UNDOING:
         return  # set back meanwhile (report found no job), or already finished
     frappe.db.savepoint(JOB_SAVEPOINT)
@@ -1448,7 +1449,7 @@ def _restore(session, message: str) -> None:
 def _stopped(session_name: str, reason: str) -> None:
     """An undo that stopped before its end: what it committed stays removed, and undo can be run
     again for the rest."""
-    session = frappe.get_doc(SESSION_DOCTYPE, session_name)
+    session = engine_session(session_name)
     if session.status != UNDOING:
         return
     _restore(

@@ -283,10 +283,13 @@ class TestImportFailures(ImportRunCase):
         frappe.set_user(user)
         own = self._file("mine.csv", f"{','.join(MAPPING)}\nOwn {self.tag},{self.group},Company\n".encode())
         session = self._run("start_import_session", {"file_url": own.file_url})["result"]["session_id"]
-        # What a PUT on /api/resource can do: read-only fields are only read-only in the form.
-        doc = self._doc(session)
-        doc.update({"source_file": secret.name, "status": "Completed", "excluded_rows": "[2]"})
-        doc.save()
+        # What a PUT on /api/resource could do before #34400: a session forged then is still in the
+        # database, so a direct database write stands in for it.
+        frappe.db.set_value(
+            "FAC Import Session",
+            session,
+            {"source_file": secret.name, "status": "Completed", "excluded_rows": "[2]"},
+        )
 
         response = self._run("dry_run_import", {"session": session, "failed_rows_file": True})
 
@@ -302,9 +305,8 @@ class TestImportFailures(ImportRunCase):
         frappe.set_user(self.make_throwaway_user("clerk", roles=("Sales Master Manager", "Desk User")))
         own = self._file("mine.csv", f"{','.join(MAPPING)}\nOwn {self.tag},{self.group},Company\n".encode())
         session, _checked = self._ready_session(own)
-        doc = self._doc(session)
-        doc.source_file = secret.name  # over the REST API
-        doc.save()
+        # over the REST API before #34400: a session forged then is still in the database
+        frappe.db.set_value("FAC Import Session", session, "source_file", secret.name)
 
         check = self._run("dry_run_import", {"session": session})
 
@@ -317,9 +319,8 @@ class TestImportFailures(ImportRunCase):
         frappe.set_user(self.make_throwaway_user("clerk", roles=("Sales Master Manager", "Desk User")))
         own = self._file("mine.csv", f"{','.join(MAPPING)}\nOwn {self.tag},{self.group},Company\n".encode())
         session, _checked = self._ready_session(own)
-        doc = self._doc(session)
-        doc.source_file = secret.name  # over the REST API
-        doc.save()
+        # over the REST API before #34400: a session forged then is still in the database
+        frappe.db.set_value("FAC Import Session", session, "source_file", secret.name)
 
         with self.assertRaisesRegex(FileProblem, "don't have access"):
             import_fixes.checked_as_is(self._doc(session))
