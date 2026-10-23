@@ -43,7 +43,7 @@ When any file is opening stock, invoices or balances, ask now, before mapping, n
 
 ## Refusals
 
-- A session already in another plan, or one already importing, imported, undone or cancelled: nothing changes, `problems` says which.
+- A session already in another plan, or one already importing, imported or cancelled: nothing changes, `problems` says which.
 - A plan that is running or finished: its files can't change.
 
 ## Next

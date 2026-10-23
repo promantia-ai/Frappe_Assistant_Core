@@ -58,7 +58,7 @@ written. Child-table columns can't be updated from a file: map them to "Don't Im
 
 ## When the mapping can't change
 
-While the session's import is running (**Importing**) the mapping is kept: wait for the import to finish, or continue it with `start_import`. A session that was cancelled or undone (fully or partly) keeps its mapping too: start a new session for the file.
+While the session's import is running (**Importing**) the mapping is kept: wait for the import to finish, or continue it with `start_import`. A session that was cancelled keeps its mapping too: start a new session for the file.
 
 ## Best Practices
 

@@ -35,7 +35,7 @@ What the plan does for you:
   create, so an Items file isn't failed for Item Groups the Item Groups file brings. A link to a
   record a *later* file creates is reported as an order problem.
 - **Missing masters**: the create fix plans them; the plan creates them when it runs, before any
-  file, and each is undone with the session that needed it. Don't call `create_document` in a plan.
+  file, and each is listed on the session that needed it. Don't call `create_document` in a plan.
 - **The failure rule**: asked once. When a file comes up, it is checked again; rows that would
   fail then (their parent row failed in an earlier file, say) are left out with their reason
   (leave_out), or the plan stops before that file (stop).
@@ -115,8 +115,8 @@ the plan tools (`plan_migration`, `plan_questions`, `run_migration_plan`) and th
 `import_opening_invoices`, `import_opening_balances`).
 
 Never import the file's records another way: not with `create_document` or `update_document`, not
-one record at a time, and not as a `documents` list. That way skips the check, the muted emails and
-the undo, and it changes values the user never chose. The user decides what comes next: try again,
+one record at a time, and not as a `documents` list. That way skips the check and the muted emails,
+and it changes values the user never chose. The user decides what comes next: try again,
 correct the file, or ask their administrator. The one exception is step 5: the missing masters the
 check listed, created with `create_document`, `documents` and `import_session`.
 
@@ -167,16 +167,6 @@ Existing Records**. In step 2, `set_column_mapping` also takes the field(s) that
 record (its match key, for example the Tax ID). The dry run then shows what will change: show those
 samples (record, field, old value, new value) and the counts before asking to import. Never update
 records one by one with `update_document` instead.
-
-## Taking an import back
-
-When the user wants to undo an import, call `preview_import_undo` first and show what would be
-deleted and what blocks it. Only after the user confirms, call `undo_import` with the preview's
-figures. Deleted records can't be restored, so say so first. Never delete imported records one by
-one with `delete_document`. An update import can't be undone: the old values weren't kept.
-
-To take back a migration plan, undo its sessions the same way one at a time, the last file in the
-plan's order first (its records link to the earlier files' records).
 
 ## Off-topic questions during a migration
 

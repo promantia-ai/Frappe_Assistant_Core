@@ -46,8 +46,6 @@ IMPORT_TOOLS = (
     "import_opening_stock",
     "import_opening_invoices",
     "import_opening_balances",
-    "preview_import_undo",
-    "undo_import",
 )
 
 
@@ -542,8 +540,7 @@ class TestToolHints(GuardrailCase):
             "import_opening_invoices",
             "import_opening_balances",
         }
-        destructive = {"undo_import"}  # deletes records, as delete_document does
         for name in IMPORT_TOOLS:
             category = detect_tool_category(self.registry.get_tool(name))
-            expected = "privileged" if name in destructive else "write" if name in writes else "read_only"
+            expected = "write" if name in writes else "read_only"
             self.assertEqual(category, expected, name)
