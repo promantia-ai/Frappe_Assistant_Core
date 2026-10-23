@@ -239,7 +239,9 @@ Sales: the invoice number becomes the invoice name. Purchase: it becomes the sup
 For a session set up with `set_opening_balances`, the check first adds up the file's debits and
 credits. If they don't balance, nothing is ready: one group "Debits and credits don't balance" is
 reported with no fixes, because the file itself is wrong. Correct the file (or its balance column)
-and check again. The reply's `balance` has `debit`, `credit`, `difference` and `balanced`.
+and check again. Each row is rounded to the currency's decimals first, and then debits must equal
+credits exactly; only rows with more decimals than the currency allow half a unit of rounding each.
+The reply's `balance` has `debit`, `credit`, `difference` and `balanced`.
 
 The rows are then checked: an account not in the chart of accounts (`map` it to an existing
 account, or `leave_out`; accounts are not created), an account of another company, a group account
@@ -256,8 +258,9 @@ already made its entry.
 The reply's `opening_balances` has `cut_off`, `rows`, `lines` (the entry's lines), `total_debit`,
 `total_credit`, `covered` (a count of the Receivable, Payable and, with perpetual inventory, Stock rows, left to the other opening
 imports),
-`balancing` (the Temporary Opening line) and `profit_and_loss`. Pass `rows`, `total_debit` and
-`total_credit` to `import_opening_balances`.
+`balancing` (the Temporary Opening line) and `profit_and_loss`, and what the approval card shows:
+`balancing_amount`, `covered_debit`, `covered_credit`, `excluded_debit` and `excluded_credit`. Pass
+`rows`, `total_debit`, `total_credit` and those five to `import_opening_balances`.
 
 When an account is missing and the company has no transactions at all, `opening_balances` also
 carries `chart_hint`: if the chart of accounts should be replaced to match the old system, do it

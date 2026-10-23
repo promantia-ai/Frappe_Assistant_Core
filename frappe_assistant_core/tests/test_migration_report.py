@@ -376,6 +376,7 @@ class TestOpeningBalancesInTheReport(balances_tests.OpeningBalancesCase):
             "rows": result["ready"],
             "total_debit": result["opening_balances"]["total_debit"],
             "total_credit": result["opening_balances"]["total_credit"],
+            **balances_tests.card_amounts(result),
         }
         reply = self._run("import_opening_balances", card)
         for record in self._doc(session).created_records or []:

@@ -34,9 +34,10 @@ class ImportOpeningBalances(BaseTool):
             "has perpetual inventory on (opening stock posts them then); one balancing line to "
             "the Temporary Opening account keeps it balanced. Only after dry_run_import said the sheet "
             "is ready, and only when the user asks to import. Pass company, cut_off, rows (the check's "
-            "'ready'), total_debit and total_credit exactly as the last check reported them: the "
-            "approval card shows them, and they must match. Calling again never creates a second entry "
-            "and reports what the first made."
+            "'ready'), total_debit and total_credit exactly as the last check reported them, and its "
+            "balancing_amount, covered_debit, covered_credit, excluded_debit and excluded_credit "
+            "(0 may be left out): the approval card shows them, and they must match. Calling again "
+            "never creates a second entry and reports what the first made."
         )
         self.requires_permission = None  # checked on the session and Journal Entry
         # what the user's file says reaches the model fenced (#34003)
@@ -50,6 +51,15 @@ class ImportOpeningBalances(BaseTool):
                 "rows": {"type": "integer", "description": "The last check's 'ready'"},
                 "total_debit": {"type": "number", "description": "The file's total debit from the check"},
                 "total_credit": {"type": "number", "description": "The file's total credit from the check"},
+                "balancing_amount": {
+                    "type": "number",
+                    "description": "The check's balancing line to Temporary Opening: positive a debit, "
+                    "negative a credit",
+                },
+                "covered_debit": {"type": "number", "description": "Debits another import brings in"},
+                "covered_credit": {"type": "number", "description": "Credits another import brings in"},
+                "excluded_debit": {"type": "number", "description": "Debits of the rows left out"},
+                "excluded_credit": {"type": "number", "description": "Credits of the rows left out"},
             },
             "required": ["session", "company", "cut_off", "rows", "total_debit", "total_credit"],
         }
@@ -85,6 +95,7 @@ class ImportOpeningBalances(BaseTool):
                 arguments.get("rows"),
                 arguments.get("total_debit"),
                 arguments.get("total_credit"),
+                {key: arguments.get(key) for key in opening_balances.CARD_AMOUNTS},
             )
             opening_balances.create(session)
         except (opening_balances.OpeningBalancesProblem, FileProblem) as e:

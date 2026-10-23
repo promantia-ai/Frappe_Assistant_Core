@@ -586,9 +586,12 @@ def ready_lines(session) -> List[Ready]:
 
 
 def _file_totals(session, lines: Optional[List[opening_stock.Line]] = None) -> Tuple[float, float, int]:
-    """(debit, credit, rows) over every readable row, whatever happens to it later."""
+    """(debit, credit, finer) over every readable row, whatever happens to it later: each row
+    rounded to the currency precision first, as the entry posts it (#34433), and how many rows
+    had more decimals than that."""
+    precision = _precision()
     debit = credit = 0.0
-    rows = 0
+    finer = 0
     for line in read_lines(session) if lines is None else lines:
         if is_totals_row(line.cells):
             continue
@@ -596,8 +599,10 @@ def _file_totals(session, lines: Optional[List[opening_stock.Line]] = None) -> T
             row_debit, row_credit = balance_of(line.cells)
         except ValueError:
             continue
-        debit, credit, rows = debit + row_debit, credit + row_credit, rows + 1
-    return debit, credit, rows
+        rounded_debit, rounded_credit = flt(row_debit, precision), flt(row_credit, precision)
+        finer += rounded_debit != flt(row_debit) or rounded_credit != flt(row_credit)
+        debit, credit = flt(debit + rounded_debit, precision), flt(credit + rounded_credit, precision)
+    return debit, credit, finer
 
 
 def file_balance(session, lines: Optional[List[opening_stock.Line]] = None) -> Dict[str, float]:
@@ -613,9 +618,11 @@ def file_balance(session, lines: Optional[List[opening_stock.Line]] = None) -> D
 
 
 def is_balanced(session, lines: Optional[List[opening_stock.Line]] = None) -> bool:
-    """Half a unit of the currency's smallest digit per row is allowed for rounding."""
-    debit, credit, rows = _file_totals(session, lines)
-    return abs(debit - credit) <= 0.5 * 10 ** -_precision() * max(rows, 1)
+    """Debits equal credits, each row rounded to the currency precision. Only a row with more
+    decimals than that brings rounding: half a unit of the smallest digit each (#34433)."""
+    precision = _precision()
+    debit, credit, finer = _file_totals(session, lines)
+    return abs(flt(debit - credit, precision)) <= flt(0.5 * 10**-precision * finer, precision + 1)
 
 
 # -- the entry -------------------------------------------------------------------------------
@@ -678,6 +685,46 @@ def folded_accounts(balances: Dict[str, Any], ready: List[Ready]) -> Dict[str, f
         if not row.covered and row.report_type == "Profit and Loss":
             folded[row.account] = flt(folded.get(row.account, 0) + row.debit - row.credit, precision)
     return folded
+
+
+# What the approval card shows besides the file's totals, as the last check found it (#34433): the
+# balancing line to Temporary Opening (positive a debit, negative a credit), the rows another import
+# brings in (covered), and the rows the user left out. Each must match; one left out is 0.
+CARD_AMOUNTS = ("balancing_amount", "covered_debit", "covered_credit", "excluded_debit", "excluded_credit")
+
+
+def card_amounts(
+    session,
+    balances: Dict[str, Any],
+    ready: List[Ready],
+    lines: List[opening_stock.Line],
+    entry: List[Dict[str, Any]],
+) -> Dict[str, float]:
+    """CARD_AMOUNTS for the ready rows of ``lines`` and the ``entry`` lines made of them."""
+    from frappe_assistant_core.utils import import_dry_run as dry_run
+
+    precision = _precision()
+    line = balancing_line(balances, entry)
+    excluded_rows = dry_run._excluded_rows(session)
+    excluded = [
+        line_of for line_of in lines if line_of.row in excluded_rows and not is_totals_row(line_of.cells)
+    ]
+    excluded_debit = excluded_credit = 0.0
+    for left_out in excluded:
+        try:
+            debit, credit = balance_of(left_out.cells)
+        except ValueError:
+            continue
+        excluded_debit = flt(excluded_debit + flt(debit, precision), precision)
+        excluded_credit = flt(excluded_credit + flt(credit, precision), precision)
+    covered = [row for row in ready if row.covered]
+    return {
+        "balancing_amount": flt(line["debit"] - line["credit"], precision) if line else 0,
+        "covered_debit": flt(sum(flt(row.debit, precision) for row in covered), precision),
+        "covered_credit": flt(sum(flt(row.credit, precision) for row in covered), precision),
+        "excluded_debit": excluded_debit,
+        "excluded_credit": excluded_credit,
+    }
 
 
 def balancing_line(balances: Dict[str, Any], lines: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -825,6 +872,7 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
         "covered": len([row for row in ready if row.covered]),
         "balancing": balancing_line(balances, lines_of_entry),
         "profit_and_loss": balances.get("profit_and_loss", "stop"),
+        **card_amounts(session, balances, ready, lines, lines_of_entry),
     }
     summary["balance"] = {**balance, "balanced": balanced}
     if any(key[0] == dry_run.CAUSE_MISSING_LINK for key in checker.groups) and not _has_transactions(
@@ -847,17 +895,20 @@ CREATE_SAVEPOINT = "fac_opening_balances_create"
 DONE = ("Importing", "Completed", "Failed")
 
 
-def check_card(session, company, cut_off, rows, total_debit, total_credit) -> None:
-    """The approval card shows what FACO passed: refuse unless it is what the last check found."""
+def check_card(session, company, cut_off, rows, total_debit, total_credit, amounts=None) -> None:
+    """The approval card shows what FACO passed: refuse unless it is what the last check found,
+    the balancing line and what is covered or left out (``amounts``, CARD_AMOUNTS) among it."""
     summary = frappe.parse_json(session.validation_summary or "{}") or {}
     totals, balances = summary.get("opening_balances") or {}, settings(session)
     precision = _precision()
+    amounts = amounts or {}
     checked = (
         balances.get("company"),
         balances.get("cut_off"),
         summary.get("ready"),
         flt(totals.get("total_debit"), precision),
         flt(totals.get("total_credit"), precision),
+        *(flt(totals.get(key), precision) for key in CARD_AMOUNTS),
     )
     try:
         asked = (
@@ -866,6 +917,7 @@ def check_card(session, company, cut_off, rows, total_debit, total_credit) -> No
             int(rows),
             flt(total_debit, precision),
             flt(total_credit, precision),
+            *(flt(amounts.get(key), precision) for key in CARD_AMOUNTS),
         )
     except Exception:
         frappe.clear_messages()
@@ -875,8 +927,10 @@ def check_card(session, company, cut_off, rows, total_debit, total_credit) -> No
     if asked != checked:
         raise OpeningBalancesProblem(
             _(
-                "The last check found {2} rows for {0} at {1}, with debits of {3} and credits of {4}. "
-                "Pass those, so the approval card shows them."
+                "The last check found {2} rows for {0} at {1}, with debits of {3} and credits of {4}; "
+                "a balancing line of {5} to Temporary Opening (positive a debit); covered by other "
+                "imports, debits {6} and credits {7}; left out, debits {8} and credits {9}. Pass those, "
+                "so the approval card shows them."
             ).format(*checked)
         )
 

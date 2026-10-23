@@ -24,6 +24,11 @@ COLUMNS = {"Account": "account", "Debit": "debit", "Credit": "credit"}
 
 
 @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Journal Entry")
+def card_amounts(result):
+    """What the approval card shows besides the totals (#34433), as the check reported it."""
+    return {key: result["opening_balances"][key] for key in opening_balances.CARD_AMOUNTS}
+
+
 class OpeningBalancesCase(BaseAssistantTest):
     """A company with a Temporary Opening account and a few ledger accounts, made for each test."""
 
@@ -824,6 +829,50 @@ class TestCheck(OpeningBalancesCase):
         self.assertEqual(result["ready"], 2, result)
         self.assertNotIn(opening_balances.CAUSE_NOT_BALANCED, self._groups(result))
 
+    def test_a_real_gap_is_not_balanced_however_many_rows_there_are(self):
+        # #34433: 20 rows of 1.00 against 19.95 used to pass, as 0.5 x 0.01 x 21 rows of rounding.
+        lines = [f"{self.bank},1.00,," for _ in range(20)] + [f"{self.capital},,19.95,"]
+        session = self._session(lines)
+        self.assertTrue(self._setup(session)["success"])
+
+        self.assertFalse(opening_balances.is_balanced(self._doc(session)))
+
+    def test_only_rows_with_more_decimals_than_the_currency_have_a_rounding_allowance(self):
+        # each row is rounded first: 3 x 33.33 is 99.99 against 100, from 3 rows of 3 decimals
+        session = self._session(
+            [
+                f"{self.bank},33.333,,",
+                f"{self.bank},33.333,,",
+                f"{self.bank},33.334,,",
+                f"{self.capital},,100,",
+            ]
+        )
+        self.assertTrue(self._setup(session)["success"])
+
+        self.assertTrue(opening_balances.is_balanced(self._doc(session)))
+        self.assertEqual(opening_balances.file_balance(self._doc(session))["debit"], 99.99)
+
+    def test_the_check_says_what_the_card_must_show(self):
+        # #34433: what is covered, what is left out, and the balancing line all reach the card.
+        session = self._session(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.retained},30,,", f"{self.capital},,180,"]
+        )
+        self.assertTrue(self._setup(session)["success"])
+        self._leave_out(session, 4)
+
+        totals = self._check(session)["opening_balances"]
+
+        self.assertEqual(
+            {k: totals[k] for k in opening_balances.CARD_AMOUNTS},
+            {
+                "balancing_amount": 80,  # the entry: 100 debit, 180 credit
+                "covered_debit": 50,
+                "covered_credit": 0,
+                "excluded_debit": 30,
+                "excluded_credit": 0,
+            },
+        )
+
     def test_file_balance_ignores_totals_rows(self):
         session = self._session([f"{self.bank},100,,", f"{self.capital},,100,", "Total,100,100,"])
         self._setup(session)
@@ -1175,6 +1224,7 @@ class TestCreating(OpeningBalancesCase):
             "rows": result["ready"],
             "total_debit": result["opening_balances"]["total_debit"],
             "total_credit": result["opening_balances"]["total_credit"],
+            **{k: result["opening_balances"][k] for k in opening_balances.CARD_AMOUNTS},
             **changes,
         }
 
@@ -1277,6 +1327,50 @@ class TestCreating(OpeningBalancesCase):
             self.assertIn("approval card", frappe.as_json(reply))
         self.assertEqual(self._entries(), before)
         self.assertEqual(self._doc(session).status, "Ready to Import")
+
+    def _left_out_and_covered(self):
+        session = self._session(
+            [f"{self.bank},100,,", f"{self.debtors},50,,", f"{self.retained},30,,", f"{self.capital},,180,"]
+        )
+        self.assertTrue(self._setup(session)["success"])
+        doc = self._doc(session)
+        doc.excluded_rows = frappe.as_json([4])
+        doc.save()
+        reply = self._run("dry_run_import", {"session": session})
+        self.assertTrue(reply["success"], reply)
+        return session, reply["result"]
+
+    def test_a_card_without_the_balancing_line_is_refused(self):
+        # #34433: the 30 left out goes to Temporary Opening; the card must say so.
+        session, result = self._left_out_and_covered()
+        before = self._entries()
+        card = self._card(session, result)
+        for key in opening_balances.CARD_AMOUNTS:
+            card.pop(key)
+
+        reply = self._run("import_opening_balances", card)
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("80", reply["result"]["error"])
+        self.assertEqual(self._entries(), before)
+
+    def test_a_card_with_another_balancing_amount_or_covered_total_is_refused(self):
+        session, result = self._left_out_and_covered()
+        before = self._entries()
+
+        for change in ({"balancing_amount": 50}, {"covered_debit": 0}, {"excluded_debit": 0}):
+            with self.subTest(change=change):
+                self.assertFalse(self._import(session, result, **change)["success"])
+        self.assertEqual(self._entries(), before)
+
+    def test_a_card_that_shows_the_balancing_line_imports(self):
+        session, result = self._left_out_and_covered()
+        before = self._entries()
+
+        reply = self._import(session, result)
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(self._entries(), before + 1)
 
     def test_the_cut_off_in_another_format_is_the_same_card(self):
         session, result = self._ready()
@@ -1670,6 +1764,7 @@ class TestReport(OpeningBalancesCase):
             "rows": result["ready"],
             "total_debit": result["opening_balances"]["total_debit"],
             "total_credit": result["opening_balances"]["total_credit"],
+            **card_amounts(result),
         }
         reply = self._run("import_opening_balances", card)
         for record in self._doc(session).created_records or []:
@@ -1833,6 +1928,8 @@ class TestReport(OpeningBalancesCase):
             "rows": 3,
             "total_debit": 150,
             "total_credit": 150,
+            "balancing_amount": 50,  # the debtors' 50, which the opening invoices bring in
+            "covered_debit": 50,
         }
         again = self._run("import_opening_balances", card)
         self.assertTrue(again["success"], again)

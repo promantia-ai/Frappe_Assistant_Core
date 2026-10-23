@@ -10,8 +10,11 @@ nothing more and reports. Entries of more than 100 lines are still submitted in 
 ## Parameters
 
 Pass exactly what the last check reported, so the approval card shows it: `session`, `company`,
-`cut_off`, `rows` (the check's `ready`), `total_debit` and `total_credit` (the check's
-`opening_balances`). If they differ from the last check, it refuses.
+`cut_off`, `rows` (the check's `ready`), `total_debit` and `total_credit`, and what the entry does
+with them: `balancing_amount` (the Temporary Opening line, positive a debit, negative a credit),
+`covered_debit` and `covered_credit` (rows another opening import brings in), `excluded_debit` and
+`excluded_credit` (rows left out), all from the check's `opening_balances`. A 0 may be left out. If
+any differs from the last check, it refuses. Show the user the balancing line before they approve.
 
 ## What goes in the entry
 
