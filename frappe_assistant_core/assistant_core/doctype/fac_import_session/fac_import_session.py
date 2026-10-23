@@ -48,8 +48,13 @@ NEW_SESSION_FIELDS = ("user", "started_on")
 def engine_write(doc):
     """Mark ``doc`` as the import engine's own copy: its saves may change the session's fields.
     The mark is a document flag, which no request body, frappe.client call or document tool
-    can set (Frappe drops a "flags" key from the values it is given)."""
+    can set (Frappe drops a "flags" key from the values it is given).
+
+    Its links aren't checked: created_records lists what the import made, and an undo, or a user,
+    may delete those records since. Frappe 16 checks a child table's Dynamic Links on save, so a
+    session naming one that is gone could no longer be saved, not even by the undo itself."""
     doc.flags.fac_import_engine = True
+    doc.flags.ignore_links = True
     return doc
 
 

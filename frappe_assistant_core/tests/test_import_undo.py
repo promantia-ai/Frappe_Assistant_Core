@@ -635,6 +635,9 @@ class TestBlockers(BlockerCase):
 
     def test_accounts_frozen_till_falls_back_to_accounts_settings_for_every_company(self):
         # v15: one date in Accounts Settings, for all companies.
+        if not frappe.get_meta("Accounts Settings").has_field("acc_frozen_upto"):
+            # Frappe 16 has no such field: the date is each Company's (the test above)
+            self.skipTest("Accounts Settings has no Accounts Frozen Till on this version")
         frappe.db.set_single_value("Accounts Settings", "acc_frozen_upto", "2024-03-31")
         with patch.object(import_undo, "COMPANY_FROZEN_FIELD", "no_such_field"):
             frozen = import_undo._frozen_till([self.company])
@@ -1570,7 +1573,14 @@ class TestRun(BlockerCase):
             {(b["record"], b["reason"]) for b in result["blocked"]},
             {(f"Customer Group {name}", "delete_failed") for name in names},
         )
-        self.assertTrue(all("not allowed" in b["detail"] for b in result["blocked"]), result)
+        # The refusal's own words: "Not allowed" on Frappe 15, "does not have ... permission" on 16
+        self.assertTrue(
+            all(
+                any(w in b["detail"].lower() for w in ("not allowed", "permission"))
+                for b in result["blocked"]
+            ),
+            result,
+        )
         self.assertEqual(sorted(r.record_name for r in doc.created_records), sorted(names))
         self.assertEqual(doc.status, "Partially Undone")
 
