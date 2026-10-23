@@ -24,7 +24,7 @@ do now, nothing runs and the reply's `approval` is what to pass.
 
 ## What happens
 
-1. The planned records (Customer Groups, Item Groups, UOMs...) are created and listed on the session that needed them, so undoing that session removes them.
+1. The planned records (Customer Groups, Item Groups, UOMs...) are created and listed on the session that needed them.
 2. Each file, in the plan's order, is checked again just before its import. A file whose parent rows failed in an earlier file, or whose records changed meanwhile, has rows that would fail now: with the failure rule `leave_out` they are left out with their reason; with `stop` the plan stops before that file.
 3. The file is imported as `start_import` (or its opening import tool) would import it; a tree file a level at a time.
 4. The next file starts when that one ends.
@@ -38,8 +38,6 @@ file's `status`, `created` and `left_out`.
 When it ends, report what came in, and offer the sign-off report for the plan's sessions
 (`get_skill("migration-sign-off")`, `import_session` = the plan's sessions).
 
-## Stopping and undoing
+## Stopping
 
 - `stop_migration_plan` stops it once the file importing now is done. What's imported stays.
-- To take a plan back, undo each session with `preview_import_undo` and `undo_import`, the last
-  file first.

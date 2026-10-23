@@ -315,16 +315,19 @@ def _progress(state: str, done: int, total: int) -> str:
 # -- the dry run -----------------------------------------------------------------------
 
 
-def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
+def run(session_name: str, commit_progress: bool = False, in_background: bool = False) -> Dict[str, Any]:
     """Check every row of the session's file. Stores the result on the session and
-    returns the summary, with up to three example rows per group for the model."""
+    returns the summary, with up to three example rows per group for the model.
+    ``in_background``: the caller is already a background job (a plan's), so a file of more than
+    BACKGROUND_ROWS rows is checked here. Separate from ``commit_progress``: that one also
+    commits, which would release the plan step's savepoint."""
     from frappe_assistant_core.utils.import_failures import imported_rows
     from frappe_assistant_core.utils.import_fixes import apply_value_maps
 
     session = engine_session(session_name)
     file_doc = readable_session_file(session)
     sheet_rows = read_sheet_rows(file_doc, session.sheet or None)
-    _real_size(len(sheet_rows) - 1, in_background=commit_progress)
+    _real_size(len(sheet_rows) - 1, in_background=commit_progress or in_background)
     # What is checked is the session as it is now: a change saved while the check runs (a remap
     # in another request) must not be stamped as checked when the result is stored.
     _checking()[session_name] = fingerprint(session, file_doc)
@@ -1443,8 +1446,8 @@ def fingerprint(session, file_doc) -> str:
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
-#: What other steps keep in template_options that no check reads: the undo's plan and result
-#: (preview_import_undo), and the failures of the last opening invoices import (reset as an
+#: What other steps keep in template_options that no check reads: the plan and result a removed
+#: undo feature left on older sessions (key "undo"), and the failures of the last opening invoices import (reset as an
 #: import starts). The records an import made stay in: the check leaves those rows out.
 _NOT_CHECKED = {"undo": None, "opening_invoices": ("failed",)}
 

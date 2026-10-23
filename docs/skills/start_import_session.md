@@ -10,8 +10,6 @@ For an export from another accounting system, call `apply_import_preset` first. 
 
 Call it when the user asks to **import** a file, not just to look at one.
 
-To take back an import that was already made, use `preview_import_undo`, then `undo_import`: an import session that was undone cannot be imported again, so start a new session for a corrected file.
-
 ## Parameters
 
 Give the file in one of two ways:

@@ -148,7 +148,7 @@ Reply: `{"success": true, "created": [{"doctype": "Customer Group", "name": "Hos
 
 3. **Show the change log**: the same table with a Result column. Then call `dry_run_import` again without fixes: the rows that needed them now pass.
 
-With `import_session`, each record must be one of that session's missing masters as its **latest** check planned it: the same DocType and name, only the name and the parent. **Never invent one**; to use another name, map the rows instead. Each record created is listed on the session (**Created Records**), so the session can undo it. Refused, with nothing created, when the file or its mapping changed since the check (check again first), or a record already exists or can't be created here.
+With `import_session`, each record must be one of that session's missing masters as its **latest** check planned it: the same DocType and name, only the name and the parent. **Never invent one**; to use another name, map the rows instead. Each record created is listed on the session (**Created Records**). Refused, with nothing created, when the file or its mapping changed since the check (check again first), or a record already exists or can't be created here.
 
 A missing record that can't be created has no `create` fix in the check; its group has `cannot_create` saying why. For example: ERPNext names it itself (Customer, Supplier, Warehouse, Account), it needs more than a name (Item, Price List), it is a system record (Currency, User), it is a Company, or the file imports that DocType itself. Offer **map** to an existing record, or **leave out** the rows.
 
