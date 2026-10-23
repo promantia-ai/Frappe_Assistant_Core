@@ -165,31 +165,47 @@ def _import_file_rows(data_import: str) -> List[List[str]]:
 # -- explaining what failed -----------------------------------------------------------------
 
 
-def failure_groups(session, logs) -> List[Dict[str, Any]]:
+def failure_groups(
+    session, logs, file_rows: Optional[List[List[str]]] = None, explained: Optional[int] = None
+) -> List[Dict[str, Any]]:
     """An import's failed records grouped by what ERPNext said, each explained as the dry run
-    explains its groups: ``reason``, ``error``, ``count`` records, ``rows`` and ``explanation``."""
+    explains its groups: ``reason``, ``error``, ``count`` records, ``rows`` and ``explanation``.
+
+    As in the dry run, a message is grouped with its rows' own values read as "…", which the group
+    lists as ``values`` (#34407): ``file_rows`` are the Data Import's file, whose line numbers the
+    logs give. Only the first ``explained`` groups, the largest, are explained."""
     by_key: Dict[tuple, Dict[str, Any]] = {}
     for log in logs:
-        reason, error = log_reason(log.messages), _error_of(log.get("exception"))
+        rows = json.loads(log.row_indexes or "[]")
+        values = [v for n in rows if file_rows and 1 <= n - 1 < len(file_rows) for v in file_rows[n - 1]]
+        reason, quoted = dry_run.message_pattern(log_reason(log.messages), values)
+        error = _error_of(log.get("exception"))
         group = by_key.setdefault(
             (error, reason),
-            {"cause": dry_run.CAUSE_REJECTED, "error": error, "message": reason, "count": 0, "rows": []},
+            {
+                "cause": dry_run.CAUSE_REJECTED,
+                "error": error,
+                "message": reason,
+                "count": 0,
+                "rows": [],
+                "values": [],
+            },
         )
         group["count"] += 1
-        group["rows"].extend(json.loads(log.row_indexes or "[]"))
+        group["rows"].extend(rows)
+        for value in quoted:
+            if value not in group["values"] and len(group["values"]) < dry_run.VALUES_KEPT:
+                group["values"].append(value)
     groups = []
-    for group in sorted(by_key.values(), key=lambda g: -g["count"]):
+    for index, group in enumerate(sorted(by_key.values(), key=lambda g: -g["count"])):
         rows = sorted(set(group["rows"]))
-        groups.append(
-            {
-                "reason": group["message"],
-                "error": group["error"],
-                "count": group["count"],
-                "rows": rows,
-                # Said in rows, as the dry run says it: the rows are what the user sees.
-                "explanation": import_fixes.advise(session, {**group, "count": len(rows)})["explanation"],
-            }
-        )
+        out = {"reason": group["message"], "error": group["error"], "count": group["count"], "rows": rows}
+        if group["values"]:
+            out["values"] = group["values"]
+        if explained is None or index < explained:
+            # Said in rows, as the dry run says it: the rows are what the user sees.
+            out["explanation"] = import_fixes.advise(session, {**group, "count": len(rows)})["explanation"]
+        groups.append(out)
     return groups
 
 

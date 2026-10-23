@@ -68,7 +68,7 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 
 - **`validated_fingerprint`** names this check (the file, mapping and fixes it was of). Pass it to `start_import`: the import is refused when the file was mapped or checked again since.
 - **Rows** are numbered as in the spreadsheet: row 1 is the header, so the first data row is row 2. When the headings were below a title row (`header_row` from `start_import_session`), rows count from the heading row.
-- **`cause`** is one of: `Missing link`, `Not an allowed option`, `Wrong date format`, `Invalid value`, `Duplicate in the file`, `Already in ERPNext`, `Rejected by ERPNext` (the DocType's own rules; `error` is the exception type).
+- **`cause`** is one of: `Missing link`, `Not an allowed option`, `Wrong date format`, `Invalid value`, `Duplicate in the file`, `Already in ERPNext`, `Rejected by ERPNext` (the DocType's own rules; `error` is the exception type). Rows ERPNext refused with the same message are one group even when the message names each row's own value: the value reads as `…` in `message`, and `values` lists them (up to 20).
 - **`previous`** appears on a second check: how many rows failed last time, and how many of those now pass.
 - **`status`** becomes `Ready to Import` when nothing fails, else `Dry Run Failed`. Then `message` also says the file is ready, with the final count.
 - **`id`** stays the same from check to check while the group's rows still fail. **`parent`** is the DocType the field is on: a child table's for its columns, e.g. `Sales Invoice Item`.
@@ -79,7 +79,7 @@ The full per-row list is attached to the session (`validation_results`). You get
 
 ## Large files
 
-A file of more than 500 rows is checked in the background. The reply has `"state": "running"`. Tell the user, then read the session later with `get_document` (doctype `FAC Import Session`): `progress` shows how far it got, and `validation_summary` holds the result once `status` changes: the same reply as above, with each group's `explanation` and `fixes`, and the ready message. Examples are given as row numbers (`example_rows`), since the session keeps no values from the file. Calling the tool again while it runs only reports progress.
+A large file is checked in the background: one of more than 500 rows, or fewer for a submittable DocType (an invoice, an entry), whose rows count twice, three times when they are submitted too, as an opening import's are. The reply has `"state": "running"`. Tell the user, then read the session later with `get_document` (doctype `FAC Import Session`): `progress` shows how far it got, and `validation_summary` holds the result once `status` changes: the same reply as above, with each group's `explanation` and `fixes`, and the ready message. Examples are given as row numbers (`example_rows`), since the session keeps no values from the file. Calling the tool again while it runs only reports progress.
 
 ## Best Practices
 

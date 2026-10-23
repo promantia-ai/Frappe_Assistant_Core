@@ -229,7 +229,9 @@ CURRENCY_WORDS = {
 def closest_names(doctype: str, value: str, limit: int = CLOSEST_LIMIT) -> List[str]:
     """Existing names of ``doctype`` closest to ``value``, best first, that the user can read.
 
-    Disabled records and the group nodes of a tree are left out: a link to them fails.
+    A record is matched on its name, title and search fields (#34407): a master named by a series
+    (CUST-00012) is found by "Acme Ltd". Disabled records and the group nodes of a tree are left
+    out: a link to them fails.
     """
     if not frappe.has_permission(doctype, "read"):
         return []
@@ -237,23 +239,42 @@ def closest_names(doctype: str, value: str, limit: int = CLOSEST_LIMIT) -> List[
     filters = _switched_on(meta)
     if meta.is_tree and meta.has_field("is_group"):
         filters["is_group"] = 0
+    fields = ["name", *_text_fields(meta)]
 
     if frappe.db.count(doctype) <= FULL_SCAN:
-        names = frappe.get_list(doctype, filters=filters, pluck="name", limit_page_length=FULL_SCAN)
+        records = frappe.get_list(doctype, filters=filters, fields=fields, limit_page_length=FULL_SCAN)
     else:
-        names = []
+        records = []
         for word in _words(value)[:5]:
-            names += frappe.get_list(
+            records += frappe.get_list(
                 doctype,
-                filters={**filters, "name": ["like", f"%{word}%"]},
-                pluck="name",
+                filters=filters,
+                or_filters={field: ["like", f"%{word}%"] for field in fields},
+                fields=fields,
                 limit_page_length=WORD_MATCHES,
             )
-    ranked = rank(value, names, limit)
+    name_of: Dict[str, str] = {}
+    for record in records:
+        for field in fields:
+            text = cstr(record.get(field)).strip()
+            if text:
+                name_of.setdefault(text, record.name)
+    ranked = list(dict.fromkeys(name_of[text] for text in rank(value, list(name_of), len(name_of))))[:limit]
     meant = CURRENCY_WORDS.get(cstr(value).strip().casefold()) if doctype == "Currency" else None
     if meant and frappe.db.exists(doctype, {"name": meant, **filters}):
         ranked = [meant] + [name for name in ranked if name != meant][: limit - 1]
     return ranked
+
+
+def _text_fields(meta) -> List[str]:
+    """The DocType's title and search fields that hold text, which a user knows a record by."""
+    names = [meta.title_field, *cstr(meta.search_fields).split(",")]
+    out = []
+    for name in (n.strip() for n in names if n and n.strip()):
+        df = meta.get_field(name)
+        if df and df.fieldtype in ("Data", "Small Text", "Text", "Read Only") and name not in out:
+            out.append(name)
+    return out
 
 
 def _switched_on(meta) -> Dict[str, int]:
@@ -403,8 +424,19 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
     }
     template = explanations.get(cause, _("{0} would fail. {2}"))
     explanation = template.format(rows, label, group.get("message") or "").strip()
+    if group.get("values"):
+        # The values a refusal's message quoted, "…" in it (#34407)
+        explanation += " " + _("Values: {0}.").format(_listed(group["values"]))
     # Anything else is corrected in the file, which is then checked again.
     return {"explanation": explanation, "fixes": [leave_out], "fix_in_file": True}
+
+
+def _listed(values: List[str], shown: int = 5) -> str:
+    """The first ``shown`` values, and how many more."""
+    text = ", ".join(values[:shown])
+    if len(values) > shown:
+        text += " " + _("and {0} more").format(len(values) - shown)
+    return text
 
 
 def _select_options(session, group: Dict[str, Any]) -> List[str]:

@@ -502,7 +502,12 @@ def result_of(session, data_import: str) -> Dict[str, Any]:
         order_by="log_index",
     )
     created = sum(1 for log in logs if log.success)
-    failed = import_failures.failure_groups(session, [log for log in logs if not log.success])
+    failed = import_failures.failure_groups(
+        session,
+        [log for log in logs if not log.success],
+        import_failures._import_file_rows(data_import),
+        explained=import_fixes.GROUPS_SHOWN,
+    )
     failed_count = sum(group["count"] for group in failed)
     left_out = import_fixes.left_out_report(session)
     skipped = sum(group["count"] for group in left_out)
@@ -537,6 +542,8 @@ def result_of(session, data_import: str) -> Dict[str, Any]:
             _("{0}: {1}").format(_rows_text(group["rows"]), group["reason"])
             for group in failed[:FAILED_GROUPS_SHOWN]
         )
+        if len(failed) > FAILED_GROUPS_SHOWN:
+            reasons += "; " + _("{0} other causes").format(len(failed) - FAILED_GROUPS_SHOWN)
         message += " " + _("{0} failed ({1}).").format(failed_count, reasons)
     if skipped:
         message += " " + _("{0} left out ({1}).").format(
@@ -566,10 +573,14 @@ def result_of(session, data_import: str) -> Dict[str, Any]:
         "created": created,
         "failed": failed_count,
         "skipped": skipped,
-        "failed_rows": failed,
+        # As many causes as the dry run shows; the failed-rows file has every row (#34407)
+        "failed_rows": failed[: import_fixes.GROUPS_SHOWN],
         "left_out": left_out,
         "message": message,
     }
+    if len(failed) > import_fixes.GROUPS_SHOWN:
+        result["failed_groups_total"] = len(failed)
+        result["failed_groups_not_shown"] = len(failed) - import_fixes.GROUPS_SHOWN
     if len(all_runs) > 1:
         result["runs"] = all_runs
         result["created_in_all"] = sum(run["created"] for run in all_runs)

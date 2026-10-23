@@ -34,7 +34,7 @@ The approval card shows `doctype`, `rows`, `import_type`, `validated_fingerprint
 
    Tell the user that, with the link `/app/data-import/<name>`. A partial success is normal: each record is saved on its own, and only the failed ones are not.
 
-4. **If rows failed**, explain each group of `failed_rows` with its `explanation` (one line per reason, never every row), then offer what `next` says: fix the cause and try those rows again, or download them as a file. See **When rows failed**.
+4. **If rows failed**, explain each group of `failed_rows` with its `explanation` (one line per reason, never every row; at most 30 causes are listed, and `failed_groups_not_shown` says how many more the failed-rows file holds), then offer what `next` says: fix the cause and try those rows again, or download them as a file. See **When rows failed**.
 
 ## Response
 

@@ -43,7 +43,8 @@ class DryRunImport(BaseTool):
             "ERPNext's own rules. Call it once the columns are mapped, and again after fixes. "
             "Returns '<n> rows ready, <m> would fail' and the failures grouped by cause, each with "
             "a count and up to 3 example rows; show the user that, not row-by-row lists. Files of "
-            f"more than {dry_run.BACKGROUND_ROWS} rows are checked in the background: say so, and "
+            f"more than {dry_run.BACKGROUND_ROWS} rows (fewer for invoices and other submitted "
+            "documents, whose rows take longer) are checked in the background: say so, and "
             "read the session with get_document later (progress, then validation_summary, which "
             "holds this same reply). The file must be on this site: if the session's file is only "
             "in the chat, ask the user to upload it in File Manager (or attach it in FAC Chat) and "
@@ -217,7 +218,7 @@ class DryRunImport(BaseTool):
                 applied = import_fixes.apply_fixes(session, import_fixes.last_groups(session), fixes)
                 session.save()
 
-            if dry_run.row_count(session) > dry_run.BACKGROUND_ROWS:
+            if dry_run.check_cost(session) > dry_run.BACKGROUND_ROWS:
                 dry_run.enqueue(session)
                 return self._running(session, applied, notice)
 
