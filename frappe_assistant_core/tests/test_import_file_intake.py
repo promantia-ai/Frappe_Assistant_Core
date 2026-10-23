@@ -423,10 +423,9 @@ class TestFileIntakeImport(BaseAssistantTest):
 
         checked = self._run("dry_run_import", {"session": session})
         self.assertEqual((checked["ready"], checked["failed"]), (3, 0), checked)
-        self._run(
-            "start_import",
-            {"session": session, "doctype": "Customer", "rows": 3, "import_type": "Insert New Records"},
-        )
+        from frappe_assistant_core.tests.test_import_run import approval_card
+
+        self._run("start_import", approval_card(session, checked, "Customer", "Insert New Records"))
 
         imported = frappe.get_all("Customer", {"customer_name": ["in", names]}, pluck="customer_name")
         self.assertEqual(sorted(imported), sorted(names))

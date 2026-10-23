@@ -467,10 +467,7 @@ class TestUpdateRun(UpdateCase):
         return session, checked
 
     def _update(self, session, checked):
-        return self._run(
-            "start_import",
-            {"session": session, "doctype": "Customer", "rows": checked["ready"], "import_type": UPDATE},
-        )
+        return self._run("start_import", run_tests.approval_card(session, checked, "Customer", UPDATE))
 
     def test_an_approved_update_changes_the_records_through_data_import(self):
         session, checked = self._ready(
@@ -605,10 +602,7 @@ class TestPrices(UpdateCase):
         label = frappe.get_meta("Item Price").get_label("price_list_rate")
         self.assertEqual(checked["update"]["by_field"], {label: 1}, checked)
 
-        response = self._run(
-            "start_import",
-            {"session": session, "doctype": "Item Price", "rows": checked["ready"], "import_type": UPDATE},
-        )
+        response = self._run("start_import", run_tests.approval_card(session, checked, "Item Price", UPDATE))
 
         self.assertTrue(response["success"], response)
         rates = frappe.get_all(
@@ -643,10 +637,7 @@ class TestPrices(UpdateCase):
         )
         checked = self._run("dry_run_import", {"session": session})["result"]
 
-        self._run(
-            "start_import",
-            {"session": session, "doctype": "Item", "rows": checked["ready"], "import_type": UPDATE},
-        )
+        self._run("start_import", run_tests.approval_card(session, checked, "Item", UPDATE))
 
         self.assertEqual(
             frappe.db.get_value("Item", item.name, ["item_code", "item_name"]),

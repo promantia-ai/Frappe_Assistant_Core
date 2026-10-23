@@ -33,9 +33,10 @@ class StartImport(BaseTool):
         self.description = (
             "Import an import session's file into ERPNext through Frappe's Data Import, once the "
             "user approves. Only after dry_run_import said the file is ready, and only when the "
-            "user asks to import. Pass doctype, rows (the check's 'ready' count) and import_type "
-            "exactly as the last check reported them: the approval card shows them, and they must "
-            "match. The import runs in the background: follow it with list_documents on 'Data "
+            "user asks to import. Pass doctype, rows (the check's 'ready' count), import_type and "
+            "validated_fingerprint exactly as the last check reported them, with the session's "
+            "file_name and submit_after_import: the approval card shows them, and they must "
+            "match, so what is imported is what the user saw checked. The import runs in the background: follow it with list_documents on 'Data "
             "Import Log' filtered by data_import (total_count with success 1 is the count "
             "imported) against the reply's total. It has ended only when the session's status "
             "(get_document) is no longer Importing: then its last step gives created, failed and "
@@ -63,7 +64,18 @@ class StartImport(BaseTool):
                     "enum": ["Insert New Records", "Update Existing Records"],
                     "description": "New records or updates, as the last check said",
                 },
+                "validated_fingerprint": {
+                    "type": "string",
+                    "description": "The last check's validated_fingerprint, from dry_run_import's reply",
+                },
+                "file_name": {"type": "string", "description": "The session's file_name: the file imported"},
+                "submit_after_import": {
+                    "type": "boolean",
+                    "description": "The session's submit_after_import: whether imported records are submitted",
+                },
             },
+            # validated_fingerprint, file_name and submit_after_import are required by check_card,
+            # with its own message: a session imported another way is pointed to its tool first.
             "required": ["session", "doctype", "rows", "import_type"],
         }
 
@@ -93,7 +105,13 @@ class StartImport(BaseTool):
 
         try:
             import_run.check_card(
-                session, arguments.get("doctype"), arguments.get("rows"), arguments.get("import_type")
+                session,
+                arguments.get("doctype"),
+                arguments.get("rows"),
+                arguments.get("import_type"),
+                arguments.get("validated_fingerprint"),
+                arguments.get("file_name"),
+                arguments.get("submit_after_import"),
             )
             problem = import_run.cannot_import(
                 session.target_doctype, session.import_type or "Insert New Records"

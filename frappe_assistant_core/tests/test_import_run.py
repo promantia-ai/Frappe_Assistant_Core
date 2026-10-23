@@ -41,6 +41,23 @@ MAPPING = {
 INSERT = "Insert New Records"
 
 
+def approval_card(session, checked, doctype, import_type, **changes):
+    """What FACO passes start_import after a check, and the approval card shows (#34402): the
+    check's own counts and fingerprint, and the session's file name and submit setting."""
+    return {
+        "session": session,
+        "doctype": doctype,
+        "rows": checked["ready"],
+        "import_type": import_type,
+        "validated_fingerprint": checked.get("validated_fingerprint"),
+        "file_name": frappe.db.get_value("FAC Import Session", session, "file_name"),
+        "submit_after_import": bool(
+            frappe.db.get_value("FAC Import Session", session, "submit_after_import")
+        ),
+        **changes,
+    }
+
+
 class WorkerStopped(BaseException):
     """A worker killed mid-import: not an Exception, so the importer can't catch it as a row's."""
 
@@ -121,13 +138,7 @@ class ImportRunCase(BaseAssistantTest):
 
     def _card(self, session, checked, **changes):
         """What FACO passes, and the approval card shows."""
-        return {
-            "session": session,
-            "doctype": "Customer",
-            "rows": checked["ready"],
-            "import_type": INSERT,
-            **changes,
-        }
+        return approval_card(session, checked, **{"doctype": "Customer", "import_type": INSERT, **changes})
 
     def _import(self, session, checked, **changes):
         return self._run("start_import", self._card(session, checked, **changes))
@@ -699,6 +710,56 @@ class TestImportRun(ImportRunCase):
 
 
 @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
+class TestTheApprovalNamesTheCheck(ImportRunCase):
+    """#34402: the import's approval is of one check, and the card names the file."""
+
+    def test_the_check_names_itself_for_the_approval(self):
+        session, checked = self._ready_session()
+
+        self.assertEqual(checked["validated_fingerprint"], self._doc(session).validated_fingerprint)
+        self.assertTrue(checked["validated_fingerprint"])
+
+    def test_an_approval_of_an_earlier_check_imports_nothing(self):
+        session, checked = self._ready_session()
+        approved = self._card(session, checked)
+        # Another tab, or a parallel call, maps the file again and checks it: as many rows are
+        # ready, but it is another check, of another mapping.
+        mapping = {**MAPPING, "Customer Type": "Don't Import"}
+        remapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Customer"}
+        )
+        self.assertTrue(remapped["success"], remapped)
+        again = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual((again["status"], again["ready"]), ("Ready to Import", checked["ready"]), again)
+
+        reply = self._run("start_import", approved)
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("validated_fingerprint", reply["result"]["error"])
+        self.assertFalse(self._imported())
+
+    def test_a_card_without_the_check_is_refused(self):
+        session, checked = self._ready_session()
+        card = self._card(session, checked)
+        del card["validated_fingerprint"]
+
+        reply = self._run("start_import", card)
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("validated_fingerprint", reply["result"]["error"])
+        self.assertFalse(self._imported())
+
+    def test_the_card_names_the_file_and_whether_records_are_submitted(self):
+        session, checked = self._ready_session()
+
+        for change in ({"file_name": "other.csv"}, {"submit_after_import": True}):
+            with self.subTest(change=change):
+                reply = self._import(session, checked, **change)
+                self.assertFalse(reply["success"], reply)
+                self.assertIn("file_name", reply["result"]["error"])
+        self.assertFalse(self._imported())
+
+
 class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
     """Review fixes: a column the user left unmapped is not imported (#33993), and the mapping
     can't change under an import that runs or was undone (#33989)."""

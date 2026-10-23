@@ -1013,6 +1013,8 @@ def check(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     summary = dry_run.run(session_name, commit_progress=commit_progress)
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     reply = report(session, summary)
+    # What this check was of (file, mapping, fixes): the import's approval names it (#34402).
+    reply["validated_fingerprint"] = session.validated_fingerprint
     kept = [
         {
             **{k: v for k, v in group.items() if k != "examples"},

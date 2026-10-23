@@ -14,10 +14,13 @@ What goes in is exactly what was checked: the session's sheet, with the value ma
 | `doctype` | string | **Yes** | The DocType imported, as the last check said |
 | `rows` | integer | **Yes** | Rows to import: the last check's `ready` |
 | `import_type` | string | **Yes** | `Insert New Records` or `Update Existing Records`, as the last check said |
+| `validated_fingerprint` | string | **Yes** | The last check's `validated_fingerprint`, from `dry_run_import`'s reply (or the session's `validated_fingerprint`) |
+| `file_name` | string | **Yes** | The session's `file_name`: the file imported |
+| `submit_after_import` | boolean | **Yes** | The session's `submit_after_import`: whether the records are submitted |
 
 For an update, `rows` is the check's `ready` (records that change). The update changes exactly the records the check matched, never a new match, and the result says "Updated N … records". Rows that change nothing were skipped at the check.
 
-The approval card shows `doctype`, `rows` and `import_type`, so the user sees what goes in. They must match the last check, or nothing is imported.
+The approval card shows `doctype`, `rows`, `import_type`, `validated_fingerprint`, `file_name` and `submit_after_import`, so the user sees what goes in. They must match the last check and the session, or nothing is imported. The fingerprint names the check the user saw: if the file was mapped or checked again since (in another tab, say), the import is refused. Show the user the new check's result and ask again.
 
 ## Workflow
 
