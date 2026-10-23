@@ -216,7 +216,7 @@ class TestWritesToAnExistingSession(SessionGuardCase):
     def test_the_owner_cannot_add_a_created_record(self):
         session, _checked = self._failed_session()
         doc = frappe.get_doc(SESSION, session)
-        # undo deletes what this table lists
+        # the sign-off report and the fix links read what this table lists
         doc.append("created_records", {"record_doctype": "Customer Group", "record_name": self.group})
 
         with self.assertRaises(frappe.PermissionError):

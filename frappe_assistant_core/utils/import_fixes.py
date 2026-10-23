@@ -22,7 +22,7 @@ Each failure group from the dry run gets a plain explanation and the fixes that 
 
 Map and leave out are stored on the session, never in the file: the value maps and the
 reasons in ``transformation_rules``, the row numbers in ``excluded_rows``. Created masters
-are listed in ``created_records``, so the session can undo them.
+are listed in ``created_records``.
 """
 
 import difflib
@@ -954,8 +954,7 @@ def kept_its_name(entry: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, An
 
 
 def link_created(session, results: List[Dict[str, Any]]) -> None:
-    """List the masters create_document made on the session (Created Records), so the session
-    can undo them, and log the step. Runs inside create_document's batch, so a failure here
+    """List the masters create_document made on the session (Created Records), and log the step. Runs inside create_document's batch, so a failure here
     undoes the records too."""
     for result in results:
         parent_field = _parent_field(frappe.get_meta(result["doctype"]))

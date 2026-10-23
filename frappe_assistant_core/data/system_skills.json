@@ -210,26 +210,6 @@
     "content_file": "import_opening_balances.md"
   },
   {
-    "skill_id": "preview-import-undo-usage",
-    "title": "How to Use preview_import_undo",
-    "description": "Showing what undoing an import would delete before anything is deleted: the counts by DocType, the blockers and what each is blocked by, the kept records, the time window, and which mode to ask the user for",
-    "skill_type": "Tool Usage",
-    "linked_tool": "preview_import_undo",
-    "status": "Published",
-    "visibility": "Public",
-    "content_file": "preview_import_undo.md"
-  },
-  {
-    "skill_id": "undo-import-usage",
-    "title": "How to Use undo_import",
-    "description": "Undoing an import with one approval: passing the preview's figures and the mode (all or unblocked), following the background undo by calling again, and reporting what was removed, kept and blocked",
-    "skill_type": "Tool Usage",
-    "linked_tool": "undo_import",
-    "status": "Published",
-    "visibility": "Public",
-    "content_file": "undo_import.md"
-  },
-  {
     "skill_id": "plan-migration-usage",
     "title": "How to Use plan_migration",
     "description": "Grouping the import sessions of a migration of several files into one plan, ordered so each file comes after the files whose records it links to, for one approval at the end.",

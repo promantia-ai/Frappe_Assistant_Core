@@ -1431,8 +1431,8 @@ def fingerprint(session, file_doc) -> str:
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
-#: What other steps keep in template_options that no check reads: the undo's plan and result
-#: (preview_import_undo), and the failures of the last opening invoices import (reset as an
+#: What other steps keep in template_options that no check reads: the plan and result a removed
+#: undo feature left on older sessions (key "undo"), and the failures of the last opening invoices import (reset as an
 #: import starts). The records an import made stay in: the check leaves those rows out.
 _NOT_CHECKED = {"undo": None, "opening_invoices": ("failed",)}
 

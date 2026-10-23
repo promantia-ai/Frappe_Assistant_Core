@@ -35,7 +35,7 @@ from frappe_assistant_core.utils import import_dry_run as dry_run
 
 SESSION_DOCTYPE = dry_run.SESSION_DOCTYPE
 ANSWERS_SAVEPOINT = "fac_plan_answers"
-#: A session in one of these may join a plan: nothing of it is imported, undone or cancelled.
+#: A session in one of these may join a plan: nothing of it is imported or cancelled.
 JOINABLE = ("File Read", "Mapped", "Dry Run Failed", "Ready to Import")
 #: A plan in one of these takes new files; once it runs, its files are fixed.
 OPEN = ("Planning", "Ready to Run")
@@ -262,7 +262,7 @@ def add_masters(session, items: List[Dict[str, Any]]) -> None:
 
 def create_planned(plan) -> List[Dict[str, Any]]:
     """Create the plan's masters not in ERPNext yet, each listed on the session whose rows need
-    it, so undoing that session removes it. Raises PlanProblem if ERPNext refuses one."""
+    it. Raises PlanProblem if ERPNext refuses one."""
     from frappe_assistant_core.utils import import_fixes
 
     made: List[Dict[str, Any]] = []
@@ -270,8 +270,7 @@ def create_planned(plan) -> List[Dict[str, Any]]:
     for entry in masters(plan):
         if not frappe.db.exists(entry["doctype"], entry["name"]):
             by_session.setdefault(entry["session"], []).append(entry)
-    # All or none: a master made before one ERPNext refuses would be listed on no session, so no
-    # undo would remove it.
+    # All or none: a master made before one ERPNext refuses would be listed on no session.
     frappe.db.savepoint(MASTERS_SAVEPOINT)
     try:
         for session_name, entries in by_session.items():
