@@ -22,7 +22,7 @@ Each failure group from the dry run gets a plain explanation and the fixes that 
 
 Map and leave out are stored on the session, never in the file: the value maps and the
 reasons in ``transformation_rules``, the row numbers in ``excluded_rows``. Created masters
-are listed in ``created_records``, so the session can undo them.
+are listed in ``created_records``.
 """
 
 import difflib
@@ -954,8 +954,7 @@ def kept_its_name(entry: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, An
 
 
 def link_created(session, results: List[Dict[str, Any]]) -> None:
-    """List the masters create_document made on the session (Created Records), so the session
-    can undo them, and log the step. Runs inside create_document's batch, so a failure here
+    """List the masters create_document made on the session (Created Records), and log the step. Runs inside create_document's batch, so a failure here
     undoes the records too."""
     for result in results:
         parent_field = _parent_field(frappe.get_meta(result["doctype"]))
@@ -1006,11 +1005,12 @@ def _parent(doctype: str, parent: str) -> Optional[str]:
 # -- the reply ------------------------------------------------------------------------
 
 
-def check(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
+def check(session_name: str, commit_progress: bool = False, in_background: bool = False) -> Dict[str, Any]:
     """The dry run, explained. The reply is also kept in validation_summary, so a check run
     in the background reads the same as one that came back at once. The session keeps no row
-    of the file, so it keeps the example rows' numbers, not their values."""
-    summary = dry_run.run(session_name, commit_progress=commit_progress)
+    of the file, so it keeps the example rows' numbers, not their values. ``in_background``:
+    the caller is a background job, so a large file is checked here (see dry_run.run)."""
+    summary = dry_run.run(session_name, commit_progress=commit_progress, in_background=in_background)
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     reply = report(session, summary)
     # What this check was of (file, mapping, fixes): the import's approval names it (#34402).

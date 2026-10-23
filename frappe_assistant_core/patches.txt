@@ -75,3 +75,7 @@ frappe_assistant_core.patches.v3_1.plan_kept_on_its_first_session
 # Version 3.2.0 - chat history & projects: give every existing session a FAC Chat
 # Conversation row (new messages maintain their own row from here on)
 frappe_assistant_core.patches.v3_2.backfill_fac_chat_conversations
+
+# Version 3.2.0 - the import undo tools were removed (#34002): delete the stored settings of
+# preview_import_undo and undo_import (FAC Tool Configuration rows); safe to run twice
+frappe_assistant_core.patches.v3_2.remove_import_undo_tool_configurations

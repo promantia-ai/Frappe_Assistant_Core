@@ -61,6 +61,7 @@ from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
 PREPARED_REPORT = "frappe.core.doctype.prepared_report.prepared_report"
 QUERY_REPORT = "frappe.desk.query_report"
+REPORT_TOOLS = "frappe_assistant_core.plugins.core.tools.report_tools"
 
 COLUMNS = [{"fieldname": "item_code", "label": "Item", "fieldtype": "Data"}]
 
@@ -136,7 +137,7 @@ def stub_frappe(
         mocks = frappe._dict(
             get_completed=stack.enter_context(
                 patch(
-                    f"{PREPARED_REPORT}.get_completed_prepared_report",
+                    f"{REPORT_TOOLS}.completed_prepared_report",
                     autospec=True,
                     return_value=completed_name,
                 )
@@ -256,3 +257,19 @@ class TestPreparedReportZeroRows(BaseAssistantTest):
 
         mocks.make_prepared.assert_called_once()
         self.assertNotEqual(result["status"], "completed")
+
+
+class TestCompletedPreparedReport(BaseAssistantTest):
+    def test_only_a_completed_report_is_found_on_every_frappe_version(self):
+        # Frappe 16 replaced get_completed_prepared_report with one that returns failed ones too
+        from frappe_assistant_core.plugins.core.tools import report_tools
+
+        with patch.object(report_tools.frappe.db, "get_value", return_value="PREP-1") as get_value:
+            name = report_tools.completed_prepared_report({"company": "X"}, "a@example.com", "General Ledger")
+
+        self.assertEqual(name, "PREP-1")
+        doctype, filters = get_value.call_args.args[:2]
+        self.assertEqual(
+            (doctype, filters["status"], filters["report_name"]),
+            ("Prepared Report", "Completed", "General Ledger"),
+        )
