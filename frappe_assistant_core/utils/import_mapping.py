@@ -114,7 +114,10 @@ def _hsn_validated(doctype: str, fieldname: str) -> bool:
         return False
     if "india_compliance" not in frappe.get_installed_apps():
         return False
-    from india_compliance.gst_india.utils import get_hsn_settings
+    try:
+        from india_compliance.gst_india.utils import get_hsn_settings
+    except ImportError:  # an India Compliance without it: the dry run still finds the refusal
+        return False
 
     return bool(get_hsn_settings()[0])
 
