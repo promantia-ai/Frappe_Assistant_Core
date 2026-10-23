@@ -1005,11 +1005,12 @@ def _parent(doctype: str, parent: str) -> Optional[str]:
 # -- the reply ------------------------------------------------------------------------
 
 
-def check(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
+def check(session_name: str, commit_progress: bool = False, in_background: bool = False) -> Dict[str, Any]:
     """The dry run, explained. The reply is also kept in validation_summary, so a check run
     in the background reads the same as one that came back at once. The session keeps no row
-    of the file, so it keeps the example rows' numbers, not their values."""
-    summary = dry_run.run(session_name, commit_progress=commit_progress)
+    of the file, so it keeps the example rows' numbers, not their values. ``in_background``:
+    the caller is a background job, so a large file is checked here (see dry_run.run)."""
+    summary = dry_run.run(session_name, commit_progress=commit_progress, in_background=in_background)
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     reply = report(session, summary)
     kept = [

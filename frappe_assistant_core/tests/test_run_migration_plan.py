@@ -17,7 +17,7 @@ from erpnext.setup.doctype.item_group.item_group import ItemGroup
 from frappe_assistant_core.tests.base_test import item_hsn_fields
 from frappe_assistant_core.tests.test_import_plan import set_plan
 from frappe_assistant_core.tests.test_import_run import ImportRunCase
-from frappe_assistant_core.utils import import_plan, import_run
+from frappe_assistant_core.utils import import_dry_run, import_plan, import_run
 
 SESSION = "FAC Import Session"
 
@@ -394,3 +394,100 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
 
         self.assertTrue(response["success"], response)
         self.assertNotEqual(response["result"]["plan"], plan)
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Brand")
+class TestAPlanWithALargeFile(ImportRunCase):
+    """A file over BACKGROUND_ROWS passes plan_questions in the background, so the plan job's own
+    re-check, already in the background, must not refuse it (#34427). Brand: a master with no
+    links, cheap to insert."""
+
+    def _brands_plan(self, rows):
+        self.codes = [f"Brand {self.tag} {n}" for n in range(rows)]
+        content = ("Name\n" + "".join(f"{code}\n" for code in self.codes)).encode()
+        started = self._run("start_import_session", {"file_url": self._file("brands.csv", content).file_url})
+        session = started["result"]["session_id"]
+        mapped = self._run("set_column_mapping", {"session": session, "mapping": {"Name": "brand"}, "doctype": "Brand"})
+        self.assertTrue(mapped["success"], mapped)
+        plan = self._run("plan_migration", {"sessions": [session], "failure_rule": "leave_out"})["result"]["plan"]
+        return plan, session
+
+    def _ready(self, plan, rows):
+        """plan_questions as the user meets it: a file over 500 rows is checked in a background
+        job, run here at once, then asked again."""
+        user = frappe.session.user
+
+        def check_now(session):
+            import_dry_run.run_job(session.name, user)
+
+        answers = [{"id": "plan:failure_rule", "rule": "leave_out"}]
+        with self._each_row_commits(), patch.object(import_dry_run, "enqueue", side_effect=check_now) as queued:
+            ready = self._run("plan_questions", {"plan": plan, "answers": answers})["result"]
+            if rows > import_dry_run.BACKGROUND_ROWS:
+                self.assertFalse(ready["ready"], ready)
+                queued.assert_called_once()
+                ready = self._run("plan_questions", {"plan": plan})["result"]
+            else:
+                queued.assert_not_called()
+        self.assertTrue(ready["ready"], ready)
+
+    def _brands(self):
+        return frappe.get_all("Brand", filters={"name": ["like", f"Brand {self.tag} %"]}, pluck="name")
+
+    def test_a_plan_imports_a_file_of_more_than_500_rows(self):
+        rows = import_dry_run.BACKGROUND_ROWS + 1
+        plan, session = self._brands_plan(rows)
+        self._ready(plan, rows)
+        figures = {"plan": plan, **import_plan.card_figures(import_plan.get_plan(plan))}
+
+        with self._each_row_commits():
+            response = self._run("run_migration_plan", figures)
+
+        self.assertTrue(response["success"], response)
+        doc = import_plan.get_plan(plan)
+        messages = [step.message for step in doc.steps]
+        self.assertEqual(doc.status, "Completed", messages)
+        self.assertFalse(any("isn't checked here" in message for message in messages), messages)
+        self.assertEqual(len(self._brands()), rows)
+
+    def test_a_plan_file_over_a_hundred_rows_keeps_the_steps_rollback(self):
+        # The check commits every PROGRESS_EVERY rows (#34401), also inside the plan's step. A
+        # failure after it still ends the plan, saying why, and the file isn't left half imported.
+        rows = import_dry_run.PROGRESS_EVERY + 1
+        plan, session = self._brands_plan(rows)
+        self._ready(plan, rows)
+        figures = {"plan": plan, **import_plan.card_figures(import_plan.get_plan(plan))}
+
+        with patch.object(import_plan, "_file_done", side_effect=RuntimeError("the disk is full")):
+            with self._each_row_commits():
+                self._run("run_migration_plan", figures)
+
+        doc = import_plan.get_plan(plan)
+        self.assertEqual(doc.status, "Stopped")
+        self.assertIn("the disk is full", doc.steps[-1].message)
+        self.assertEqual(self._brands(), [])
+
+    def test_a_large_file_is_still_refused_outside_a_plan(self):
+        plan, session = self._brands_plan(import_dry_run.BACKGROUND_ROWS + 1)
+
+        with self.assertRaises(import_dry_run.DryRunProblem) as refused:
+            from frappe_assistant_core.utils import import_fixes
+
+            import_fixes.check(session)
+
+        self.assertIn("isn't checked here", str(refused.exception))
+
+    def test_a_large_opening_file_isnt_refused_for_its_size_in_a_plan(self):
+        # Opening stock, invoices and balances go through the same size gate, before the engine.
+        # The engine's own run is a stand-in: what is under test is the gate before it.
+        plan, session = self._brands_plan(import_dry_run.BACKGROUND_ROWS + 1)
+        engine = patch.object(import_dry_run, "special_engine")
+
+        with engine as special:
+            special.return_value.run.return_value = {"stand_in": True}
+            summary = import_dry_run.run(session, in_background=True)
+            self.assertEqual(summary, {"stand_in": True})
+            special.return_value.run.assert_called_once_with(session, commit_progress=False)
+
+            with self.assertRaises(import_dry_run.DryRunProblem):
+                import_dry_run.run(session)

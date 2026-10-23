@@ -1154,7 +1154,9 @@ def _prepare(plan, child) -> Optional[str]:
             "{0} changed after the plan was approved ({1} now), so it isn't imported. Check the plan "
             "again with plan_questions."
         ).format(child.file_name, _(child.status))
-    import_fixes.check(child.name)
+    # The plan job is a background job: a file over BACKGROUND_ROWS, checked in the background
+    # before the approval, is checked here too (#34427).
+    import_fixes.check(child.name, in_background=True)
     child.reload()
     if child.status == "Dry Run Failed":
         groups = import_fixes.last_groups(child)
@@ -1183,7 +1185,7 @@ def _prepare(plan, child) -> Optional[str]:
             ),
             left_out=left_out,
         )
-        import_fixes.check(child.name)
+        import_fixes.check(child.name, in_background=True)
         child.reload()
     if child.status not in ("Ready to Import", "Completed"):
         return _("{0} isn't ready to import ({1}).").format(child.file_name, _(child.status))
