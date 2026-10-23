@@ -178,7 +178,10 @@ class TestSetColumnMapping(ImportToolTestCase):
 
         response = self._run("get_document", {"doctype": "FAC Import Session", "name": session})
 
-        options = frappe.parse_json(response["result"]["data"]["template_options"])
+        # inside the untrusted-content fence: an opening import keeps the file's text there (#34406)
+        from frappe_assistant_core.tests.test_import_session import _unfenced
+
+        options = frappe.parse_json(_unfenced(response["result"]["data"]["template_options"]))
         self.assertEqual(options, {"column_to_field_map": {"0": "first_name"}})
 
     def test_child_table_fields_are_shown_apart(self):

@@ -31,6 +31,11 @@ DOCUMENT_FIELDS = {
         "file_name",
         "sheet",
         "sheets",
+        # the mapping, and an opening import's extra headings and the failures that quote the
+        # file (#34406); a plan's answers and a step's progress messages
+        "template_options",
+        "plan_settings",
+        "progress",
         "transformation_rules",
         "excluded_rows",
         "validation_summary",
@@ -40,6 +45,11 @@ DOCUMENT_FIELDS = {
         "created_records[].parent_record",
     ),
 }
+
+
+def document_fields(doctype: str) -> List[str]:
+    """The top-level fields of ``doctype`` that keep what a user's file said."""
+    return [path for path in DOCUMENT_FIELDS.get(doctype, ()) if "[]" not in path and "." not in path]
 
 
 def fence_fields(result: Dict[str, Any], fields: Iterable[str], kind: str = FENCE) -> Dict[str, Any]:

@@ -473,9 +473,9 @@ class TestImportSession(BaseAssistantTest):
 
         self.assertTrue(response["success"], response)
         data = response["result"]["data"]
-        columns = frappe.parse_json(data["template_options"])["column_to_field_map"]
+        # fields that can quote the file arrive inside the untrusted-content fence (#34003, #34406)
+        columns = frappe.parse_json(_unfenced(data["template_options"]))["column_to_field_map"]
         self.assertEqual(set(columns.values()), {"customer_name", "customer_group", "Don't Import"})
-        # fields that can quote the file arrive inside the untrusted-content fence (#34003)
         maps = frappe.parse_json(_unfenced(data["transformation_rules"]))["value_maps"]
         self.assertEqual([(m["from"], m["to"]) for m in maps], [(misspelt, group.name)])
         summary = frappe.parse_json(_unfenced(data["validation_summary"]))

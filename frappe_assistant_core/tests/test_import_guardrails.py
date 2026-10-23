@@ -265,6 +265,69 @@ class TestFileContentIsFenced(GuardrailCase):
         self.assertTrue(payload["success"], payload)
         self.assertFencedWherever(payload, title)
 
+    def test_a_heading_reaches_the_model_fenced(self):
+        # #34406: a column heading is the file's text too.
+        content = f"Customer Name,Customer Group,{INJECTION}\nAcme {self.tag},{self.group},Company\n"
+        file_doc = self._file("guard.csv", content.encode())
+
+        payload = self._mcp("start_import_session", {"file_id": file_doc.name})
+
+        self.assertTrue(payload["success"], payload)
+        self.assertFencedWherever(payload)
+
+    def _session_of_file_named(self, file_name):
+        content = f"{','.join(run_tests.MAPPING)}\nAcme {self.tag},{self.group},Company\n".encode()
+        file_doc = self._file(file_name, content)
+        return self._run("start_import_session", {"file_id": file_doc.name})["result"]["session_id"]
+
+    def test_list_documents_fences_a_sessions_file_name(self):
+        # #34406: the session list the model reads to find a session again
+        session = self._session_of_file_named(f"{INJECTION}.csv")
+
+        payload = self._mcp(
+            "list_documents",
+            {
+                "doctype": "FAC Import Session",
+                "fields": ["name", "file_name", "sheet"],
+                "filters": {"name": session},
+            },
+        )
+
+        self.assertTrue(payload["success"], payload)
+        self.assertFencedWherever(payload)
+
+    def test_list_documents_grouped_by_file_name_fences_each_group(self):
+        session = self._session_of_file_named(f"{INJECTION}.csv")
+
+        payload = self._mcp(
+            "list_documents",
+            {"doctype": "FAC Import Session", "group_by": "file_name", "filters": {"name": session}},
+        )
+
+        self.assertTrue(payload["success"], payload)
+        self.assertFencedWherever(payload)
+
+    def test_a_long_cell_is_cut_in_what_the_model_is_shown_and_kept_whole_in_the_file(self):
+        # #34406: one huge cell can't fill the reply.
+        long = "x" * 5000
+        file_doc = self._csv([f"Acme {self.tag},{long},Company"])
+
+        result = self._run("start_import_session", {"file_id": file_doc.name})["result"]
+        self._run(
+            "set_column_mapping",
+            {"session": result["session_id"], "mapping": run_tests.MAPPING, "doctype": "Customer"},
+        )
+        check = self._run("dry_run_import", {"session": result["session_id"]})["result"]
+
+        cut = "x" * import_session.CELL_CHARS_SHOWN + "…"
+        self.assertEqual(result["sample_rows"][0][1], cut)
+        shown = [v for g in check["groups"] for e in g.get("examples") or [] for v in e["values"].values()]
+        self.assertIn(cut, shown)
+        self.assertNotIn(long, shown)  # the group's value stays whole: a fix or a master is made from it
+        doc = self._doc(result["session_id"])
+        rows = import_session.read_sheet_rows(import_session.readable_session_file(doc))
+        self.assertEqual(rows[1][1], long)
+
     def test_fac_chat_lists_a_file_being_imported_without_its_rows(self):
         from frappe_assistant_core.chat.api.chat.conversation_files import conversation_files_addendum
 

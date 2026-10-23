@@ -55,6 +55,7 @@ from frappe_assistant_core.utils.import_session import (
     readable_session_file,
     row_limit_problem,
     save_session_copy,
+    shown_cell,
 )
 
 SESSION_DOCTYPE = "FAC Import Session"
@@ -1475,7 +1476,7 @@ def examples(session, groups: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, 
     by_row = {}
     for number in wanted:
         if 1 <= number - 1 < len(rows):
-            by_row[number] = {header[i]: rows[number - 1][i] for i in shown}
+            by_row[number] = {header[i]: shown_cell(rows[number - 1][i]) for i in shown}
     return {
         group["id"]: [{"row": n, "values": by_row[n]} for n in group["example_rows"] if n in by_row]
         for group in groups
