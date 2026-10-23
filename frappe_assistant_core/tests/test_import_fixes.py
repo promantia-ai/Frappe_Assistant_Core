@@ -68,17 +68,23 @@ class TestImportFixes(BaseAssistantTest):
     def _rows(self):
         t = self.tag
         return [
-            [f"Alpha {t}", self.existing_group, "Company", ""],  # row 2: ready
+            [f"Alpha {t}", self.existing_group, "Company", "", self._company()],  # row 2: ready
             [f"Beta {t}", self.missing, "Company", ""],  # row 3: missing link
             [f"Gamma {t}", self.missing, "Company", ""],  # row 4: missing link, same group
             [f"Delta {t}", self.existing_group, "Robot", ""],  # row 5: not an allowed option
-            [f"Alpha {t}", self.existing_group, "Company", ""],  # row 6: duplicate of row 2
+            # row 6: the same Represents Company as row 2, a field marked unique: a duplicate. (A
+            # repeated Customer Name is no duplicate: a naming series names the customers, #34398.)
+            [f"Zeta {t}", self.existing_group, "Company", "", self._company()],
         ]
+
+    @staticmethod
+    def _company():
+        return frappe.get_all("Company", pluck="name", limit=1)[0]
 
     def _session(self, rows=None):
         """Upload a CSV, open its session, map it and check it, as the earlier steps do."""
-        lines = ["Customer Name,Customer Group,Customer Type,Notes"]
-        lines += [",".join(row) for row in rows or self._rows()]
+        lines = ["Customer Name,Customer Group,Customer Type,Notes,Represents Company"]
+        lines += [",".join(row + [""] * (5 - len(row))) for row in rows or self._rows()]
         file_doc = frappe.get_doc(
             {
                 "doctype": "File",
@@ -89,7 +95,12 @@ class TestImportFixes(BaseAssistantTest):
         ).insert()
         session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
         mapped = self._run(
-            "set_column_mapping", {"session": session, "mapping": MAPPING, "doctype": "Customer"}
+            "set_column_mapping",
+            {
+                "session": session,
+                "mapping": {**MAPPING, "Represents Company": "represents_company"},
+                "doctype": "Customer",
+            },
         )
         self.assertTrue(mapped["success"], mapped)
         checked = self._run("dry_run_import", {"session": session})
@@ -128,8 +139,8 @@ class TestImportFixes(BaseAssistantTest):
         session, result = self._session()
         group = self._group(result, "Not an allowed option")
         lines = [
-            "Customer Name,Customer Group,Customer Type,Notes",
-            f"Zeta {self.tag},{self.existing_group},Company,",
+            "Customer Name,Customer Group,Customer Type,Notes,Represents Company",
+            f"Zeta {self.tag},{self.existing_group},Company,,",
         ]
         corrected = frappe.get_doc(
             {
@@ -487,8 +498,8 @@ class TestImportFixes(BaseAssistantTest):
         link = self._group(result, "Missing link")
         self._fix(session, {"group": link["id"], "action": "leave_out", "reason": "Old shop"})
         # The corrected export: same columns, but other rows are at rows 3 and 4 now.
-        lines = ["Customer Name,Customer Group,Customer Type,Notes"]
-        lines += [",".join(row) for row in reversed(self._rows())]
+        lines = ["Customer Name,Customer Group,Customer Type,Notes,Represents Company"]
+        lines += [",".join(row + [""] * (5 - len(row))) for row in reversed(self._rows())]
         corrected = frappe.get_doc(
             {
                 "doctype": "File",
