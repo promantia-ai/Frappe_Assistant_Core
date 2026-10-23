@@ -69,7 +69,8 @@ class ImportPlanCase(BaseAssistantTest):
         if group is not None:
             columns["Group"] = ("item_group", group)
         columns["UOM"] = ("stock_uom", "Nos")
-        columns.update({"HSN": ("gst_hsn_code", code) for code in item_hsn_fields().values()})
+        for code in item_hsn_fields().values():
+            columns["HSN"] = ("gst_hsn_code", code)
         columns.update(extra or {})
         mapping = {column: field for column, (field, _value) in columns.items()}
         row = [value for _field, value in columns.values()]

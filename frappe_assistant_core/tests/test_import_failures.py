@@ -457,20 +457,23 @@ class TestImportFailures(ImportRunCase):
         # Rows 2 and 3 of the corrected file aren't rows 2 and 5 the first file imported.
         self.assertEqual((result["ready"], result["imported"]), (2, 0), result)
 
-    def test_a_corrected_file_that_brings_back_a_changed_imported_row_is_stopped_by_the_check(self):
+    def test_a_corrected_file_that_brings_back_a_changed_imported_row_is_a_new_record(self):
+        self.name_customers_by("Naming Series")
         session, _checked, _first = self._partly_imported()
         n = self._names()
         _out, _file_doc, rows = self._failed_rows(session)
         rows[1][1] = rows[2][1] = self.group
-        # Already imported, then changed: not the row imported, so the duplicate check stops it
-        # (one brought back as it was is skipped as imported: see the next test).
+        # Already imported, then changed: not the row imported (one brought back as it was is
+        # skipped as imported: see the next test). Customers are named by a naming series, so
+        # sharing alpha's customer name is no duplicate: the row is ready, not blocked (#34398).
         rows.append([n["alpha"], self.group, "Individual", "2", ""])
         corrected = self._csv("corrected.csv", rows)
 
         result = self._check(session, file_url=corrected.file_url)
 
-        self.assertEqual((result["status"], result["failed"]), ("Dry Run Failed", 1), result)
-        self.assertEqual(result["groups"][0]["cause"], "Already in ERPNext")
+        self.assertEqual((result["status"], result["failed"]), ("Ready to Import", 0), result)
+        self.assertEqual(result["groups"], [])
+        self.assertEqual(result["warnings"][0]["field"], "customer_name")
 
     def test_a_whole_file_sent_again_does_not_bring_in_its_imported_rows_twice(self):
         # Address has no key column, so "Already in ERPNext" can't stop a row that came back:

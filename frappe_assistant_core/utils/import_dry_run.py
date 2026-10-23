@@ -100,6 +100,7 @@ CAUSE_BAD_DATE = "Wrong date format"
 CAUSE_BAD_VALUE = "Invalid value"
 CAUSE_DUPLICATE_IN_FILE = "Duplicate in the file"
 CAUSE_ALREADY_EXISTS = "Already in ERPNext"
+CAUSE_SHARED_VALUE = "Shared value"  # a warning, never a group: the rows stay ready
 CAUSE_REJECTED = "Rejected by ERPNext"
 # An update (#34005): the row's record isn't found, is found more than once, or another row has it.
 CAUSE_NO_MATCH = "No match"
@@ -545,6 +546,10 @@ class _Checker:
         self.alias_field = getattr(header, "tree_alias_field", None)
         self.key_df = _key_field(session, header)
         self.seen_keys: Dict[str, int] = {}
+        # The title field, when it isn't the key: rows sharing its value are a warning, not a failure
+        self.title_df = _title_field(session, header, self.key_df)
+        self.seen_titles: Dict[str, int] = {}
+        self.shared_rows: List[int] = []
         self.groups: Dict[Tuple, Dict[str, Any]] = {}
         self.rows: List[Dict[str, Any]] = []
         self.matches = matches  # None unless updating on match fields: row → matching records
@@ -878,6 +883,7 @@ class _Checker:
                     {"cause": CAUSE_SAME_RECORD, "label": self.key_label, "message": message},
                 )
             ]
+        self._note_shared_title(payload)
         if not self.key_df:
             return []
         value = cstr(payload.doc.get(self.key_df.fieldname)).strip()
@@ -894,6 +900,41 @@ class _Checker:
             message = _("A {0} with {1} '{2}' already exists.").format(_(self.doctype), label, value)
             return [((CAUSE_ALREADY_EXISTS, self.key_df.fieldname), {**info, "message": message})]
         return []
+
+    def _note_shared_title(self, payload) -> None:
+        """Remember a row whose title repeats an earlier row's or a record in ERPNext. Two records
+        may share a title when a naming series names them, so the row is never failed for it."""
+        if not self.title_df:
+            return
+        value = cstr(payload.doc.get(self.title_df.fieldname)).strip()
+        if not value:
+            return
+        row = payload.rows[0].row_number
+        first = self.seen_titles.setdefault(value.casefold(), row)
+        if first != row or (
+            self.import_type == INSERT and frappe.db.exists(self.doctype, {self.title_df.fieldname: value})
+        ):
+            self.shared_rows.append(row)
+
+    def shared_warnings(self) -> List[Dict[str, Any]]:
+        """The warning for the rows that share their title with another record, if any."""
+        if not self.shared_rows:
+            return []
+        label = _(self.title_df.label)
+        count = len(self.shared_rows)
+        return [
+            {
+                "cause": CAUSE_SHARED_VALUE,
+                "field": self.title_df.fieldname,
+                "label": label,
+                "count": count,
+                "example_rows": self.shared_rows[:EXAMPLES_PER_GROUP],
+                "message": _(
+                    "{0} rows share their {1} with another {2}, in the file or in ERPNext. This is "
+                    "allowed here, so they are still ready."
+                ).format(count, label, _(self.doctype)),
+            }
+        ]
 
     # The real insert (or update), rolled back. Returns the problems and the name it created.
     def _insert_problems(
@@ -1033,19 +1074,31 @@ def _self_links(doctype: str) -> List[str]:
     return [df.fieldname for df in meta.fields if df.fieldtype == "Link" and df.options == doctype]
 
 
-def _key_field(session, header):
-    """The field that names a record, used to find duplicates, when a column maps to it."""
-    meta = frappe.get_meta(session.target_doctype)
-    autoname = get_autoname_field(session.target_doctype)
-    mapped = {
+def _mapped_fields(session, header) -> Dict[str, Any]:
+    return {
         column.df.fieldname: column.df
         for column in header.columns
         if column.df and not column.skip_import and column.df.parent == session.target_doctype
     }
-    for fieldname in (session.match_key, autoname.fieldname if autoname else None, meta.title_field):
+
+
+def _key_field(session, header):
+    """The mapped field that is the record's name, else the first mapped field marked unique: a
+    repeated value of it is a real duplicate. Any other field, the title field included, may repeat
+    (a naming series names a record whatever its title says)."""
+    autoname = get_autoname_field(session.target_doctype)
+    mapped = _mapped_fields(session, header)
+    for fieldname in (session.match_key, autoname.fieldname if autoname else None):
         if fieldname and fieldname in mapped:
             return mapped[fieldname]
-    return None
+    return next((df for df in mapped.values() if df.unique), None)
+
+
+def _title_field(session, header, key_df):
+    """The mapped title field when it isn't the key: its repeated values are only a warning."""
+    title = frappe.get_meta(session.target_doctype).title_field
+    df = _mapped_fields(session, header).get(title) if title else None
+    return df if df and not (key_df and key_df.fieldname == df.fieldname) else None
 
 
 _TEMPORARY_NAME = re.compile(r"\bnew-[a-z0-9-]+-[a-z0-9]{6,}\b")
@@ -1272,6 +1325,7 @@ def _store(session_name: str, file_doc, checker: _Checker, total_payloads: int) 
         **counts,
         "duplicate_key": checker.key_df.fieldname if checker.key_df else None,
         "groups": [_summary_group(g) for g in groups],
+        "warnings": checker.shared_warnings() if hasattr(checker, "shared_warnings") else [],
     }
     if getattr(checker, "matches", None) is not None:  # the opening engines' checkers have none
         summary["update"] = checker.preview
