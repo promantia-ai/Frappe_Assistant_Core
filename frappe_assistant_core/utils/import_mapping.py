@@ -91,6 +91,9 @@ def _importable_fields(meta) -> List[Dict[str, Any]]:
             field["required"] = True
             if df.default:
                 field["default"] = df.default
+        elif _hsn_validated(meta.name, df.fieldname):
+            field["required"] = True
+            field["note"] = _("Required by India Compliance on this site for an Item that is sold.")
         if df.fieldtype == "Link":
             field["link"] = df.options
         elif df.fieldtype == "Dynamic Link":
@@ -102,6 +105,18 @@ def _importable_fields(meta) -> List[Dict[str, Any]]:
                 field["options_total"] = len(options)
         fields.append(field)
     return fields
+
+
+def _hsn_validated(doctype: str, fieldname: str) -> bool:
+    """Whether this is the Item HSN/SAC field and the site refuses a sales Item without it. India
+    Compliance makes the field mandatory in code (GST Settings), not in the DocType, so ``reqd`` is 0."""
+    if doctype != "Item" or fieldname != "gst_hsn_code":
+        return False
+    if "india_compliance" not in frappe.get_installed_apps():
+        return False
+    from india_compliance.gst_india.utils import get_hsn_settings
+
+    return bool(get_hsn_settings()[0])
 
 
 def _naming(meta) -> Dict[str, Any]:
