@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import frappe
 from frappe import _
 from frappe.model import no_value_fields, table_fields
-from frappe.utils import cstr
+from frappe.utils import cint, cstr
 from frappe.utils.nestedset import get_root_of
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
@@ -801,8 +801,10 @@ def masters_plan(session, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def check_masters(session, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """``documents`` sent to create_document with ``import_session``: each must be one of the
     session's missing masters, as the latest check planned it (masters_plan), so nothing is
-    created that the rows don't need. Returns them as they will be created, with each tree
-    record's parent filled in. Raises FixProblem, or FixProblems listing every wrong one."""
+    created that the rows don't need. A tree record's missing parent may come in the same list:
+    it is created first, as a group (#34409). Returns them as they will be created, parents
+    first, with each tree record's parent filled in. Raises FixProblem, or FixProblems listing
+    every wrong one."""
     if dry_run.is_running(session):
         raise FixProblem(
             _("The file is still being checked. Create the masters once the check has finished.")
@@ -815,10 +817,11 @@ def check_masters(session, documents: List[Dict[str, Any]]) -> List[Dict[str, An
             )
         )
     plan = {(m["doctype"], m["name"]): m for m in masters_plan(session, list(last_groups(session).values()))}
+    listed, named = _listed_tree(documents)
     planned, problems, seen = [], [], set()
     for number, entry in enumerate(documents, start=1):
         try:
-            item = _planned_master(session, plan, entry)
+            item = _planned_master(session, plan, entry, listed, named)
         except FixProblem as e:
             problems.append({"document": number, "doctype": entry.get("doctype"), "error": str(e)})
             continue
@@ -828,10 +831,56 @@ def check_masters(session, documents: List[Dict[str, Any]]) -> List[Dict[str, An
             planned.append(item)
     if problems:
         raise FixProblems(problems, _("Nothing was created. Correct these and call again."))
-    return planned
+    return parents_first(planned)
 
 
-def _planned_master(session, plan, entry) -> Dict[str, Any]:
+def _listed_tree(documents) -> Tuple[set, set]:
+    """Of ``documents``' tree records: the (doctype, name) of each, and of each parent one names."""
+    listed, named = set(), set()
+    for entry in documents:
+        doctype = cstr(entry.get("doctype")).strip()
+        if not doctype or not frappe.db.exists("DocType", doctype):
+            continue
+        meta = frappe.get_meta(doctype)
+        name_field, parent_field = _name_field(meta), _parent_field(meta)
+        if not parent_field:
+            continue
+        data = entry.get("data") or {}
+        listed.add((doctype, cstr(data.get(name_field)).strip()))
+        parent = cstr(data.get(parent_field)).strip()
+        if parent:
+            named.add((doctype, parent))
+    return listed, named
+
+
+def parents_first(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """``items`` (records to create) with each tree record after the one in the list it goes
+    under (#34409), otherwise as given. Raises FixProblem when records go under each other."""
+    parent_of = {}
+    for item in items:
+        parent_field = _parent_field(frappe.get_meta(item["doctype"]))
+        parent = item["data"].get(parent_field) if parent_field else None
+        parent_of[(item["doctype"], _planned_name(item))] = (item["doctype"], parent) if parent else None
+
+    def depth(key) -> int:
+        seen, parent, level = [key], parent_of[key], 0
+        while parent in parent_of:
+            if parent in seen:
+                raise FixProblem(
+                    _(
+                        "These {0} records go under each other: {1}. Put one under a record outside the list."
+                    ).format(_(key[0]), ", ".join(f"'{name}'" for _doctype, name in seen))
+                )
+            seen.append(parent)
+            level += 1
+            parent = parent_of[parent]
+        return level
+
+    levels = {key: depth(key) for key in parent_of}
+    return sorted(items, key=lambda item: levels[(item["doctype"], _planned_name(item))])
+
+
+def _planned_master(session, plan, entry, listed=frozenset(), named=frozenset()) -> Dict[str, Any]:
     doctype = cstr(entry.get("doctype")).strip()
     if not frappe.db.exists("DocType", doctype):
         raise FixProblem(_("There is no DocType {0}.").format(doctype))
@@ -866,8 +915,9 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
         return {"doctype": doctype, "data": data}
     meta = frappe.get_meta(doctype)
     name_field, parent_field = _name_field(meta), _parent_field(meta)
+    group_field = "is_group" if parent_field and meta.has_field("is_group") else None
     data = entry.get("data") or {}
-    others = sorted(set(data) - {name_field, parent_field})
+    others = sorted(set(data) - {name_field, parent_field, group_field})
     if others:
         fields = " and ".join(f for f in (name_field, parent_field) if f)
         raise FixProblem(
@@ -876,7 +926,8 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
             )
         )
     name = cstr(data.get(name_field)).strip()
-    if (doctype, name) not in plan:
+    # a parent another record in the list goes under is needed too, though no row names it
+    if (doctype, name) not in plan and (doctype, name) not in named:
         missing = _planned_list(plan)
         raise FixProblem(
             _("{0} '{1}' isn't one of the masters the last check found missing ({2}).").format(
@@ -888,9 +939,18 @@ def _planned_master(session, plan, entry) -> Dict[str, Any]:
             _("{0} '{1}' already exists. Check the file again with dry_run_import.").format(_(doctype), name)
         )
     planned = {name_field: name}
-    parent = _parent(doctype, cstr(data.get(parent_field)).strip() if parent_field else "")
+    in_list = {n for d, n in listed if d == doctype}
+    parent = _parent(doctype, cstr(data.get(parent_field)).strip() if parent_field else "", in_list)
     if parent:
         planned[parent_field] = parent
+    if group_field and (doctype, name) in named:
+        planned[group_field] = 1  # it holds the records the list puts under it
+    elif group_field and cint(data.get(group_field)):
+        raise FixProblem(
+            _("{0} '{1}' is created as a group only when another record in the list goes under it.").format(
+                _(doctype), name
+            )
+        )
     return {"doctype": doctype, "data": planned}
 
 
@@ -1011,15 +1071,16 @@ def link_created(session, results: List[Dict[str, Any]]) -> None:
     session.save()
 
 
-def _parent(doctype: str, parent: str) -> Optional[str]:
-    """The parent the record goes under: one the user chose, or the tree's root."""
+def _parent(doctype: str, parent: str, in_list=frozenset()) -> Optional[str]:
+    """The parent the record goes under: one the user chose, or the tree's root. A parent
+    ``in_list`` (created in the same call) is created first, as a group."""
     if not frappe.get_meta(doctype).is_tree:
         if parent:
             raise FixProblem(_("A {0} has no parent.").format(_(doctype)))
         return None
     parent = parent or default_parent(doctype)
-    if not parent:
-        return None
+    if not parent or parent in in_list:
+        return parent or None
     if not _holds_records(doctype, parent) or not frappe.has_permission(doctype, "read", doc=parent):
         filters = {"is_group": 1} if frappe.get_meta(doctype).has_field("is_group") else {}
         groups = frappe.get_list(doctype, filters=filters, pluck="name", limit_page_length=FULL_SCAN)

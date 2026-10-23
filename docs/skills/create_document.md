@@ -133,7 +133,7 @@ Reply: `{"success": true, "created": [{"doctype": "Customer Group", "name": "Hos
 
 `dry_run_import` lists the masters a migration file needs that don't exist yet and can be created from their name (`masters_plan`): Customer Groups, Territories, UOMs, Brands and the like. Create them with this tool, `documents` and **`import_session`**:
 
-1. **Show the plan as one table**, with every record: DocType, name, parent, rows it fixes. Let the user change a parent; it must be an existing group of the same tree (e.g. a Customer Group with "Is Group" ticked). Ask once: "Create these 4 records?"
+1. **Show the plan as one table**, with every record: DocType, name, parent, rows it fixes. Let the user change a parent; it must be an existing group of the same tree (e.g. a Customer Group with "Is Group" ticked), or a missing one added to the list (below). Show a tree record's full path, e.g. "All Customer Groups > Retail > Online". Ask once: "Create these 4 records?"
 2. **Call once** with each plan entry's `doctype` and `data`, and the session:
 
    ```json
@@ -148,7 +148,7 @@ Reply: `{"success": true, "created": [{"doctype": "Customer Group", "name": "Hos
 
 3. **Show the change log**: the same table with a Result column. Then call `dry_run_import` again without fixes: the rows that needed them now pass.
 
-With `import_session`, each record must be one of that session's missing masters as its **latest** check planned it: the same DocType and name, only the name and the parent. **Never invent one**; to use another name, map the rows instead. Each record created is listed on the session (**Created Records**). Refused, with nothing created, when the file or its mapping changed since the check (check again first), or a record already exists or can't be created here.
+With `import_session`, each record must be one of that session's missing masters as its **latest** check planned it: the same DocType and name, only the name and the parent. The one addition: a **missing parent** the user wants a record under, with its own parent (an existing group, or another missing one), e.g. `{"customer_group_name": "Retail", "parent_customer_group": "All Customer Groups"}` before Online goes under Retail. It is created first, as a group (`is_group` is set for it; on any other record it is refused), whatever order the list has; records under each other are refused. **Never invent one**; to use another name, map the rows instead. Each record created is listed on the session (**Created Records**). Refused, with nothing created, when the file or its mapping changed since the check (check again first), or a record already exists or can't be created here.
 
 A missing record that can't be created has no `create` fix in the check; its group has `cannot_create` saying why. For example: ERPNext names it itself (Customer, Supplier, Warehouse, Account), it needs more than a name (Item, Price List), it is a system record (Currency, User), it is a Company, or the file imports that DocType itself. Offer **map** to an existing record, or **leave out** the rows.
 

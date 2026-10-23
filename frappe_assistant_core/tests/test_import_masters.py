@@ -207,6 +207,110 @@ class TestImportMasters(BaseAssistantTest):
         self.assertIn(f"'{leaf.name}' isn't a Customer Group", response["result"]["problems"][0]["error"])
         self.assertFalse(frappe.db.exists("Territory", self.territory))  # all or nothing
 
+    # -- #34409: a missing parent is created first, as a group ------------------------------------
+
+    def _under(self, result, *chain):
+        """The plan's records, with the Customer Group under ``chain`` (top first) and the chain's
+        records added before it, each under the one before (the first under the root)."""
+        records = self._records(result, **{"Customer Group": chain[-1]})
+        parent = "All Customer Groups"
+        for name in chain:
+            records.append(
+                {
+                    "doctype": "Customer Group",
+                    "data": {"customer_group_name": name, "parent_customer_group": parent},
+                }
+            )
+            parent = name
+        return records
+
+    def test_a_missing_parent_sent_with_its_child_is_created_first_as_a_group(self):
+        # The ticket's "Retail > Online": the rows need Online, under a Retail that isn't there.
+        session, result = self._session()
+        retail = f"Retail {self.tag}"
+
+        response = self._create(session, self._under(result, retail))
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(
+            frappe.db.get_value("Customer Group", retail, ["is_group", "parent_customer_group"]),
+            (1, "All Customer Groups"),
+        )
+        self.assertEqual(
+            frappe.db.get_value("Customer Group", self.group, ["is_group", "parent_customer_group"]),
+            (0, retail),
+        )
+        created = [r["name"] for r in response["result"]["created"]]
+        self.assertLess(created.index(retail), created.index(self.group))
+        records = {r.record_name: r.parent_record for r in self._doc(session).created_records}
+        self.assertEqual((records[retail], records[self.group]), ("All Customer Groups", retail))
+
+    def test_a_missing_chain_is_created_top_down_whatever_order_it_is_sent_in(self):
+        session, result = self._session()
+        chain = [f"Retail {self.tag}", f"Online {self.tag}", f"Marketplaces {self.tag}"]
+        records = self._under(result, *chain)
+
+        response = self._create(session, list(reversed(records)))
+
+        self.assertTrue(response["success"], response)
+        created = [r["name"] for r in response["result"]["created"] if r["doctype"] == "Customer Group"]
+        self.assertEqual(created, [*chain, self.group])
+        for parent, child in zip(chain, chain[1:] + [self.group]):
+            self.assertEqual(frappe.db.get_value("Customer Group", child, "parent_customer_group"), parent)
+        self.assertEqual([frappe.db.get_value("Customer Group", n, "is_group") for n in chain], [1, 1, 1])
+
+    def test_a_parent_can_be_sent_as_a_group(self):
+        session, result = self._session()
+        retail = f"Retail {self.tag}"
+        records = self._under(result, retail)
+        records[-1]["data"]["is_group"] = 1  # Retail, which Online goes under
+
+        self.assertTrue(self._create(session, records)["success"])
+
+    def test_a_record_nothing_goes_under_cannot_be_made_a_group(self):
+        session, result = self._session()
+        records = self._records(result)
+        records[0]["data"]["is_group"] = 1  # the rows' own group, with nothing under it
+
+        response = self._create(session, records)
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("goes under it", response["result"]["problems"][0]["error"])
+
+    def test_a_record_the_rows_dont_need_and_nothing_goes_under_is_still_refused(self):
+        session, result = self._session()
+        records = self._records(result) + [
+            {
+                "doctype": "Customer Group",
+                "data": {
+                    "customer_group_name": f"Retail {self.tag}",
+                    "parent_customer_group": "All Customer Groups",
+                },
+            }
+        ]
+
+        response = self._create(session, records)
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("isn't one of the masters", response["result"]["problems"][0]["error"])
+
+    def test_records_under_each_other_are_refused_and_nothing_is_created(self):
+        session, result = self._session()
+        loop = f"Loop {self.tag}"
+        records = self._records(result, **{"Customer Group": loop}) + [
+            {
+                "doctype": "Customer Group",
+                "data": {"customer_group_name": loop, "parent_customer_group": self.group},
+            }
+        ]
+
+        response = self._create(session, records)
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("under each other", str(response["result"]))
+        self.assertFalse(frappe.db.exists("Customer Group", loop))
+        self.assertFalse(frappe.db.exists("Territory", self.territory))
+
     # -- one approval, all created, linked to the session (criterion 2) -----------------------------
 
     def test_one_call_creates_every_master_and_links_it_to_the_session(self):
@@ -369,13 +473,13 @@ class TestImportMasters(BaseAssistantTest):
     def test_a_master_with_more_than_its_name_and_parent_is_refused(self):
         session, result = self._session()
         records = self._records(result)
-        records[0]["data"]["is_group"] = 1
+        records[0]["data"]["default_price_list"] = "Standard Selling"
 
         response = self._create(session, records)
 
         self.assertFalse(response["success"], response)
         error = response["result"]["problems"][0]["error"]
-        self.assertIn("is_group", error)
+        self.assertIn("default_price_list", error)
         self.assertIn("customer_group_name and parent_customer_group", error)  # what it does take
 
     def test_a_master_that_already_exists_is_refused(self):
