@@ -294,11 +294,16 @@ class TestImportMasters(BaseAssistantTest):
         session, result = self._session()
         real_execute = DocumentCreate.execute
         commit_held = []
+        # The batch holds a commit with Frappe's own flag where it has one (v16), else a stand-in (v15).
+        flag_before = getattr(frappe.db, "_disable_transaction_control", 0)
 
         def commits(tool, arguments):
             # A controller's own frappe.db.commit() would make the records before it permanent.
             if arguments.get("doctype"):  # a record's own call, not the list call around them
-                commit_held.append("commit" in vars(frappe.db))
+                commit_held.append(
+                    "commit" in vars(frappe.db)
+                    or getattr(frappe.db, "_disable_transaction_control", 0) > flag_before
+                )
             frappe.db.commit()  # nosemgrep: frappe-manual-commit — the controller this test imitates
             return real_execute(tool, arguments)
 
@@ -308,6 +313,7 @@ class TestImportMasters(BaseAssistantTest):
         self.assertTrue(response["success"], response)
         self.assertEqual(commit_held, [True, True, True])
         self.assertNotIn("commit", vars(frappe.db))  # given back afterwards
+        self.assertEqual(getattr(frappe.db, "_disable_transaction_control", 0), flag_before)
 
     def test_records_created_reach_global_search_once_all_succeed(self):
         session, result = self._session()
