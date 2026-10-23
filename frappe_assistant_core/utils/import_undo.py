@@ -1422,14 +1422,19 @@ def _remove(session, record: Record):
 def _error_of(e: Exception, since: int) -> str:
     """What refused a record: the messages shown since ``since``, which are then dropped, so
     one record's failure isn't shown with the next."""
+    from frappe_assistant_core.core.base_tool import exception_message
     from frappe_assistant_core.utils import import_dry_run as dry_run
 
     log = list(frappe.local.message_log or [])
     frappe.local.message_log = log[since:]
     try:
-        return dry_run._message_of(e)
+        text = dry_run._message_of(e)
     finally:
         frappe.local.message_log = log[:since]
+    if text in ("", type(e).__name__) and isinstance(e, frappe.PermissionError):
+        # Frappe 16 refuses a delete with a bare PermissionError: its reason, else plain words
+        text = exception_message(e, fallback=_("You're not allowed to delete it."))
+    return text
 
 
 def _restore(session, message: str) -> None:

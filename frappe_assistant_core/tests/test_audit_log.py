@@ -321,9 +321,7 @@ class TestAuditTarget(BaseAssistantTest):
         self.assertIn("more", target_doctype)  # says the list goes on
 
     def test_a_single_record_call_still_records_its_doctype_and_name(self):
-        self.assertEqual(
-            self._target({"doctype": "ToDo", "name": "TODO-1", "data": {}}), ("ToDo", "TODO-1")
-        )
+        self.assertEqual(self._target({"doctype": "ToDo", "name": "TODO-1", "data": {}}), ("ToDo", "TODO-1"))
         self.assertEqual(self._target({"doctype": "ToDo", "data": {}}), ("ToDo", None))
 
     def test_a_name_only_call_still_records_its_name(self):
