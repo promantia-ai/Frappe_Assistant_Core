@@ -79,7 +79,15 @@ class RunMigrationPlan(BaseTool):
         except frappe.PermissionError as e:
             return permission_error_result(import_plan.SESSION_DOCTYPE, exception_message(e), name=plan_name)
         if plan.status not in import_plan.OPEN:
-            return {"success": True, **import_plan.result(plan)}  # running or done: report
+            # Running or ended: the report, saying nothing was started. Its message would be the
+            # last step ("Approved: N files."), which reads as a new approval.
+            report = import_plan.result(plan)
+            if plan.status == "Running":
+                message = _("Plan {0} is already running: nothing was started again.")
+            else:
+                message = _("Plan {0} already finished ({1}): nothing was started again.")
+            report["message"] = message.format(plan.name, _(plan.status))
+            return {"success": True, **report, "already": plan.status}
 
         problem = import_plan.run_problem(plan)
         if not problem:

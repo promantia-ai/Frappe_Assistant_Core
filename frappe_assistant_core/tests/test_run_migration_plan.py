@@ -680,6 +680,41 @@ class TestAPlanThatIsStartedOrEnded(ImportRunCase):
         steps = [step.message for step in import_plan.get_plan(plan).steps]
         self.assertEqual(len([s for s in steps if s.startswith("groups.csv:")]), 1, steps)
 
+    def test_approving_a_running_plan_again_reports_it_instead_of_approving_it(self):
+        # The reply read "Approved: 2 files." (the step the first approval wrote): a second call
+        # looked like a new approval (e2e finding, #34351).
+        plan, _groups, _items = self._ready_plan()
+        running = self._start(plan)
+
+        with patch.object(import_plan.frappe, "enqueue") as enqueue:
+            response = self._approve(plan)
+
+        self.assertTrue(response["success"], response)
+        result = response["result"]
+        self.assertEqual((result["already"], result["status"]), ("Running", "Running"))
+        self.assertIn("already running", result["message"])
+        self.assertIn("nothing was started again", result["message"])
+        self.assertNotIn("Approved", result["message"])
+        self.assertEqual(len(result["files"]), 2)  # the status report is still there
+        enqueue.assert_not_called()
+        self.assertEqual(import_plan._settings(plan), running)
+
+    def test_approving_a_finished_plan_again_says_it_finished(self):
+        plan, _groups, _items = self._ready_plan()
+        first = self._approve(plan)
+        self.assertEqual(import_plan.get_plan(plan).status, "Completed", first)
+
+        with patch.object(import_plan.frappe, "enqueue") as enqueue:
+            response = self._approve(plan)
+
+        self.assertTrue(response["success"], response)
+        result = response["result"]
+        self.assertEqual(result["already"], "Completed")
+        self.assertIn("already finished", result["message"])
+        self.assertIn("nothing was started again", result["message"])
+        self.assertNotIn("Approved", result["message"])
+        enqueue.assert_not_called()
+
     def test_the_plan_job_is_enqueued_once(self):
         plan, _groups, _items = self._ready_plan()
 
