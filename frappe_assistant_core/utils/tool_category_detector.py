@@ -48,7 +48,6 @@ PRIVILEGED_TOOLS = {
     "run_database_query",
     "delete_document",
     "document_action",  # can cancel, which reverses accounting and stock entries
-    "undo_import",  # cancels and deletes the records an import created, ledger entries with them
     "run_migration_plan",  # creates masters and imports every file of a plan, submitting opening entries
 }
 
@@ -105,8 +104,6 @@ READ_ONLY_TOOLS = {
     "set_opening_balances",
     # Every row it inserts is rolled back; it writes only the session and its result file.
     "dry_run_import",
-    # Deletes nothing: lists what an undo would remove; it writes only its figures on the session.
-    "preview_import_undo",
 }
 
 # Tools that are always categorized as write (hardcoded list)

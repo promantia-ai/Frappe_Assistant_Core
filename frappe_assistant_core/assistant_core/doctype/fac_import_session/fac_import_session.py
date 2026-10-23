@@ -66,7 +66,7 @@ def engine_session(name: str):
 class FACImportSession(Document):
     def validate(self):
         # Every field is the engine's state: the dry run's verdict, the mapping, the file, the
-        # Data Imports and the undo list (#34400). Only the engine writes them, for everyone
+        # Data Imports and the created-records list (#34400). Only the engine writes them, for everyone
         # (System Managers too): a session changed by hand would import what was never checked.
         if self.flags.fac_import_engine:
             return

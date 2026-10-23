@@ -68,6 +68,24 @@ def _prepared_payload_extras(stored: dict, report_doc) -> dict:
 QUEUE_WAIT_SLACK_SECONDS = 300
 
 
+def completed_prepared_report(filters, user: str, report_name: str):
+    """The user's latest completed Prepared Report of ``report_name`` with these filters, or None.
+    Frappe 15 and early 16 call this get_completed_prepared_report; later 16 replaced it with
+    get_last_processed_prepared_report, which returns failed ones too. Asked here directly."""
+    from frappe.core.doctype.prepared_report.prepared_report import process_filters_for_prepared_report
+
+    return frappe.db.get_value(
+        "Prepared Report",
+        {
+            "status": "Completed",
+            "filters": process_filters_for_prepared_report(filters),
+            "owner": user,
+            "report_name": report_name,
+        },
+        order_by="creation desc",
+    )
+
+
 class ReportTools:
     """
     Shared utility class for Frappe report operations.
@@ -387,7 +405,6 @@ class ReportTools:
 
         from frappe.core.doctype.prepared_report.prepared_report import (
             REPORT_TIMEOUT,
-            get_completed_prepared_report,
             get_reports_in_queued_state,
             make_prepared_report,
         )
@@ -395,7 +412,7 @@ class ReportTools:
 
         try:
             # Check if a completed prepared report exists with these filters
-            prepared_report_name = get_completed_prepared_report(
+            prepared_report_name = completed_prepared_report(
                 filters=filters, user=frappe.session.user, report_name=report_doc.name
             )
 

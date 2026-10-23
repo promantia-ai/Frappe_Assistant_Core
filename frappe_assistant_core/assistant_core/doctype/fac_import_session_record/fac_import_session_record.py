@@ -6,7 +6,7 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
-"""FAC Import Session Record: a master record an import session created, so it can be undone."""
+"""FAC Import Session Record: a master record an import session created."""
 
 from frappe.model.document import Document
 
