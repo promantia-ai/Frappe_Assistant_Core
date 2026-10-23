@@ -96,6 +96,13 @@ class TestImportFixes(BaseAssistantTest):
         self.assertTrue(checked["success"], checked)
         return session, checked["result"]
 
+    def _run_job(self, session):
+        """What the queue runs. The job commits when it is done, as a worker's job must: the
+        commit is held here, so a test's rows never stay in the site's database (#34412)."""
+        with patch.object(frappe.db.__class__, "commit", autospec=True) as commit:
+            import_dry_run.run_job(session, "Administrator")
+        commit.assert_called()  # the job did reach its commit: it is the patch that held it
+
     def _fix(self, session, *fixes):
         response = self._run("dry_run_import", {"session": session, "fixes": list(fixes)})
         self.assertTrue(response["success"], response)
@@ -421,7 +428,7 @@ class TestImportFixes(BaseAssistantTest):
         self.assertIn(f"'{self.missing}' becomes '{self.existing_group}'", started["applied"][0])
         self.assertEqual(enqueue.call_args.kwargs["session_name"], session)
 
-        import_dry_run.run_job(session, "Administrator")  # what the queued job runs
+        self._run_job(session)  # what the queued job runs
 
         summary = json.loads(self._doc(session).validation_summary)
         self.assertEqual((summary["ready"], summary["failed"]), (3, 2))
@@ -432,7 +439,7 @@ class TestImportFixes(BaseAssistantTest):
         with patch.object(import_dry_run, "BACKGROUND_ROWS", 2), patch("frappe.enqueue"):
             started = self._run("dry_run_import", {"session": session})["result"]
         self.assertEqual(started["state"], "running")
-        import_dry_run.run_job(session, "Administrator")  # what the queued job runs
+        self._run_job(session)  # what the queued job runs
 
         # FACO reads it with get_document: the explanations and fixes are there, as they are
         # in a reply that came back at once.
@@ -449,7 +456,7 @@ class TestImportFixes(BaseAssistantTest):
 
         with patch.object(import_dry_run, "BACKGROUND_ROWS", 0), patch("frappe.enqueue"):
             self._run("dry_run_import", {"session": session})
-        import_dry_run.run_job(session, "Administrator")
+        self._run_job(session)
 
         summary = json.loads(self._doc(session).validation_summary)
         self.assertIn("The file is ready: 1 row will be imported.", summary["message"])

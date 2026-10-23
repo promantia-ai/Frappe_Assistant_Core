@@ -7,13 +7,18 @@ its details, the mapping, the fixes, the validation results and a log of every
 step. The file itself stays where the user attached it; no copy is saved.
 """
 
+import base64
 import datetime
 import io
+import unittest
+from unittest.mock import patch
 
 import frappe
 from openpyxl import Workbook
 
-from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
+from frappe_assistant_core.chat.api.chat.helpers import _attach_files_to_message
+from frappe_assistant_core.chat.api.settings.uploads import upload_message_file
+from frappe_assistant_core.chat.doctype.fac_chat_message.fac_chat_message import FACChatMessage
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 
@@ -62,6 +67,25 @@ class TestImportSession(BaseAssistantTest):
             {"doctype": "File", "file_name": file_name, "content": content, "is_private": 1}
         ).insert()
 
+    def _chat_upload(self, file_name: str, content: bytes) -> dict:
+        """A file as a user sends it in chat: through upload_message_file, then linked to their
+        FAC Chat Message, as the composer does. Returns the upload's ``file`` reply."""
+        message = FACChatMessage.create_message(
+            session_id=f"import-session-{frappe.generate_hash(length=8)}",
+            role="user",
+            content="Here is the file to import",
+        )
+        # The one thing not built here: the FAC Chat gate (enable_fac_chat, registration and a
+        # seat), which a test site doesn't have. Everything the upload does after it is real.
+        with patch(
+            "frappe_assistant_core.chat.api.settings.access.can_use_faco", return_value={"can_use": True}
+        ):
+            uploaded = upload_message_file(
+                file_data=base64.b64encode(content).decode(), file_name=file_name, content_type="text/csv"
+            )
+        self.assertEqual(_attach_files_to_message([uploaded["file"]["file_url"]], message.name), 1)
+        return uploaded["file"]
+
     def _run(self, tool_name, arguments):
         """Call a tool the way the MCP endpoint does: through _safe_execute."""
         return self.registry.get_tool(tool_name)._safe_execute(arguments)
@@ -93,12 +117,22 @@ class TestImportSession(BaseAssistantTest):
         self.assertIn("start_import_session", CorePlugin().get_tools())
 
     def test_tool_is_classified_read_only(self):
-        # It writes only the session, never business data,
-        # so it must not raise an approval card.
-        from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
+        # It writes only the session, never business data, so it must not raise an approval
+        # card. What decides that is what the site tells its clients: tools/list's readOnlyHint
+        # and the chat's tool list, both resolved from the site's tool category. The category is
+        # resolved as a site with no stored FAC Tool Configuration row for it does (a stored row
+        # is an administrator's choice and wins), so the test follows the tool's own code.
+        from frappe_assistant_core.api.fac_endpoint import _build_tool_registry
+        from frappe_assistant_core.chat.api.tools import list_available_tools
 
-        tool = self.registry.get_tool("start_import_session")
-        self.assertEqual(detect_tool_category(tool), "read_only")
+        frappe.db.delete("FAC Tool Configuration", {"tool_name": "start_import_session"})
+
+        advertised = _build_tool_registry()["start_import_session"]
+        listed = next(t for t in list_available_tools()["tools"] if t["name"] == "start_import_session")
+
+        self.assertIs(advertised["annotations"]["readOnlyHint"], True)
+        self.assertTrue(listed["read_only"], listed)
+        self.assertFalse(listed["default_requires_approval"], listed)
 
     # -- criterion 1: open a session, show sheets, columns and row counts -----------
 
@@ -389,6 +423,42 @@ class TestImportSession(BaseAssistantTest):
 
         self.assertEqual(self._new_sessions(), 0)
 
+    # -- a file sent in chat: the path production takes ------------------------------------------
+
+    def test_a_file_sent_in_chat_opens_a_session_by_its_url_and_by_its_id(self):
+        # Unique bytes: Frappe content-addresses uploads, so a body seen before would share a file.
+        content = CSV_CONTENT + f"Customer 26 {frappe.generate_hash(length=8)},Retail,India\n".encode()
+        upload = self._chat_upload("customers.csv", content)
+        file_doc = frappe.get_doc("File", upload["name"])
+        self.assertEqual(file_doc.attached_to_doctype, "FAC Chat Message")
+        self.assertTrue(file_doc.is_private)
+
+        by_url = self._start(file_url=upload["file_url"])
+        by_id = self._start(file_id=upload["name"], file_url=upload["file_url"])
+
+        for result in (by_url, by_id):
+            self.assertEqual((result["file_name"], result["row_count"]), ("customers.csv", 26))
+            self.assertEqual(result["columns"], ["Customer Name", "Customer Group", "Territory"])
+            doc = frappe.get_doc("FAC Import Session", result["session_id"])
+            self.assertEqual(
+                (doc.source_file, doc.user, doc.status), (upload["name"], self.user, "File Read")
+            )
+        # The session reads the chat's own file: no copy is made.
+        self.assertEqual(self._new_files(), {upload["name"]})
+
+    def test_another_users_chat_file_cannot_open_a_session(self):
+        frappe.set_user(self.make_desk_user("other"))
+        unique = f"{frappe.generate_hash(length=8)},,\n".encode()
+        theirs = self._chat_upload("theirs.csv", CSV_CONTENT + unique)
+        frappe.set_user(self.user)
+        self.assert_cannot(self.user, "read", "File", theirs["name"])
+
+        by_url = self._start_fails(file_url=theirs["file_url"])
+        by_id = self._start_fails("don't have access", file_id=theirs["name"])
+
+        self.assertNotIn("Customer 1", frappe.as_json([by_url, by_id]))
+        self.assertEqual(self._new_sessions(), 0)
+
     # -- criterion 2: the same conversation, later ------------------------------------------
 
     def test_session_records_the_conversation_it_belongs_to(self):
@@ -400,30 +470,49 @@ class TestImportSession(BaseAssistantTest):
 
         self.assertEqual(frappe.db.get_value("FAC Import Session", session_id, "chat_session_id"), "chat-123")
 
+    @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
     def test_mapping_fixes_and_validation_come_back_in_a_later_turn(self):
-        file_doc = self._upload("customers.csv", CSV_CONTENT)
+        # Each field is written by the tool that owns it (set_column_mapping, dry_run_import and
+        # its fixes), then read the way a later turn reads it: with get_document.
+        frappe.set_user("Administrator")
+        tag = frappe.generate_hash(length=6)
+        group = frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": f"Retail Customers {tag}",
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+        misspelt = f"Retail {tag}"
+        rows = "".join(f"Customer {i} {tag},{misspelt},India\n" for i in range(1, 4))
+        file_doc = self._upload("customers.csv", b"Customer Name,Customer Group,Territory\n" + rows.encode())
         session_id = self._start(file_url=file_doc.file_url)["session_id"]
-        # Production writes these through the mapping, rules and dry-run tools of
-        # #33989-#33991; set directly here, as the engine's own copy, to prove a later turn reads
-        # them back.
-        doc = engine_session(session_id)
-        doc.template_options = frappe.as_json({"column_to_field_map": {"0": "customer_name"}})
-        doc.transformation_rules = frappe.as_json([{"type": "trim", "column": "*"}])
-        doc.validation_summary = frappe.as_json({"ok": 20, "failed": 5})
-        doc.save()
+        mapping = {"Customer Name": "customer_name", "Customer Group": "customer_group"}
+        mapping["Territory"] = "Don't Import"
+        mapped = self._run(
+            "set_column_mapping", {"session": session_id, "mapping": mapping, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session_id})
+        self.assertTrue(checked["success"], checked)
+        link = next(g for g in checked["result"]["groups"] if g["cause"] == "Missing link")
+        fixed = self._run(
+            "dry_run_import",
+            {"session": session_id, "fixes": [{"group": link["id"], "action": "map", "to": group.name}]},
+        )
+        self.assertTrue(fixed["success"], fixed)
 
         response = self._run("get_document", {"doctype": "FAC Import Session", "name": session_id})
 
         self.assertTrue(response["success"], response)
         data = response["result"]["data"]
-        self.assertEqual(
-            frappe.parse_json(data["template_options"]), {"column_to_field_map": {"0": "customer_name"}}
-        )
+        columns = frappe.parse_json(data["template_options"])["column_to_field_map"]
+        self.assertEqual(set(columns.values()), {"customer_name", "customer_group", "Don't Import"})
         # fields that can quote the file arrive inside the untrusted-content fence (#34003)
-        self.assertEqual(
-            frappe.parse_json(_unfenced(data["transformation_rules"])), [{"type": "trim", "column": "*"}]
-        )
-        self.assertEqual(frappe.parse_json(_unfenced(data["validation_summary"])), {"ok": 20, "failed": 5})
+        maps = frappe.parse_json(_unfenced(data["transformation_rules"]))["value_maps"]
+        self.assertEqual([(m["from"], m["to"]) for m in maps], [(misspelt, group.name)])
+        summary = frappe.parse_json(_unfenced(data["validation_summary"]))
+        self.assertEqual((summary["total_rows"], summary["ready"], summary["failed"]), (3, 3, 0))
 
     # -- criterion 3 and privacy: who sees a session --------------------------------------
 

@@ -19,6 +19,7 @@ left empty, it took Selling Settings' default group, which a site may not have (
 
 import hashlib
 import json
+import os
 import threading
 import unittest
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.utils import import_dry_run
 
+TEST_SAVEPOINT = "fac_dry_run_test"
 GROUP = "FAC Dry Run Group"
 GROUP_NODE = "All Customer Groups"  # a group: a Customer can't be in it
 MAPPING = {
@@ -49,9 +51,14 @@ class TestDryRunImport(BaseAssistantTest):
         self.registry = get_tool_registry()
         self.files_before = set(frappe.get_all("File", pluck="name"))
         self.tag = frappe.generate_hash(length=6)
+        # The test transaction is rolled back once per class. Each test undoes its own rows
+        # instead, so the one test that commits for real (the series lock) doesn't make the
+        # rows of the tests before it permanent.
+        frappe.db.savepoint(TEST_SAVEPOINT)
         # A misspelt group of this test's own: one test creates it to show a fix.
         self.typo = f"Retial {self.tag}"
-        if not frappe.db.exists("Customer Group", GROUP):
+        self.made_group = not frappe.db.exists("Customer Group", GROUP)
+        if self.made_group:
             frappe.get_doc(
                 {
                     "doctype": "Customer Group",
@@ -70,6 +77,12 @@ class TestDryRunImport(BaseAssistantTest):
         # The transaction rollback removes File rows but not the files on disk.
         for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
             frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        try:
+            frappe.db.rollback(save_point=TEST_SAVEPOINT)
+        except Exception as e:
+            # A real commit (the series lock test's) ends every savepoint; it cleans up its own.
+            if "SAVEPOINT" not in str(e).upper():
+                raise
         super().tearDown()
 
     # -- helpers -----------------------------------------------------------------------
@@ -199,13 +212,60 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual([e["row"] for e in rejected["examples"]], [5])
 
     def test_nothing_is_written(self):
+        # Counting rows afterwards proves nothing when the insert never ran (it stayed green while
+        # every insert crashed on Frappe 16.52): the ready row's real insert is watched as well.
+        from frappe.model.document import Document
+
         session = self._session(self._mixed_rows())
-        before = {dt: frappe.db.count(dt) for dt in ("Customer", "Contact", "Email Queue", "Version")}
+        doctypes = ("Customer", "Contact", "Email Queue", "Version")
+        before = {dt: frappe.db.count(dt) for dt in doctypes}
+        queued = self._queue_lengths()
+        private = self._private_files()
+        files = set(frappe.get_all("File", pluck="name"))
+        inserted, real_db_insert = [], Document.db_insert
 
-        self._check(session)
+        def db_insert(doc, *args, **kwargs):
+            result = real_db_insert(doc, *args, **kwargs)  # past this line the row is in the table
+            inserted.append((doc.doctype, doc.get("customer_name")))
+            return result
 
-        self.assertEqual({dt: frappe.db.count(dt) for dt in before}, before)
+        with patch.object(Document, "db_insert", db_insert):
+            result = self._check(session)
+
+        # The one row with nothing wrong reached the insert, and only it.
+        self.assertEqual(result["ready"], 1, result)
+        self.assertEqual([i for i in inserted if i[0] == "Customer"], [("Customer", f"Alpha {self.tag}")])
+        # ... and it left nothing behind: not in a table, not on the queue, not on disk.
+        self.assertEqual({dt: frappe.db.count(dt) for dt in doctypes}, before)
         self.assertFalse(frappe.db.exists("Customer", {"customer_name": f"Alpha {self.tag}"}))
+        self.assertEqual(self._queue_lengths(), queued)
+        # The only File is the check's own result, attached to the session.
+        new_files = set(frappe.get_all("File", pluck="name")) - files
+        url = frappe.db.get_value("FAC Import Session", session, "validation_results")
+        results = frappe.get_doc("File", {"file_url": url})
+        self.assertEqual(new_files, {results.name})
+        self.assertEqual(
+            (results.attached_to_doctype, results.attached_to_name), ("FAC Import Session", session)
+        )
+        self.assertEqual(self._private_files() - private, {os.path.basename(results.file_url)})
+
+    def _run_job(self, session):
+        """What the queue runs. The job commits when it is done, as a worker's job must: the
+        commit is held here, so a test's rows never stay in the site's database (#34412)."""
+        with patch.object(frappe.db.__class__, "commit", autospec=True) as commit:
+            import_dry_run.run_job(session, "Administrator")
+        commit.assert_called()  # the job did reach its commit: it is the patch that held it
+
+    @staticmethod
+    def _queue_lengths():
+        from frappe.utils.background_jobs import get_queue
+
+        return {name: get_queue(name).count for name in ("short", "default", "long")}
+
+    @staticmethod
+    def _private_files():
+        folder = frappe.get_site_path("private", "files")
+        return set(os.listdir(folder)) if os.path.isdir(folder) else set()
 
     def test_a_group_shows_at_most_three_example_rows(self):
         rows = [[f"Row {i} {self.tag}", self.typo, "Company", ""] for i in range(5)]
@@ -630,7 +690,7 @@ class TestDryRunImport(BaseAssistantTest):
         progress = json.loads(frappe.db.get_value("FAC Import Session", session, "progress"))
         self.assertEqual((progress["state"], progress["total"]), ("queued", 7))
 
-        import_dry_run.run_job(session, "Administrator")
+        self._run_job(session)
 
         doc = frappe.get_doc("FAC Import Session", session)
         self.assertEqual(doc.status, "Dry Run Failed")
@@ -831,6 +891,8 @@ class TestDryRunImport(BaseAssistantTest):
         gone = {"force": True, "ignore_permissions": True, "delete_permanently": True}
         frappe.delete_doc("FAC Import Session", session, **gone)
         frappe.delete_doc("Customer", self.existing, **gone)
+        if self.made_group:  # this test's setUp made it, and the commit made it permanent
+            frappe.delete_doc("Customer Group", GROUP, **gone)
         frappe.db.delete("Series", {"name": prefix})
         frappe.db.delete("Deleted Document", {"creation": (">=", started)})
         Database.commit(frappe.db)

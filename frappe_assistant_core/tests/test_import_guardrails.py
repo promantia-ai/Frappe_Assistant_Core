@@ -162,19 +162,20 @@ class TestFileContentIsFenced(GuardrailCase):
 
     def test_a_validate_only_list_reaches_the_model_fenced(self):
         # Checking records before creating them: an error can quote the file's value ("<it> is
-        # not a valid Email Address")
+        # not a valid Email Address"). v15 quotes the whole value; v16 quotes only the address
+        # it parsed out of it, which for a value with spaces is its first word. With none, both
+        # quote all of it, and the same text can be looked for on both.
+        value = INJECTION.replace(" ", "-")
         payload = self._mcp(
             "create_document",
             {
-                "documents": [
-                    {"doctype": "Lead", "data": {"lead_name": f"L {self.tag}", "email_id": INJECTION}}
-                ],
+                "documents": [{"doctype": "Lead", "data": {"lead_name": f"L {self.tag}", "email_id": value}}],
                 "validate_only": True,
             },
         )
 
         self.assertFalse(payload["validation_passed"], payload)
-        self.assertFencedWherever(payload)
+        self.assertFencedWherever(payload, value)
 
     def test_a_master_that_was_not_planned_is_refused_fenced_and_briefly(self):
         rows = [f"Acme {self.tag},{INJECTION},Company"]
