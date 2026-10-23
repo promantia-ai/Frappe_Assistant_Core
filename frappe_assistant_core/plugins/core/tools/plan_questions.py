@@ -13,7 +13,7 @@ Every open question of a migration plan in one list, before anything is imported
 answers applied in one call. Once nothing is left, the plan is Ready to Run.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import frappe
 from frappe import _
@@ -82,21 +82,36 @@ class PlanQuestions(BaseTool):
                 "success": False,
                 "error": _("Plan {0} is {1}: it has no questions left.").format(plan.name, _(plan.status)),
             }
+        applied = []
         try:
             applied = import_plan.apply_answers(plan, answers) if answers else []
             plan.reload()
             result = import_plan.open_questions(plan)
         except import_fixes.FixProblems as e:
-            return {"success": False, "error": str(e), "problems": e.problems}
+            return _failed(str(e), applied, problems=e.problems)
         except (import_plan.PlanProblem, import_fixes.FixProblem) as e:
-            return {"success": False, "error": str(e)}
+            return _failed(str(e), applied)
         except Exception as e:
             frappe.log_error(title=_("Plan Questions Error"), message=frappe.get_traceback())
-            return {"success": False, "error": exception_message(e)}
+            return _failed(exception_message(e), applied)
         if applied:
             result["applied"] = applied
         result["next"] = _next(result, bool(answers))
         return {"success": True, **result}
+
+
+def _failed(error: str, applied: List[Any], **extra) -> Dict[str, Any]:
+    """A refusal. Answers apply_answers already applied stay applied (it releases its savepoint),
+    so the reply says so, not that nothing changed (#34438)."""
+    reply = {"success": False, "error": error, **extra}
+    if applied:
+        reply["applied"] = applied
+        reply["error"] = (
+            error
+            + " "
+            + _("The answers listed in applied were applied before this; call plan_questions again.")
+        )
+    return reply
 
 
 def _next(result: Dict[str, Any], answered: bool) -> str:

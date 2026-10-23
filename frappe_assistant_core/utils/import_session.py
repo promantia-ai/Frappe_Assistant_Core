@@ -40,9 +40,11 @@ from frappe_assistant_core.chat.api.settings.uploads import CHAT_UPLOAD_MAX_BYTE
 SUPPORTED_EXTENSIONS = ("csv", "xlsx", "xls")
 SAMPLE_SIZE = 10
 MAX_FILE_SIZE = CHAT_UPLOAD_MAX_BYTES  # the chat's ceiling; the site's Max File Size may be lower
-# A Google Sheet's download: seconds to connect and between two pieces, and in all.
-DOWNLOAD_TIMEOUT = (10, 30)
-DOWNLOAD_SECONDS = 120
+# A Google Sheet's download: seconds to connect and between two pieces, and in all. The whole is
+# checked as a piece arrives, so it can run one piece's wait over: 60 + 15 stays well inside a web
+# worker's 120 s timeout, which would otherwise end the request before the reply (#34438).
+DOWNLOAD_TIMEOUT = (10, 15)
+DOWNLOAD_SECONDS = 60
 HEADER_SEARCH_ROWS = 20  # how far down a sheet its headings are looked for (#34403)
 FIRST_ROWS_SHOWN = 5  # a sheet's top rows, shown when its headings can't be found for sure
 CELL_CHARS_SHOWN = 200  # a cell shown to the model is cut to this many characters (#34406)

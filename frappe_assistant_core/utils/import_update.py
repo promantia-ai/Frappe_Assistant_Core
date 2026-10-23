@@ -102,6 +102,30 @@ def _norm(value) -> str:
     return cstr(value).strip().casefold()
 
 
+NUMBER_TYPES = ("Int", "Float", "Currency", "Percent", "Check")
+
+
+def match_key(df, value) -> str:
+    """A key cell, or a record's value, as the match compares it: by the field's type (#34438).
+    A date in the user's format ("01-02-2024") as the date it is, a number ("100.00") as its
+    value; text the way MariaDB compares it. A cell that doesn't read as its type matches nothing
+    but itself."""
+    fieldtype = df.fieldtype if df else None
+    if fieldtype not in ("Date", *NUMBER_TYPES) or not cstr(value).strip():
+        return _norm(value)
+    from frappe_assistant_core.utils import import_opening_invoices, import_opening_stock
+
+    try:
+        if fieldtype == "Date":
+            return (
+                str(getdate(value)) if not isinstance(value, str) else import_opening_invoices.date_of(value)
+            )
+        return repr(flt(value) if not isinstance(value, str) else import_opening_stock.number(value))
+    except (ValueError, TypeError):
+        frappe.clear_messages()
+        return _norm(value)
+
+
 def _positions(session) -> Dict[str, int]:
     """Field → the column it's mapped from."""
     options = frappe.parse_json(session.template_options or "{}") or {}
@@ -114,9 +138,13 @@ def match_records(session, rows: List[list]) -> Dict[int, List[str]]:
     match is clean; none, or several, when it isn't. Only records the user may read match."""
     fields = match_fields(session)
     positions = _positions(session)
+    meta = frappe.get_meta(session.target_doctype)
+    dfs = [meta.get_field(f) for f in fields]
     keys: Dict[int, tuple] = {}
     for number, row in enumerate(rows[1:], start=2):
-        keys[number] = tuple(_norm(row[positions[f]] if positions[f] < len(row) else "") for f in fields)
+        keys[number] = tuple(
+            match_key(df, row[positions[f]] if positions[f] < len(row) else "") for f, df in zip(fields, dfs)
+        )
     found = defaultdict(list)
     firsts = sorted({key[0] for key in keys.values() if all(key)})
     for start in range(0, len(firsts), MATCH_CHUNK):
@@ -127,7 +155,7 @@ def match_records(session, rows: List[list]) -> Dict[int, List[str]]:
             fields=list(dict.fromkeys(["name", *fields])),
             limit_page_length=0,
         ):
-            found[tuple(_norm(record.get(f)) for f in fields)].append(record.name)
+            found[tuple(match_key(df, record.get(f)) for f, df in zip(fields, dfs))].append(record.name)
     return {number: (list(found.get(key, [])) if all(key) else []) for number, key in keys.items()}
 
 

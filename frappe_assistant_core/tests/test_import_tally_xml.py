@@ -133,6 +133,26 @@ class TestSurvey(XmlCase):
         self.assertEqual(found.parts["ledgers"].count, 5000)
         self.assertEqual(len(found.parts["ledgers"].sample), 10)
 
+    def test_a_file_of_too_many_elements_is_refused(self):
+        # #34438: a hostile file of other elements would be held in memory whole
+        noise = "<NOISE>" + "<X/>" * 50 + "</NOISE>"
+        doc = self._upload(export(ledger("A", "Sundry Debtors"), noise))
+
+        with patch.object(tally, "MAX_ELEMENTS", 40), self.assertRaises(FileProblem) as raised:
+            tally.survey(doc)
+
+        self.assertIn("more than 40 elements", str(raised.exception))
+
+    def test_elements_outside_the_messages_are_let_go_once_read(self):
+        seen = []
+        text = export(ledger("A", "Sundry Debtors"), encoding="utf-8")
+
+        for _tag, element in tally._walk(text, []):
+            # what came before this message, outside it, is no longer held
+            seen.append(len(element.getroottree().getroot().find("HEADER") or []))
+
+        self.assertEqual(seen, [0])
+
     def test_not_a_tally_export_is_refused(self):
         for content in (
             b"<customers><customer><name>A</name></customer></customers>",

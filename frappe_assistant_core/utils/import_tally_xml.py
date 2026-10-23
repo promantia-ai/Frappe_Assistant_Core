@@ -143,6 +143,10 @@ def _value(element, path: str) -> str:
     return ""
 
 
+# A Tally masters export of 10,000 ledgers has about 300,000 elements; a file of far more is not one.
+MAX_ELEMENTS = 2_000_000
+
+
 def _walk(content: bytes, company: List[str]) -> Iterator[Tuple[str, Any]]:
     """(tag, element) for every child of a TALLYMESSAGE, one at a time. The company name, when
     the export carries one, is appended to ``company``."""
@@ -154,15 +158,23 @@ def _walk(content: bytes, company: List[str]) -> Iterator[Tuple[str, Any]]:
         load_dtd=False,
         no_network=True,
     )
-    started = False
+    started, in_message, elements = False, 0, 0
     try:
         for event, element in events:
             name = _local(element.tag)
             if event == "start":
+                elements += 1
+                if elements > MAX_ELEMENTS:
+                    raise FileProblem(
+                        _("The XML has more than {0} elements, more than a Tally masters export has.").format(
+                            MAX_ELEMENTS
+                        )
+                    )
                 if not started:
                     started = True
                     if name != "ENVELOPE":
                         raise FileProblem(_(NOT_TALLY))
+                in_message += name == "TALLYMESSAGE"
                 continue
             if name == "SVCURRENTCOMPANY" and not company and _text(element.text):
                 company.append(_text(element.text))
@@ -170,7 +182,10 @@ def _walk(content: bytes, company: List[str]) -> Iterator[Tuple[str, Any]]:
             if parent is not None and _local(parent.tag) == "TALLYMESSAGE":
                 yield name, element
                 element.clear()
-            elif name == "TALLYMESSAGE":
+            elif name == "TALLYMESSAGE" or not in_message:
+                # Nothing reads a finished element again: outside a message too, so a file of
+                # other elements isn't held in memory whole (#34438).
+                in_message -= name == "TALLYMESSAGE"
                 element.clear()
                 while element.getprevious() is not None:
                     del element.getparent()[0]

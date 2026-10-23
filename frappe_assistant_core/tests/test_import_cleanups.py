@@ -110,3 +110,48 @@ class TestRealImportOptions(unittest.TestCase):
             options,
             {"column_to_field_map": {"0": "customer_name"}, "column_to_date_format_map": {"2": "%d-%m-%Y"}},
         )
+
+
+class TestGoogleSheetDownload(unittest.TestCase):
+    def test_a_slow_sheet_is_refused_before_the_web_workers_timeout(self):
+        # #34438: gunicorn's default is 120 s; the whole is checked as each piece arrives
+        from frappe_assistant_core.utils import import_session
+
+        worst = import_session.DOWNLOAD_SECONDS + import_session.DOWNLOAD_TIMEOUT[1]
+        self.assertLessEqual(worst, 90)
+
+
+class TestUpdateMatchKeys(unittest.TestCase):
+    def test_a_date_or_number_key_matches_the_stored_value_whatever_its_format(self):
+        # #34438: "100.00" never equalled 100, nor a typed date the stored one
+        import datetime
+
+        from frappe_assistant_core.utils import import_update
+
+        date, number = frappe._dict(fieldtype="Date"), frappe._dict(fieldtype="Float")
+
+        self.assertEqual(import_update.match_key(number, "100.00"), import_update.match_key(number, 100))
+        self.assertEqual(import_update.match_key(number, "1,250.50"), import_update.match_key(number, 1250.5))
+        self.assertEqual(
+            import_update.match_key(date, "2024-02-01"),
+            import_update.match_key(date, datetime.date(2024, 2, 1)),
+        )
+        self.assertEqual(import_update.match_key(None, " Acme "), "acme")
+        self.assertEqual(import_update.match_key(number, "not a number"), "not a number")
+
+
+class TestPlanAnswers(unittest.TestCase):
+    def test_answers_applied_before_a_failure_are_reported_as_applied(self):
+        # #34438: apply_answers released its savepoint, so they stay applied when the next step fails
+        from frappe_assistant_core.plugins.core.tools import plan_questions
+        from frappe_assistant_core.utils import import_plan
+
+        plan = frappe._dict(name="PLAN-1", status=import_plan.OPEN[0], reload=lambda: None)
+        with patch.object(import_plan, "load_plan", return_value=plan), patch.object(
+            import_plan, "apply_answers", return_value=[{"id": "q1"}]
+        ), patch.object(import_plan, "open_questions", side_effect=import_plan.PlanProblem("broke")):
+            reply = plan_questions.PlanQuestions().execute({"plan": "PLAN-1", "answers": [{"id": "q1"}]})
+
+        self.assertFalse(reply["success"])
+        self.assertEqual(reply["applied"], [{"id": "q1"}])
+        self.assertIn("were applied", reply["error"])
