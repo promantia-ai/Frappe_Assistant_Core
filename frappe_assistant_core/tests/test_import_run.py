@@ -762,7 +762,7 @@ class TestTheApprovalNamesTheCheck(ImportRunCase):
 
 class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
     """Review fixes: a column the user left unmapped is not imported (#33993), and the mapping
-    can't change under an import that runs or was undone (#33989)."""
+    can't change under an import that runs or was cancelled (#33989)."""
 
     def test_a_column_left_unmapped_is_not_imported(self):
         territory = f"Unmapped {self.tag}"
@@ -782,12 +782,13 @@ class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
         self.assertTrue(imported["success"], imported)
         self.assertNotEqual(frappe.db.get_value("Customer", {"customer_name": name}, "territory"), territory)
 
-    def test_the_mapping_is_kept_while_an_import_runs_or_once_it_was_undone(self):
+    def test_the_mapping_is_kept_while_an_import_runs_or_once_it_was_cancelled(self):
         session, _checked = self._ready_session()
         for status in ("Importing", "Cancelled", "Undoing", "Undone", "Partially Undone"):
             with self.subTest(status):
                 # start_import leaves the session Importing while its Data Import is queued or
-                # running; the undo tools set the undo statuses.
+                # running. The undo statuses are legacy: sessions from before the undo was
+                # removed may hold them, and still refuse a new mapping.
                 frappe.db.set_value("FAC Import Session", session, "status", status)
 
                 reply = self._run(
@@ -811,7 +812,7 @@ class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
 @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer")
 class TestWhileACheckRuns(ImportRunCase):
     """A file of more than 500 rows is checked in a background job, which stores its result on
-    the session when it ends. Until then the mapping, the import and an undo wait."""
+    the session when it ends. Until then the mapping and the import wait."""
 
     def _checking(self, session):
         # Production: dry_run_import queues the check of a large file and marks the session so.
@@ -819,20 +820,16 @@ class TestWhileACheckRuns(ImportRunCase):
             "FAC Import Session", session, "progress", import_dry_run._progress("queued", 0, 600)
         )
 
-    def test_mapping_importing_and_undoing_wait_for_the_check(self):
+    def test_mapping_and_importing_wait_for_the_check(self):
         session, checked = self._ready_session()
         self._checking(session)
         for tool, arguments in (
             ("set_column_mapping", {"session": session, "mapping": {"Customer Type": "customer_type"}}),
             ("start_import", self._card(session, checked)),
-            ("undo_import", {"session": session, "mode": "all", "records": 0, "blocked": 0}),
         ):
             reply = self._run(tool, arguments)
             self.assertFalse(reply["success"], (tool, reply))
             self.assertIn("is being checked", json.dumps(reply), tool)
-        preview = self._run("preview_import_undo", {"session": session})["result"]
-        self.assertFalse(preview["can_undo"], preview)
-        self.assertIn("is being checked", preview["refused"])
         doc = self._doc(session)
         self.assertEqual((doc.status, len(doc.data_imports)), ("Ready to Import", 0))
 

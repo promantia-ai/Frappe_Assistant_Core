@@ -29,8 +29,7 @@ class StopMigrationPlan(BaseTool):
         self.name = "stop_migration_plan"
         self.description = (
             "Stop a running migration plan when the user asks: the file importing now finishes, "
-            "the files after it aren't imported. What is already imported stays; to take it back, "
-            "undo each session with preview_import_undo and undo_import, newest first."
+            "the files after it aren't imported. What is already imported stays."
         )
         self.requires_permission = None  # checked on the plan
         self.untrusted_fields = ("message", "error")
