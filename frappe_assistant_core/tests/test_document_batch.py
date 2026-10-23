@@ -664,6 +664,14 @@ class TestDocumentBatch(BaseAssistantTest):
                     self.assertIn("schema", text.lower())
                     self.assertNotIn("any doctypes", text.lower())
 
+    def test_create_document_description_says_a_file_goes_through_the_import_tools(self):
+        description = self.registry.get_tool("create_document").description
+
+        self.assertIn("not a way to import a user's file", description)
+        self.assertIn("start_import_session", description)
+        self.assertIn("if they fail, stop and tell the user", description)
+        self.assertIn("import_session", description.replace("start_import_session", ""))
+
     # -- update_document ---------------------------------------------------------------------
 
     def _make_todos(self, *texts):
@@ -818,3 +826,138 @@ class TestDocumentBatch(BaseAssistantTest):
         self.assertNotEqual(frappe.db.get_value("ToDo", mine, "priority"), "High")
         self.assertEqual(frappe.db.get_value("Language", "en", "language_name"), english)
         self.assertTrue(others)
+
+    # -- keys that start with an underscore ------------------------------------------------------
+    # As Administrator: the Assistant User role check refuses _assign and the like, but a System
+    # Manager's call reaches the document with them (#34411).
+
+    def _assert_refused_for_internal_keys(self, response):
+        self.assertFalse(response["success"], response)
+        self.assertEqual(response["result"].get("error_type"), "internal_key", response)
+        self.assertIn("can't be set", response["result"]["error"])
+        return response["result"]["problems"]
+
+    def test_an_underscore_key_in_a_create_list_is_refused_before_anything_is_written(self):
+        response = self._run(
+            "create_document",
+            {
+                "documents": [
+                    self._todo("Fine"),
+                    {
+                        "doctype": "ToDo",
+                        "data": {"description": f"Assigned {self.tag}", "_assign": '["a@x.com"]'},
+                    },
+                ]
+            },
+        )
+
+        self._assert_refused_for_internal_keys(response)
+        self.assertEqual(self._todos(), set())
+
+    def test_an_underscore_key_in_an_update_list_is_refused(self):
+        first, second = self._make_todos("Keep one", "Keep two")
+
+        response = self._run(
+            "update_document",
+            {
+                "documents": [
+                    {"doctype": "ToDo", "name": first, "data": {"description": f"Changed {self.tag}"}},
+                    {"doctype": "ToDo", "name": second, "data": {"_liked_by": '["Administrator"]'}},
+                ]
+            },
+        )
+
+        problems = self._assert_refused_for_internal_keys(response)
+        self.assertEqual([p["document"] for p in problems], [2])
+        self.assertEqual(frappe.db.get_value("ToDo", first, "description"), f"Keep one {self.tag}")
+
+    def test_an_underscore_key_in_a_child_row_is_refused(self):
+        response = self._run(
+            "create_document",
+            {
+                "documents": [
+                    self._todo("Fine"),
+                    {
+                        "doctype": "Note",
+                        "data": {
+                            "title": f"Seen {self.tag}",
+                            "seen_by": [{"user": "Administrator", "_comments": "[]"}],
+                        },
+                    },
+                ]
+            },
+        )
+
+        problems = self._assert_refused_for_internal_keys(response)
+        self.assertEqual([p["document"] for p in problems], [2])
+        self.assertIn("seen_by", problems[0]["error"])
+        self.assertIn("_comments", problems[0]["error"])
+        self.assertEqual(self._todos(), set())
+        self.assertEqual(self._notes(), set())
+
+    def test_the_refusal_names_the_record_and_the_key(self):
+        response = self._run(
+            "create_document",
+            {
+                "documents": [
+                    self._todo("Fine"),
+                    {"doctype": "ToDo", "data": {"description": f"x {self.tag}", "_user_tags": "urgent"}},
+                    {
+                        "doctype": "Note",
+                        "data": {"title": f"y {self.tag}", "_assign": "[]", "_comments": "[]"},
+                    },
+                ]
+            },
+        )
+
+        problems = self._assert_refused_for_internal_keys(response)
+        self.assertEqual([(p["document"], p["doctype"]) for p in problems], [(2, "ToDo"), (3, "Note")])
+        self.assertIn("_user_tags", problems[0]["error"])
+        self.assertIn("_assign", problems[1]["error"])
+        self.assertIn("_comments", problems[1]["error"])
+
+    def test_newname_in_a_create_list_still_names_the_record(self):
+        # Color is named by Prompt, as the masters plan's __newname records are.
+        color = f"FAC Color {self.tag}"
+
+        response = self._run(
+            "create_document",
+            {
+                "documents": [
+                    {"doctype": "Color", "data": {"color": "#123456", "__newname": color}},
+                    self._todo("x"),
+                ]
+            },
+        )
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(response["result"]["created"][0], {"doctype": "Color", "name": color})
+        self.assertTrue(frappe.db.exists("Color", color))
+
+    def test_delete_marker_in_an_update_list_still_removes_the_row(self):
+        note = frappe.get_doc(
+            {
+                "doctype": "Note",
+                "title": f"Seen {self.tag}",
+                "seen_by": [{"user": "Administrator"}, {"user": "Guest"}],
+            }
+        ).insert()
+        guest_row = next(row.name for row in note.seen_by if row.user == "Guest")
+        (todo,) = self._make_todos("Also")
+
+        response = self._run(
+            "update_document",
+            {
+                "documents": [
+                    {
+                        "doctype": "Note",
+                        "name": note.name,
+                        "data": {"seen_by": [{"name": guest_row, "_delete": True}]},
+                    },
+                    {"doctype": "ToDo", "name": todo, "data": {"priority": "High"}},
+                ]
+            },
+        )
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual([row.user for row in frappe.get_doc("Note", note.name).seen_by], ["Administrator"])

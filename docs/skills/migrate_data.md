@@ -105,6 +105,21 @@ If a file needs records from a later file (for example, Customers whose group is
 Group file), import the other file first. Use step 5 only for a few missing masters the file
 doesn't bring itself.
 
+## When an import tool fails
+
+When an import tool fails or isn't available, tell the user it failed and what the error was, in
+the tool's own words. Then stop. This holds for every one of them: `apply_import_preset`,
+`start_import_session`, `get_import_schema`, `set_column_mapping`, `dry_run_import`, `start_import`,
+the plan tools (`plan_migration`, `plan_questions`, `run_migration_plan`) and the opening tools
+(`set_opening_stock`, `set_opening_invoices`, `set_opening_balances`, `import_opening_stock`,
+`import_opening_invoices`, `import_opening_balances`).
+
+Never import the file's records another way: not with `create_document` or `update_document`, not
+one record at a time, and not as a `documents` list. That way skips the check, the muted emails and
+the undo, and it changes values the user never chose. The user decides what comes next: try again,
+correct the file, or ask their administrator. The one exception is step 5: the missing masters the
+check listed, created with `create_document`, `documents` and `import_session`.
+
 ## What goes wrong without this skill
 
 - **Steps out of order.** Importing before the dry run, or starting a new session for failed rows.
@@ -125,7 +140,9 @@ doesn't bring itself.
   columns, row count, up to 10 sample rows, and grouped failures with row numbers. Work from those.
 - **Guessing.** Never invent a value, a mapping or a name. When you aren't sure what a column
   means, ask with a choice card (`ask_user`). A fix maps only to a name the tool listed in
-  `closest`, or one the user gave.
+  `closest`, or one the user gave. A value from the user's file is never replaced by a different
+  value (for example "Retail" with "Commercial") unless the user chose that in a fix group. Close
+  matches are offered, never applied unasked.
 - **Adding up numbers yourself.** Row counts, totals and differences come from the tools. Quote
   them as they are.
 

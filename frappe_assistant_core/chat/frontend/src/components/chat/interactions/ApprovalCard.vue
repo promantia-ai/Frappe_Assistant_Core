@@ -30,21 +30,7 @@
 		<p v-else-if="toolDescription" class="approval-description">{{ toolDescription }}</p>
 
 		<!-- Several records in one call: each one, so the user sees what they approve -->
-		<div v-if="records.length" class="approval-records">
-			<div class="records-heading">
-				{{ records.length === 1 ? __("1 record") : __("{0} records", [records.length]) }}
-			</div>
-			<ol class="records-list">
-				<li v-for="(line, index) in visibleRecords" :key="index">{{ line }}</li>
-			</ol>
-			<button
-				v-if="records.length > RECORDS_SHOWN"
-				class="field-toggle"
-				@click="showAllRecords = !showAllRecords"
-			>
-				{{ showAllRecords ? __("Show fewer ‹") : __("Show all {0} ›", [records.length]) }}
-			</button>
-		</div>
+		<RecordTables v-if="recordCount" :input="block.input" :tool-name="block.tool_name" />
 
 		<ApprovalDetails v-if="!message.entry.value" :block="block" />
 
@@ -86,10 +72,11 @@ import { computed, ref } from "vue";
 import { __ } from "@/utils/i18n";
 import ApprovalDetails from "./ApprovalDetails.vue";
 import EmailPreview from "./EmailPreview.vue";
+import RecordTables from "./RecordTables.vue";
 import { useMessagePreview } from "./useMessagePreview";
 import { baseToolName, isCustomisationRisk } from "@/utils/toolNames";
 import { writeConsequence } from "./customisation";
-import { documentLines, formatToolName } from "./helpers";
+import { documentCount, formatToolName } from "./helpers";
 
 const props = defineProps({
 	block: { type: Object, required: true },
@@ -130,12 +117,7 @@ const approvalTitle = computed(() => {
 });
 
 // Several records in one call (create_document / update_document `documents`).
-const RECORDS_SHOWN = 10;
-const showAllRecords = ref(false);
-const records = computed(() => documentLines(props.block.input));
-const visibleRecords = computed(() =>
-	showAllRecords.value ? records.value : records.value.slice(0, RECORDS_SHOWN),
-);
+const recordCount = computed(() => documentCount(props.block.input));
 
 // Several records: how many, and that they are written all or none.
 const MANY_CONSEQUENCES = {
@@ -145,7 +127,7 @@ const MANY_CONSEQUENCES = {
 
 const consequence = computed(() => {
 	const many = MANY_CONSEQUENCES[baseToolName(props.block.tool_name)];
-	if (many && records.value.length > 1) return many(records.value.length);
+	if (many && recordCount.value > 1) return many(recordCount.value);
 	return writeConsequence(props.block.tool_name, props.block.input);
 });
 
@@ -248,39 +230,6 @@ function handleReject() {
 	font-size: 12px;
 	color: var(--ql-text-secondary);
 	line-height: 1.45;
-}
-
-.field-toggle {
-	justify-self: start;
-	background: transparent;
-	border: none;
-	padding: 0;
-	font-size: 11.5px;
-	color: var(--ql-accent);
-	cursor: pointer;
-}
-
-.field-toggle:hover {
-	color: var(--ql-accent-hover);
-}
-
-/* Several records: one line each */
-.approval-records {
-	padding: 10px 14px 0;
-	font-size: 11.5px;
-}
-
-.records-heading {
-	color: var(--ql-text-muted);
-	margin-bottom: 4px;
-}
-
-.records-list {
-	margin: 0 0 6px;
-	padding-left: 18px;
-	color: var(--ql-text);
-	line-height: 1.5;
-	word-break: break-word;
 }
 
 /* Decided banner (post-click, pre-resume) */

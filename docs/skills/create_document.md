@@ -107,6 +107,8 @@ A Table MultiSelect takes an array of its link values, as Desk sends it. Each va
 
 Pass `documents` instead of `doctype` and `data`: one call, so the user approves **once** for all of them.
 
+**`documents` is not a way to import a user's file.** A file goes through the import tools: `start_import_session` (or `apply_import_preset`), `dry_run_import`, then `start_import`; if they fail, stop and tell the user what failed and the error. Never create the file's records here instead, one by one or as a list. The one exception is a session's missing masters, with `import_session` (see **Missing masters of an import**).
+
 ```json
 {
   "documents": [
@@ -121,7 +123,8 @@ Pass `documents` instead of `doctype` and `data`: one call, so the user approves
 - **Customisations and schema changes one at a time.** A customisation (Custom Field, Property Setter, Client or Server Script, Custom DocPerm, DocType, Role, Report, Print Format, Notification, Workflow, Workflow State, Workflow Action Master) or a record whose save changes the database schema (Inventory Dimension, Accounting Dimension, Service Level Agreement) is refused in `documents`, before anything is created: `error_type: "one_at_a_time"`, with every such record in `problems`. Create each of them on its own, with `doctype` and `data`, one call each (the user approves each customisation); the other records may still go as a list. Any other record whose save would change the schema fails the list the same way (`error_type: "schema_change_in_list"`), and nothing is created.
 - **In order:** put a parent before the records under it.
 - **All or nothing.** Every record is checked first (permission, restricted fields); then they are created one by one with the same checks as a single record. If one fails, none is kept, and the error names it: "Document 2 (Territory) couldn't be created: … Nothing was created." Fix it, or take it out, and call again. What a save sends out at once can't be taken back, as with one record: a Notification's Slack or SMS message, say.
-- **Show the user the list as a table before calling.** The approval card then lists each record with every field it sets (the first 10, the rest on request).
+- **No keys that start with an underscore.** `_assign`, `_comments`, `_liked_by`, `_user_tags` and the like are Frappe's own: a record (or a child row) with one is refused before anything is created, `error_type: "internal_key"`, with each record and key in `problems`. Only `__newname`, the name of a record named by prompt, may be sent.
+- **Show the user the list as a table before calling.** The approval card then shows one table per DocType with every record and every field it sets.
 - `validate_only` validates each record on its own and creates none. `submit` is for one record at a time: create a list as drafts, then submit each.
 
 Reply: `{"success": true, "created": [{"doctype": "Customer Group", "name": "Hospitals"}, …], "message": "Created 3 records."}`. When nothing was created: `success: false`, the `error`, and `problems` (each with the record's number `document` and why).

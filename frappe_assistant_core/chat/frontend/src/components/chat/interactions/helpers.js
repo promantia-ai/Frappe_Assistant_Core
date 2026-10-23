@@ -6,9 +6,12 @@
  * surfaces to the user during approval — not general-purpose formatters.
  */
 
+import { __ } from "@/utils/i18n";
 import { titleWord } from "@/utils/toolLabel";
+import { baseToolName } from "@/utils/toolNames";
 
-const MAX_VALUE_LEN = 120;
+// A longer value folds to its first PREVIEW_LEN characters, with a control that shows it all.
+const PREVIEW_LEN = 120;
 
 // Field-name patterns that mark a value as money or a date for display.
 // Used by the approval table to render figures in tabular mono so values
@@ -88,7 +91,7 @@ export function flattenInput(input) {
 		}
 	}
 
-	// "documents" (several records in one call) is listed record by record, by documentLines.
+	// "documents" (several records in one call) is shown record by record, by documentTables.
 	const skipKeys = new Set(["validate_only", "ignore_permissions", "ignore_mandatory", "documents"]);
 	for (const [key, value] of Object.entries(input)) {
 		if (key in result || nestedKeys.includes(key) || skipKeys.has(key)) continue;
@@ -98,42 +101,101 @@ export function flattenInput(input) {
 	return result;
 }
 
-const NAME_KEY_RE = /(^name$|^title$|_name$|^__newname$)/;
+/** How many records a call writes with `documents` (several in one call); 0 without it. */
+export function documentCount(input) {
+	return input && Array.isArray(input.documents) ? input.documents.length : 0;
+}
 
-function shortValue(value) {
-	return formatValue(isPlainObject(value) || Array.isArray(value) ? value : String(value));
+// Which key names the record, so it can lead its row: the record's own name (an update),
+// a prompt name, then a name field (customer_group_name, title, a Market Segment's market_segment).
+function nameRank(key, doctype) {
+	if (key === "name") return 0;
+	if (key === "__newname") return 1;
+	if (key === doctype.toLowerCase().replace(/ /g, "_") || /(^title$|_name$)/.test(key)) return 2;
+	return 3;
 }
 
 /**
- * One line per record when a tool writes several in one call (`documents`, as
- * create_document and update_document take it), so the user sees each record they are
- * approving, not "3 items". An update line names the record and every field it changes;
- * a create line names the new record, the group it goes under, and every other field.
- * No field is left out of a line: what isn't shown can't be approved.
+ * The records of a call that writes several (`documents`, as create_document and
+ * update_document take it), as one table per doctype, in order of first appearance:
+ * one column per key any of its records sends, the name first, and one row per record.
+ * An update row starts with the record's name. Every key is a column, `_assign` and
+ * `__newname` included: the server sets each one on the record, so the card shows each.
  * Returns [] when the input has no such list.
  */
-export function documentLines(input) {
+export function documentTables(input) {
 	const documents = input && Array.isArray(input.documents) ? input.documents : [];
-	return documents.map((entry) => {
+	const tables = new Map();
+	for (const entry of documents) {
 		const doc = isPlainObject(entry) ? entry : {};
-		const data = isPlainObject(doc.data) ? doc.data : {};
 		const doctype = doc.doctype ? String(doc.doctype) : "Record";
-		const fields = Object.entries(data).filter(([k]) => !k.startsWith("_") || k === "__newname");
-		if (doc.name) {
-			const changes = fields.map(([k, v]) => `${formatKey(k)}: ${shortValue(v)}`);
-			return `${doctype} · ${doc.name}${changes.length ? ` — ${changes.join(", ")}` : ""}`;
+		if (!tables.has(doctype)) tables.set(doctype, { doctype, columns: [], rows: [] });
+		const table = tables.get(doctype);
+		const named = doc.name != null && doc.name !== "";
+		const row = named ? { name: doc.name } : {};
+		for (const [key, value] of Object.entries(isPlainObject(doc.data) ? doc.data : {})) {
+			// A data name that differs from the record's is a rename, kept as in flattenInput.
+			if (key === "name" && named) {
+				if (String(value).trim() !== String(doc.name).trim()) row.new_name ??= value;
+			} else row[key] = value;
 		}
-		const parentField = fields.find(([k, v]) => k.startsWith("parent_") && v);
-		// The record's name field, else its first text field (a Market Segment's market_segment).
-		const nameField =
-			fields.find(([k, v]) => NAME_KEY_RE.test(k) && v != null && v !== "") ||
-			fields.find((f) => f !== parentField && typeof f[1] === "string" && f[1] !== "");
-		const rest = fields.filter((f) => f !== nameField && f !== parentField);
-		const label = nameField ? shortValue(nameField[1]) : "new";
-		const under = parentField ? ` (under ${shortValue(parentField[1])})` : "";
-		const shown = rest.map(([k, v]) => `${formatKey(k)}: ${shortValue(v)}`);
-		return `${doctype} · ${label}${under}${shown.length ? ` — ${shown.join(", ")}` : ""}`;
-	});
+		for (const key of Object.keys(row)) if (!table.columns.includes(key)) table.columns.push(key);
+		table.rows.push(row);
+	}
+	return [...tables.values()].map((table) => ({
+		...table,
+		columns: table.columns
+			.map((key, index) => [key, index])
+			.sort((a, b) => nameRank(a[0], table.doctype) - nameRank(b[0], table.doctype) || a[1] - b[1])
+			.map(([key]) => key),
+	}));
+}
+
+/** "Customer Groups" for 2, "Territories", "Addresses", "UOMs"; the doctype itself for 1. */
+export function pluralDoctype(doctype, count) {
+	if (count === 1) return doctype;
+	if (/[^aeiou]y$/i.test(doctype)) return `${doctype.slice(0, -1)}ies`;
+	if (/(s|x|z|ch|sh)$/i.test(doctype)) return `${doctype}es`;
+	return `${doctype}s`;
+}
+
+/** "Create 21: 6 Customer Groups, 3 Territories, 12 UOMs", or "Update 2: 2 Customers". */
+export function documentsHeading(toolName, input) {
+	const tables = documentTables(input);
+	const total = tables.reduce((sum, table) => sum + table.rows.length, 0);
+	const counts = tables
+		.map((table) => `${table.rows.length} ${pluralDoctype(table.doctype, table.rows.length)}`)
+		.join(", ");
+	return baseToolName(toolName) === "update_document"
+		? __("Update {0}: {1}", [total, counts])
+		: __("Create {0}: {1}", [total, counts]);
+}
+
+/** A column's heading: the field's words, or the key itself for one that starts with "_". */
+export function columnLabel(key) {
+	return key.startsWith("_") ? key : formatKey(key);
+}
+
+/** A value as text in full, for a record table's cell: nothing is summarised or cut. */
+export function cellText(value) {
+	if (value == null || value === "") return "—";
+	if (typeof value === "boolean") return value ? "Yes" : "No";
+	if (Array.isArray(value)) {
+		return value.map((v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : String(v))).join(", ");
+	}
+	if (typeof value === "object") return JSON.stringify(value);
+	return String(value);
+}
+
+/** True for text too long or with too many lines to show whole in a table cell or field row. */
+export function isLongValue(value) {
+	return typeof value === "string" && (value.length > PREVIEW_LEN || value.includes("\n"));
+}
+
+/** The start of a long value, on one line, for its folded cell. */
+export function previewText(value) {
+	const line = String(value).replace(/\s+/g, " ").trim();
+	return line.length > PREVIEW_LEN ? `${line.slice(0, PREVIEW_LEN)}…` : line;
 }
 
 export function formatToolName(name) {
@@ -160,9 +222,8 @@ export function formatValue(value) {
 		return `${keys.length} field${keys.length === 1 ? "" : "s"}`;
 	}
 	if (typeof value === "boolean") return value ? "Yes" : "No";
-	const s = String(value);
-	if (s.length > MAX_VALUE_LEN) return s.slice(0, MAX_VALUE_LEN) + "…";
-	return s;
+	// Never cut: a long value is shown folded by LongValue, which can open it in full.
+	return String(value);
 }
 
 /**

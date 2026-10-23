@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
-	documentLines,
+	documentTables,
+	documentsHeading,
+	pluralDoctype,
 	flattenInput,
 	isMoneyKey,
 	isDateValue,
@@ -109,48 +111,95 @@ describe("splitDetailFields", () => {
 	});
 });
 
-describe("documentLines", () => {
-	it("names each new record, the group it goes under and its other fields", () => {
-		const lines = documentLines({
+describe("documentTables", () => {
+	it("groups new records by doctype, the name field first", () => {
+		const tables = documentTables({
 			documents: [
-				{ doctype: "Customer Group", data: { customer_group_name: "Hospitals", parent_customer_group: "All Customer Groups" } },
+				{ doctype: "Customer Group", data: { parent_customer_group: "All Customer Groups", customer_group_name: "Hospitals" } },
 				{ doctype: "Market Segment", data: { market_segment: "Healthcare" } },
 				{ doctype: "ToDo", data: { description: "Call the bank", priority: "High" } },
+				{ doctype: "Customer Group", data: { customer_group_name: "Clinics", is_group: 0 } },
 			],
 		});
-		expect(lines).toEqual([
-			"Customer Group · Hospitals (under All Customer Groups)",
-			"Market Segment · Healthcare",
-			"ToDo · Call the bank — Priority: High",
+		expect(tables).toEqual([
+			{
+				doctype: "Customer Group",
+				columns: ["customer_group_name", "parent_customer_group", "is_group"],
+				rows: [
+					{ parent_customer_group: "All Customer Groups", customer_group_name: "Hospitals" },
+					{ customer_group_name: "Clinics", is_group: 0 },
+				],
+			},
+			{ doctype: "Market Segment", columns: ["market_segment"], rows: [{ market_segment: "Healthcare" }] },
+			{ doctype: "ToDo", columns: ["description", "priority"], rows: [{ description: "Call the bank", priority: "High" }] },
 		]);
 	});
 
-	it("names each updated record and the fields it changes", () => {
-		const lines = documentLines({
+	it("starts each updated record with its name, then the fields it changes", () => {
+		const [table] = documentTables({
 			documents: [{ doctype: "Customer", name: "CUST-0001", data: { territory: "Karnataka" } }],
 		});
-		expect(lines).toEqual(["Customer · CUST-0001 — Territory: Karnataka"]);
+		expect(table.columns).toEqual(["name", "territory"]);
+		expect(table.rows).toEqual([{ name: "CUST-0001", territory: "Karnataka" }]);
 	});
 
 	it("lists every field a record sets or changes, hiding none", () => {
-		const [update, create] = documentLines({
+		const [update, create] = documentTables({
 			documents: [
-				{ doctype: "Customer", name: "C-1", data: { territory: "Karnataka", a: 1, b: 2, credit_limit: 0, disabled: 1 } },
-				{ doctype: "ToDo", data: { description: "Call", a: 1, b: 2, c: 3, priority: "High" } },
+				{ doctype: "Customer", name: "C-1", data: { territory: "Karnataka", a: 1, _comments: "[]", credit_limit: 0, disabled: 1 } },
+				{ doctype: "ToDo", data: { description: "Call", a: 1, _assign: "[]", c: 3, priority: "High" } },
 			],
 		});
-		expect(update).toBe("Customer · C-1 — Territory: Karnataka, A: 1, B: 2, Credit Limit: 0, Disabled: 1");
-		expect(create).toBe("ToDo · Call — A: 1, B: 2, C: 3, Priority: High");
+		expect(update.columns).toEqual(["name", "territory", "a", "_comments", "credit_limit", "disabled"]);
+		expect(create.columns).toEqual(["description", "a", "_assign", "c", "priority"]);
+	});
+
+	it("keeps keys that start with an underscore", () => {
+		const [table] = documentTables({
+			documents: [{ doctype: "Customer Group", data: { customer_group_name: "Retail", _assign: '["a@x.com"]', __newname: "Retail-01" } }],
+		});
+		expect(table.columns).toEqual(["__newname", "customer_group_name", "_assign"]);
+		expect(table.rows[0]._assign).toBe('["a@x.com"]');
 	});
 
 	it("is empty for a single-record call, which keeps its field table", () => {
-		expect(documentLines({ doctype: "ToDo", data: { description: "x" } })).toEqual([]);
-		expect(documentLines(undefined)).toEqual([]);
+		expect(documentTables({ doctype: "ToDo", data: { description: "x" } })).toEqual([]);
+		expect(documentTables(undefined)).toEqual([]);
 	});
 
 	it("keeps documents out of the field table, where it was only 'N items'", () => {
 		const flat = flattenInput({ documents: [{ doctype: "ToDo", data: {} }], import_session: "IMP-1" });
 		expect(flat).toEqual({ import_session: "IMP-1" });
+	});
+});
+
+describe("documentsHeading", () => {
+	const documents = [
+		{ doctype: "Customer Group", data: {} },
+		{ doctype: "Territory", data: {} },
+		{ doctype: "UOM", data: {} },
+		{ doctype: "Customer Group", data: {} },
+		{ doctype: "Address", data: {} },
+		{ doctype: "Address", data: {} },
+	];
+
+	it("heads a create list with its total and each doctype's count", () => {
+		expect(documentsHeading("create_document", { documents })).toBe(
+			"Create 6: 2 Customer Groups, 1 Territory, 1 UOM, 2 Addresses",
+		);
+	});
+
+	it("heads an update list with Update", () => {
+		expect(documentsHeading("erp_update_document", { documents: documents.slice(1, 3) })).toBe(
+			"Update 2: 1 Territory, 1 UOM",
+		);
+	});
+
+	it("says a plural the English way", () => {
+		expect(pluralDoctype("Territory", 3)).toBe("Territories");
+		expect(pluralDoctype("UOM", 12)).toBe("UOMs");
+		expect(pluralDoctype("Address", 2)).toBe("Addresses");
+		expect(pluralDoctype("Payment Terms Template", 1)).toBe("Payment Terms Template");
 	});
 });
 

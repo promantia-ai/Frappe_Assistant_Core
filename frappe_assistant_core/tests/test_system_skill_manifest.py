@@ -77,6 +77,7 @@ NOT_TOOLS = {
     "session_id",
     "status",
 }
+TOOL_FAILURE_HEADING = "## When an import tool fails"
 
 
 def _load_manifest(name: str) -> list:
@@ -87,6 +88,11 @@ def _load_manifest(name: str) -> list:
 def _skill_content(content_file: str) -> str:
     with open(os.path.join(REPO_DIR, "docs", "skills", content_file), encoding="utf-8") as f:
         return f.read()
+
+
+def _one_line(text: str) -> str:
+    """The text with its line wrapping undone, so a phrase is found wherever the page wraps it."""
+    return " ".join(text.split())
 
 
 def _tool_files() -> set:
@@ -286,6 +292,59 @@ class TestSystemSkillManifest(BaseAssistantTest):
         skill_ids = {e["skill_id"] for e in _load_manifest("system_skills.json")}
         for skill_id in re.findall(r'get_skill\("([a-z0-9_-]+)"\)', content):
             self.assertIn(skill_id, skill_ids)
+
+    def _tool_failure_rule(self) -> str:
+        # The section the rule lives in (#34410): FACO fell back to create_document there.
+        content = _skill_content("migrate_data.md")
+        self.assertIn(TOOL_FAILURE_HEADING, content)
+        return _one_line(content.split(TOOL_FAILURE_HEADING)[1].split("\n## ")[0])
+
+    def test_migrate_data_stops_and_reports_when_an_import_tool_fails(self):
+        rule = self._tool_failure_rule()
+        for tool in (
+            "apply_import_preset",
+            "start_import_session",
+            "set_column_mapping",
+            "dry_run_import",
+            "start_import",
+            "plan_migration",
+            "run_migration_plan",
+            "import_opening_balances",
+        ):
+            self.assertIn(f"`{tool}`", rule, tool)
+        self.assertIn("fails or isn't available", rule)
+        self.assertIn("tell the user it failed and what the error was", rule)
+        self.assertIn("Then stop.", rule)
+
+    def test_migrate_data_never_falls_back_to_create_document(self):
+        rule = self._tool_failure_rule()
+        self.assertIn("Never import the file's records another way", rule)
+        for words in ("`create_document`", "`update_document`", "one record at a time", "`documents` list"):
+            self.assertIn(words, rule, words)
+
+    def test_migrate_data_never_replaces_a_users_value_unasked(self):
+        content = _one_line(_skill_content("migrate_data.md"))
+        self.assertIn(
+            "A value from the user's file is never replaced by a different value "
+            '(for example "Retail" with "Commercial") unless the user chose that in a fix group.',
+            content,
+        )
+        self.assertIn("Close matches are offered, never applied unasked.", content)
+
+    def test_create_document_skill_is_not_a_way_to_import_a_file(self):
+        text = _one_line(self._read_skill("create_document.md"))
+        self.assertIn("`documents` is not a way to import a user's file", text)
+        self.assertIn("`start_import_session`", text)
+        self.assertIn("if they fail, stop and tell the user", text)
+        # The exception stays: a session's missing masters, with import_session.
+        self.assertIn("## Missing masters of an import", text)
+
+    def test_installed_migrate_data_skill_has_the_tool_failure_rule(self):
+        _install_system_skills()
+
+        content = frappe.db.get_value("FAC Skill", {"skill_id": MIGRATE_DATA}, "content")
+        self.assertIn(TOOL_FAILURE_HEADING, content)
+        self.assertIn("Never import the file's records another way", content)
 
     def test_retired_export_template_is_removed(self):
         self.assertNotIn(

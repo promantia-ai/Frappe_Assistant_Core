@@ -2,7 +2,7 @@
 	<div class="code-preview">
 		<div class="code-bar">
 			<span class="code-label">{{ label }}</span>
-			<button type="button" class="code-toggle" @click="expanded = !expanded">
+			<button type="button" class="code-toggle" :aria-expanded="String(expanded)" @click="expanded = !expanded">
 				{{ expanded ? __("Collapse") : __("Expand") }}
 			</button>
 		</div>

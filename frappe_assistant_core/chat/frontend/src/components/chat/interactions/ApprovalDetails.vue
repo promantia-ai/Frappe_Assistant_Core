@@ -10,12 +10,18 @@
 				}"
 			>
 				<ConditionValue v-if="isCondition(key)" :expression="value" />
+				<LongValue v-else-if="isLongValue(value)" :value="value" />
 				<template v-else>{{ formatValue(value) }}</template>
 			</span>
 		</template>
 		<template v-if="fieldSplit.overflowCount > 0">
 			<span class="field-more">{{ __("+ {0} more", [fieldSplit.overflowCount]) }}</span>
-			<button class="field-toggle" @click="showAllFields = !showAllFields">
+			<button
+				type="button"
+				class="field-toggle"
+				:aria-expanded="String(showAllFields)"
+				@click="showAllFields = !showAllFields"
+			>
 				{{ showAllFields ? __("Show fewer fields ‹") : __("Show all fields ›") }}
 			</button>
 		</template>
@@ -39,6 +45,7 @@ import ApprovalNotes from "./ApprovalNotes.vue";
 import ChildTable from "./ChildTable.vue";
 import ConditionValue from "./ConditionValue.vue";
 import CodePreview from "./CodePreview.vue";
+import LongValue from "./LongValue.vue";
 import { renameKeys, writesCondition } from "./customisation";
 import { useCurrentCode } from "./useCurrentCode";
 import {
@@ -49,6 +56,7 @@ import {
 	isMoneyKey,
 	isCodeKey,
 	isChildTable,
+	isLongValue,
 	codeLanguage,
 	splitDetailFields,
 } from "./helpers";

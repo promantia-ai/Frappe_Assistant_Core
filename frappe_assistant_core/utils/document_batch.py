@@ -87,7 +87,7 @@ def given(value) -> bool:
 def read_documents(arguments: Dict[str, Any], single_inputs: tuple, with_name: bool) -> List[Dict[str, Any]]:
     """``arguments["documents"]`` checked: a list of up to MAX_DOCUMENTS entries, each with a
     doctype and a data object (and a name, for updates), and not mixed with the single-record
-    inputs. Raises BatchProblem."""
+    inputs, with no customisation and no internal key. Raises BatchProblem."""
     documents = arguments.get("documents")
     clashing = [key for key in single_inputs if given(arguments.get(key))]
     if clashing:
@@ -114,7 +114,45 @@ def read_documents(arguments: Dict[str, Any], single_inputs: tuple, with_name: b
     if problems:
         raise BatchProblem(_("Nothing was written. Correct these and call again."), problems)
     _refuse_one_at_a_time(documents, with_name)
+    _refuse_internal_keys(documents)
     return documents
+
+
+def _refuse_internal_keys(documents: List[Dict[str, Any]]) -> None:
+    """A key that starts with "_" is Frappe's own (_assign, _comments, _liked_by, _user_tags)
+    and is set on the document like any field: refused for every role, before anything is
+    written. Only two are inputs: ``__newname`` names a Prompt-named record (the masters plan
+    sends it), and a child row's ``_delete`` removes it in an update. Raises BatchProblem
+    listing every such record and key."""
+    problems = []
+    for number, entry in enumerate(documents, start=1):
+        keys = [key for key in entry["data"] if _internal(key) and key != "__newname"]
+        for field, rows in entry["data"].items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict):
+                    keys += [
+                        f"{field}.{key}"
+                        for key in row
+                        if _internal(key) and key != "_delete" and f"{field}.{key}" not in keys
+                    ]
+        if keys:
+            problems.append(_problem(number, entry, _("Can't set {0}.").format(", ".join(keys))))
+    if problems:
+        raise BatchProblem(
+            _(
+                "Nothing was written. Keys that start with an underscore are Frappe's own and can't "
+                "be set: take them out of these records and call again. Only __newname (the name of "
+                "a record named by prompt) and a child row's _delete may be sent."
+            ),
+            problems,
+            error_type="internal_key",
+        )
+
+
+def _internal(key: Any) -> bool:
+    return cstr(key).startswith("_")
 
 
 def _refuse_one_at_a_time(documents: List[Dict[str, Any]], with_name: bool) -> None:
