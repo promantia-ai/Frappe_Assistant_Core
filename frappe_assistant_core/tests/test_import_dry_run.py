@@ -19,6 +19,7 @@ left empty, it took Selling Settings' default group, which a site may not have (
 
 import hashlib
 import json
+import os
 import threading
 import unittest
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.utils import import_dry_run
 
+TEST_SAVEPOINT = "fac_dry_run_test"
 GROUP = "FAC Dry Run Group"
 GROUP_NODE = "All Customer Groups"  # a group: a Customer can't be in it
 MAPPING = {
@@ -49,9 +51,14 @@ class TestDryRunImport(BaseAssistantTest):
         self.registry = get_tool_registry()
         self.files_before = set(frappe.get_all("File", pluck="name"))
         self.tag = frappe.generate_hash(length=6)
+        # The test transaction is rolled back once per class. Each test undoes its own rows
+        # instead, so the one test that commits for real (the series lock) doesn't make the
+        # rows of the tests before it permanent.
+        frappe.db.savepoint(TEST_SAVEPOINT)
         # A misspelt group of this test's own: one test creates it to show a fix.
         self.typo = f"Retial {self.tag}"
-        if not frappe.db.exists("Customer Group", GROUP):
+        self.made_group = not frappe.db.exists("Customer Group", GROUP)
+        if self.made_group:
             frappe.get_doc(
                 {
                     "doctype": "Customer Group",
@@ -61,6 +68,7 @@ class TestDryRunImport(BaseAssistantTest):
                 }
             ).insert()
         self.existing = f"Existing {self.tag}"
+        self.name_customers_by("Naming Series")  # so a repeated customer name is no clash of record names
         frappe.get_doc(
             {"doctype": "Customer", "customer_name": self.existing, "customer_group": GROUP}
         ).insert()
@@ -70,6 +78,12 @@ class TestDryRunImport(BaseAssistantTest):
         # The transaction rollback removes File rows but not the files on disk.
         for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
             frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        try:
+            frappe.db.rollback(save_point=TEST_SAVEPOINT)
+        except Exception as e:
+            # A real commit (the series lock test's) ends every savepoint; it cleans up its own.
+            if "SAVEPOINT" not in str(e).upper():
+                raise
         super().tearDown()
 
     # -- helpers -----------------------------------------------------------------------
@@ -114,8 +128,8 @@ class TestDryRunImport(BaseAssistantTest):
             [f"Beta {t}", self.typo, "Company", ""],  # row 3: missing link
             [f"Gamma {t}", self.typo, "Company", ""],  # row 4: missing link, same group
             [f"Delta {t}", GROUP_NODE, "Company", ""],  # row 5: controller rule
-            [f"Alpha {t}", GROUP, "Company", ""],  # row 6: duplicate of row 2
-            [self.existing, GROUP, "Company", ""],  # row 7: already in ERPNext
+            [f"Alpha {t}", GROUP, "Company", ""],  # row 6: shares its name with row 2: allowed, ready
+            [self.existing, GROUP, "Company", ""],  # row 7: shares its name with a customer in ERPNext: ready
             [f"Eps {t}", GROUP, "Robot", ""],  # row 8: not an allowed option
         ]
 
@@ -182,8 +196,8 @@ class TestDryRunImport(BaseAssistantTest):
 
         result = self._check(session)
 
-        self.assertEqual((result["total_rows"], result["ready"], result["failed"]), (7, 1, 6))
-        self.assertEqual(result["message"], "1 rows ready, 6 would fail. Nothing was written.")
+        self.assertEqual((result["total_rows"], result["ready"], result["failed"]), (7, 3, 4))
+        self.assertEqual(result["message"], "3 rows ready, 4 would fail. Nothing was written.")
         link = self._group(result, "Missing link")
         self.assertEqual((link["field"], link["value"], link["count"]), ("customer_group", self.typo, 2))
         self.assertEqual([e["row"] for e in link["examples"]], [3, 4])
@@ -199,13 +213,64 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual([e["row"] for e in rejected["examples"]], [5])
 
     def test_nothing_is_written(self):
+        # Counting rows afterwards proves nothing when the insert never ran (it stayed green while
+        # every insert crashed on Frappe 16.52): the ready row's real insert is watched as well.
+        from frappe.model.document import Document
+
         session = self._session(self._mixed_rows())
-        before = {dt: frappe.db.count(dt) for dt in ("Customer", "Contact", "Email Queue", "Version")}
+        doctypes = ("Customer", "Contact", "Email Queue", "Version")
+        before = {dt: frappe.db.count(dt) for dt in doctypes}
+        queued = self._queue_lengths()
+        private = self._private_files()
+        files = set(frappe.get_all("File", pluck="name"))
+        inserted, real_db_insert = [], Document.db_insert
 
-        self._check(session)
+        def db_insert(doc, *args, **kwargs):
+            result = real_db_insert(doc, *args, **kwargs)  # past this line the row is in the table
+            inserted.append((doc.doctype, doc.get("customer_name")))
+            return result
 
-        self.assertEqual({dt: frappe.db.count(dt) for dt in before}, before)
+        with patch.object(Document, "db_insert", db_insert):
+            result = self._check(session)
+
+        # The rows with nothing wrong reached the insert, and only they did.
+        self.assertEqual(result["ready"], 3, result)
+        self.assertEqual(
+            [i for i in inserted if i[0] == "Customer"],
+            [("Customer", name) for name in (f"Alpha {self.tag}", f"Alpha {self.tag}", self.existing)],
+        )
+        # ... and it left nothing behind: not in a table, not on the queue, not on disk.
+        self.assertEqual({dt: frappe.db.count(dt) for dt in doctypes}, before)
         self.assertFalse(frappe.db.exists("Customer", {"customer_name": f"Alpha {self.tag}"}))
+        self.assertEqual(frappe.db.count("Customer", {"customer_name": self.existing}), 1)
+        self.assertEqual(self._queue_lengths(), queued)
+        # The only File is the check's own result, attached to the session.
+        new_files = set(frappe.get_all("File", pluck="name")) - files
+        url = frappe.db.get_value("FAC Import Session", session, "validation_results")
+        results = frappe.get_doc("File", {"file_url": url})
+        self.assertEqual(new_files, {results.name})
+        self.assertEqual(
+            (results.attached_to_doctype, results.attached_to_name), ("FAC Import Session", session)
+        )
+        self.assertEqual(self._private_files() - private, {os.path.basename(results.file_url)})
+
+    def _run_job(self, session):
+        """What the queue runs. The job commits when it is done, as a worker's job must: the
+        commit is held here, so a test's rows never stay in the site's database (#34412)."""
+        with patch.object(frappe.db.__class__, "commit", autospec=True) as commit:
+            import_dry_run.run_job(session, "Administrator")
+        commit.assert_called()  # the job did reach its commit: it is the patch that held it
+
+    @staticmethod
+    def _queue_lengths():
+        from frappe.utils.background_jobs import get_queue
+
+        return {name: get_queue(name).count for name in ("short", "default", "long")}
+
+    @staticmethod
+    def _private_files():
+        folder = frappe.get_site_path("private", "files")
+        return set(os.listdir(folder)) if os.path.isdir(folder) else set()
 
     def test_a_group_shows_at_most_three_example_rows(self):
         rows = [[f"Row {i} {self.tag}", self.typo, "Company", ""] for i in range(5)]
@@ -220,26 +285,152 @@ class TestDryRunImport(BaseAssistantTest):
 
     # -- criterion 3: duplicates are their own groups ---------------------------------------
 
-    def test_duplicates_in_the_file_and_in_erpnext_are_their_own_groups(self):
+    def test_customers_sharing_a_name_are_no_duplicates(self):
+        # Customer is named by its naming series: rows 6 and 7 repeat a name, and are no failure (#34398)
         session = self._session(self._mixed_rows())
 
         result = self._check(session)
 
-        in_file = self._group(result, "Duplicate in the file")
-        self.assertEqual(([e["row"] for e in in_file["examples"]], in_file["field"]), ([6], "customer_name"))
-        existing = self._group(result, "Already in ERPNext")
-        self.assertEqual([e["row"] for e in existing["examples"]], [7])
+        self.assertNotIn("Duplicate in the file", [g["cause"] for g in result["groups"]])
+        self.assertNotIn("Already in ERPNext", [g["cause"] for g in result["groups"]])
+        self.assertIsNone(result["duplicate_key"])
 
     def test_a_duplicate_is_found_beside_its_first_rows_other_problem(self):
         # The first row's own problem (a Customer Type typo) must not hide the duplicate below it:
-        # found only after the typo is fixed, it would be a second round of questions.
-        t = self.tag
-        session = self._session([[f"Ravi {t}", GROUP, "Compnay", ""], [f"Ravi {t}", GROUP, "Company", ""]])
+        # found only after the typo is fixed, it would be a second round of questions. The key is a
+        # unique field here, Represents Company.
+        t, company = self.tag, self._company()
+        session = self._unique_session(
+            [[f"Ravi {t}", "Compnay", company], [f"Ravi2 {t}", "Company", company]]
+        )
 
         result = self._check(session)
 
         in_file = self._group(result, "Duplicate in the file")
         self.assertEqual([e["row"] for e in in_file["examples"]], [3])
+
+    # -- #34398: only a record's name or a unique field is a duplicate key ---------------------
+
+    def _other_session(self, doctype, header, rows, mapping):
+        """A session for another DocType, with a one-column or wider CSV."""
+        content = ("\n".join([",".join(header)] + [",".join(row) for row in rows]) + "\n").encode()
+        file_doc = frappe.get_doc(
+            {"doctype": "File", "file_name": "records.csv", "content": content, "is_private": 1}
+        ).insert()
+        started = self._run("start_import_session", {"file_url": file_doc.file_url})
+        self.assertTrue(started["success"], started)
+        session = started["result"]["session_id"]
+        mapped = self._run("set_column_mapping", {"session": session, "mapping": mapping, "doctype": doctype})
+        self.assertTrue(mapped["success"], mapped)
+        return session
+
+    @staticmethod
+    def _company():
+        return frappe.get_all("Company", pluck="name", limit=1)[0]
+
+    def _unique_session(self, rows):
+        """Customers with a Represents Company column, a field marked unique: rows are
+        [name, type, company]."""
+        return self._other_session(
+            "Customer",
+            ["Customer Name", "Customer Group", "Customer Type", "Represents Company"],
+            [[name, GROUP, kind, company] for name, kind, company in rows],
+            {
+                "Customer Name": "customer_name",
+                "Customer Group": "customer_group",
+                "Customer Type": "customer_type",
+                "Represents Company": "represents_company",
+            },
+        )
+
+    def test_customers_sharing_a_name_are_all_ready_with_a_warning(self):
+        # Customer is named by its naming series here, so its name is no key: two customers may
+        # share a customer_name, in the file and with one already in ERPNext.
+        t = self.tag
+        session = self._session(
+            [
+                [f"Shared {t}", GROUP, "Company", ""],  # row 2
+                [f"Shared {t}", GROUP, "Company", ""],  # row 3: same name as row 2
+                [self.existing, GROUP, "Company", ""],  # row 4: same name as a record in ERPNext
+                [f"Other {t}", GROUP, "Company", ""],  # row 5
+            ]
+        )
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"], result["groups"]), (4, 0, []), result)
+        self.assertIsNone(result["duplicate_key"])
+        (warning,) = result["warnings"]
+        self.assertEqual(
+            (warning["cause"], warning["field"], warning["count"], warning["example_rows"]),
+            ("Shared value", "customer_name", 2, [3, 4]),
+        )
+        self.assertIn("2", warning["message"])
+        self.assertIn("Customer Name", warning["message"])
+        # The session keeps it with the summary, and the rows stay ready.
+        stored = self._stored(session)
+        self.assertEqual(stored["summary"]["warnings"], result["warnings"])
+        self.assertEqual({r["status"] for r in stored["rows"]}, {"ready"})
+        self.assertEqual(frappe.db.get_value("FAC Import Session", session, "status"), "Ready to Import")
+
+    def test_a_name_that_is_the_records_name_is_refused_by_erpnext(self):
+        # Named by its customer name, a Customer's name is the field: ERPNext's own insert, which
+        # the check runs, refuses a second one. (setUp named customers by series.)
+        self.name_customers_by("Customer Name")
+        frappe.get_doc(
+            {"doctype": "Customer", "customer_name": f"Named {self.tag}", "customer_group": GROUP}
+        ).insert()
+        session = self._session([[f"Named {self.tag}", GROUP, "Company", ""]])
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (0, 1), result)
+        self.assertEqual(self._group(result, "Rejected by ERPNext")["error"], "DuplicateEntryError")
+
+    def test_no_warning_when_no_name_is_shared(self):
+        session = self._session([[f"One {self.tag}", GROUP, "Company", ""]])
+
+        result = self._check(session)
+
+        self.assertEqual(result["ready"], 1, result)
+        self.assertEqual(result["warnings"], [])
+
+    def test_a_repeated_record_name_is_still_a_duplicate(self):
+        # Brand is named by its own field: that field is the record's name, so a repeat is a real
+        # duplicate, and so is a name already in ERPNext.
+        t = self.tag
+        frappe.get_doc({"doctype": "Brand", "brand": f"Old {t}"}).insert()
+        session = self._other_session(
+            "Brand",
+            ["Brand"],
+            [[f"New {t}"], [f"New {t}"], [f"Old {t}"]],
+            {"Brand": "brand"},
+        )
+
+        result = self._check(session)
+
+        self.assertEqual(result["duplicate_key"], "brand")
+        self.assertEqual((result["ready"], result["failed"]), (1, 2), result)
+        in_file = self._group(result, "Duplicate in the file")
+        self.assertEqual(([e["row"] for e in in_file["examples"]], in_file["field"]), ([3], "brand"))
+        existing = self._group(result, "Already in ERPNext")
+        self.assertEqual([e["row"] for e in existing["examples"]], [4])
+        self.assertEqual(result["warnings"], [])
+
+    def test_a_repeated_value_of_a_unique_field_is_still_a_duplicate(self):
+        # Customer.represents_company is marked unique: it is the key, whatever the title field is.
+        t, company = self.tag, self._company()
+        session = self._unique_session(
+            [[f"Int A {t}", "Company", company], [f"Int B {t}", "Company", company]]
+        )
+
+        result = self._check(session)
+
+        self.assertEqual(result["duplicate_key"], "represents_company")
+        in_file = self._group(result, "Duplicate in the file")
+        self.assertEqual(
+            ([e["row"] for e in in_file["examples"]], in_file["field"]), ([3], "represents_company")
+        )
 
     # -- the session holds the result ----------------------------------------------------------
 
@@ -251,7 +442,7 @@ class TestDryRunImport(BaseAssistantTest):
         doc = frappe.get_doc("FAC Import Session", session)
         self.assertEqual(doc.status, "Dry Run Failed")
         summary = json.loads(doc.validation_summary)
-        self.assertEqual((summary["ready"], summary["failed"]), (1, 6))
+        self.assertEqual((summary["ready"], summary["failed"]), (3, 4))
         results = frappe.get_doc("File", {"file_url": doc.validation_results})
         self.assertTrue(results.is_private)
         self.assertEqual(
@@ -260,11 +451,11 @@ class TestDryRunImport(BaseAssistantTest):
         per_row = {r["row"]: r["status"] for r in json.loads(results.get_content())["rows"]}
         self.assertEqual(
             per_row,
-            {2: "ready", 3: "failed", 4: "failed", 5: "failed", 6: "failed", 7: "failed", 8: "failed"},
+            {2: "ready", 3: "failed", 4: "failed", 5: "failed", 6: "ready", 7: "ready", 8: "failed"},
         )
         step = doc.steps[-1]
         self.assertEqual(
-            (step.step, step.outcome, step.rows_ok, step.rows_failed), ("Dry Run", "Warning", 1, 6)
+            (step.step, step.outcome, step.rows_ok, step.rows_failed), ("Dry Run", "Warning", 3, 4)
         )
         self.assertTrue(doc.validated_fingerprint)
 
@@ -299,9 +490,9 @@ class TestDryRunImport(BaseAssistantTest):
 
         result = self._check(session)
 
-        self.assertEqual((result["ready"], result["failed"]), (3, 4))
+        self.assertEqual((result["ready"], result["failed"]), (5, 2))
         self.assertNotIn("Missing link", [g["cause"] for g in result["groups"]])
-        self.assertEqual(result["previous"], {"failed": 6, "fixed": 2})
+        self.assertEqual(result["previous"], {"failed": 4, "fixed": 2})
         attached = frappe.get_all(
             "File",
             filters={
@@ -318,7 +509,7 @@ class TestDryRunImport(BaseAssistantTest):
 
         result = self._check(session)
 
-        self.assertEqual((result["ready"], result["failed"], result["excluded"]), (1, 4, 2))
+        self.assertEqual((result["ready"], result["failed"], result["excluded"]), (3, 2, 2))
 
     # -- references between rows of the same file ---------------------------------------------
 
@@ -635,12 +826,12 @@ class TestDryRunImport(BaseAssistantTest):
         progress = json.loads(frappe.db.get_value("FAC Import Session", session, "progress"))
         self.assertEqual((progress["state"], progress["total"]), ("queued", 7))
 
-        import_dry_run.run_job(session, "Administrator")
+        self._run_job(session)
 
         doc = frappe.get_doc("FAC Import Session", session)
         self.assertEqual(doc.status, "Dry Run Failed")
         self.assertEqual(json.loads(doc.progress)["state"], "done")
-        self.assertEqual(json.loads(doc.validation_summary)["failed"], 6)
+        self.assertEqual(json.loads(doc.validation_summary)["failed"], 4)
 
     # -- side effects are held back ------------------------------------------------------------------
 
@@ -758,9 +949,8 @@ class TestDryRunImport(BaseAssistantTest):
         # misses them. inspect.unwrap is that function, however held_back holds it back.
         import inspect
 
-        from rq.job import Job
-
         from frappe.utils.background_jobs import get_queue
+        from rq.job import Job
 
         bound_enqueue = inspect.unwrap(frappe.utils.background_jobs.enqueue)
         queue = get_queue("short")
@@ -836,6 +1026,8 @@ class TestDryRunImport(BaseAssistantTest):
         gone = {"force": True, "ignore_permissions": True, "delete_permanently": True}
         frappe.delete_doc("FAC Import Session", session, **gone)
         frappe.delete_doc("Customer", self.existing, **gone)
+        if self.made_group:  # this test's setUp made it, and the commit made it permanent
+            frappe.delete_doc("Customer Group", GROUP, **gone)
         frappe.db.delete("Series", {"name": prefix})
         frappe.db.delete("Deleted Document", {"creation": (">=", started)})
         Database.commit(frappe.db)

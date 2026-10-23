@@ -28,7 +28,8 @@ jobs:
             python-version: '3.14'
             node-version: 24
     name: Server (${{ matrix.frappe-branch }})
-    timeout-minutes: 30
+    # The data-migration tests import into ERPNext for real: they take most of the run.
+    timeout-minutes: 60
 
     services:
       redis-cache:
@@ -115,6 +116,19 @@ jobs:
           bench build
         env:
           CI: 'Yes'
+
+      # A real ERPNext site has been through its setup wizard: a company and its accounts, a
+      # fiscal year, the root groups ("All Customer Groups", "All Item Groups") and the UOMs the
+      # data-migration tests import into. Without it nearly all of them fail on a missing root.
+      - name: Complete the ERPNext setup
+        working-directory: /home/runner/frappe-bench
+        run: |
+          year=$(date +%Y); [ "$(date +%m)" -lt 4 ] && year=$((year - 1))
+          bench --site test_site execute frappe.desk.page.setup_wizard.setup_wizard.setup_complete --kwargs "{\"args\": {
+            \"language\": \"English\", \"country\": \"India\", \"timezone\": \"Asia/Kolkata\", \"currency\": \"INR\",
+            \"company_name\": \"FAC Test India\", \"company_abbr\": \"FTI\", \"chart_of_accounts\": \"Standard\",
+            \"fy_start_date\": \"$year-04-01\", \"fy_end_date\": \"$((year + 1))-03-31\", \"setup_demo\": 0,
+            \"full_name\": \"Test Admin\", \"email\": \"admin@example.com\", \"domains\": [\"Manufacturing\"]}}"
 
       - name: Run Tests
         working-directory: /home/runner/frappe-bench

@@ -660,7 +660,43 @@ class TestImportRun(ImportRunCase):
         self.assertEqual(response["result"]["state"], "started")
         kwargs = enqueue.call_args.kwargs
         self.assertTrue(kwargs["enqueue_after_commit"])
-        self.assertEqual(kwargs["job_id"], f"data_import::{response['result']['data_import']}")
+
+    def test_desk_sees_the_import_as_running_while_the_job_is_queued(self):
+        """The job FAC queues is the one Desk's Start Import and Stop look up (#34397): Frappe's
+        own id for the Data Import, not FAC's string for it."""
+        from frappe.utils import background_jobs
+
+        session, checked = self._ready_session()
+        real_enqueue = import_run.enqueue
+
+        def queued_now(*args, **kwargs):  # the job queued here, not after a commit
+            kwargs["enqueue_after_commit"] = False
+            self.addCleanup(self._remove_queued_job, kwargs["job_id"])
+            return real_enqueue(*args, **kwargs)
+
+        with patch.object(import_run, "_runs_now", autospec=True, return_value=False), patch.object(
+            import_run, "is_scheduler_inactive", autospec=True, return_value=False
+        ), patch.object(import_run, "enqueue", side_effect=queued_now):
+            data_import = self._import(session, checked)["result"]["data_import"]
+
+        # What Desk's Start Import asks: Frappe's own check, for the id Frappe's own run would use.
+        asked = []
+        with patch(
+            "frappe.core.doctype.data_import.data_import.is_job_enqueued",
+            side_effect=lambda job_id: asked.append(job_id) or background_jobs.is_job_enqueued(job_id),
+        ):
+            started = frappe.get_doc("Data Import", data_import).start_import()
+
+        self.assertEqual(len(asked), 1)
+        self.assertTrue(background_jobs.is_job_enqueued(asked[0]), "Desk can't see FAC's job")
+        self.assertFalse(started, "Desk started a second importer")
+
+    def _remove_queued_job(self, job_id: str) -> None:
+        from frappe.utils import background_jobs
+
+        job = background_jobs.get_job(job_id)
+        if job:
+            job.delete()
 
     def test_another_users_session_is_refused(self):
         session, checked = self._ready_session()
