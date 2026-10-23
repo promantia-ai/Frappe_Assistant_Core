@@ -8,6 +8,7 @@
 
 """Running a migration plan after one approval (#33995)."""
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -302,22 +303,69 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
         self.assertEqual(import_plan.get_plan(plan).status, "Stopped")
 
     def test_a_file_changed_after_the_approval_isnt_imported(self):
-        plan, groups, items = self._ready_plan()
-        real = import_plan._file_done
+        # A real change leaves validated_fingerprint alone (only a re-check writes it), so each one
+        # is a direct database write, standing in for a REST PUT or any other way round the guards.
+        def mapping(items):
+            options = json.loads(frappe.db.get_value(SESSION, items, "template_options"))
+            options["column_to_field_map"]["1"] = "description"
+            frappe.db.set_value(SESSION, items, "template_options", json.dumps(options))
 
-        def groups_done_then_items_change(plan_name, session_name):
-            finished = real(plan_name, session_name)
-            if session_name == groups:
-                frappe.db.set_value(SESSION, items, "validated_fingerprint", "changed")
-            return finished
+        def file(items):
+            source = frappe.get_doc("File", frappe.db.get_value(SESSION, items, "source_file"))
+            content = source.get_content()
+            content = content.encode() if isinstance(content, str) else content
+            other = self._file("items.csv", content + f"I9 {self.tag},I9,{self.g2},Nos\n".encode())
+            frappe.db.set_value(SESSION, items, "source_file", other.name)
 
-        with patch.object(import_plan, "_file_done", side_effect=groups_done_then_items_change):
-            self._approve(plan)
+        def rules(items):
+            frappe.db.set_value(
+                SESSION, items, "transformation_rules", json.dumps({"left_out": {"2": "Not wanted"}})
+            )
 
-        doc = import_plan.get_plan(plan)
-        self.assertEqual(doc.status, "Stopped")
-        self.assertIn("items.csv changed after the plan was approved", doc.steps[-1].message)
-        self.assertFalse(any(frappe.db.exists("Item", code) for code in self.items))
+        base = self.tag
+        for number, (what, change) in enumerate((("mapping", mapping), ("file", file), ("rules", rules))):
+            with self.subTest(what):
+                self.tag = f"{base}{number}"  # each plan has its own groups and items
+                plan, groups, items = self._ready_plan()
+                approved = frappe.db.get_value(SESSION, items, "validated_fingerprint")
+                real = import_plan._file_done
+
+                def groups_done_then_items_change(plan_name, session_name):
+                    finished = real(plan_name, session_name)
+                    if session_name == groups:
+                        change(items)
+                    return finished
+
+                with patch.object(import_plan, "_file_done", side_effect=groups_done_then_items_change):
+                    self._approve(plan)
+
+                doc = import_plan.get_plan(plan)
+                self.assertEqual(doc.status, "Stopped")
+                self.assertRegex(doc.steps[-1].message, r"items.*\.csv changed after the plan was approved")
+                self.assertFalse(any(frappe.db.exists("Item", code) for code in self.items))
+                self.assertEqual(frappe.db.get_value(SESSION, items, "validated_fingerprint"), approved)
+
+    def test_a_file_whose_session_lists_the_plans_masters_still_runs(self):
+        # create_planned lists the masters it makes on the file's session (created_records); that
+        # isn't part of the fingerprint, so the file still passes _prepare.
+        plan, groups, _items = self._ready_plan()
+        name = f"M {self.tag}"
+        entry = {
+            "session": groups,
+            "doctype": "Customer Group",
+            "name": name,
+            "data": {"customer_group_name": name, "parent_customer_group": "All Customer Groups"},
+        }
+        set_plan(plan, masters=frappe.as_json([entry]))
+        self.assertTrue(self._run("plan_questions", {"plan": plan})["result"]["ready"])
+
+        response = self._approve(plan)
+
+        self.assertTrue(response["success"], response)
+        self.assertTrue(frappe.db.exists("Customer Group", name))
+        self.assertTrue(frappe.get_doc(SESSION, groups).created_records)
+        self.assertEqual(import_plan.get_plan(plan).status, "Completed")
+        self.assertTrue(frappe.db.exists("Item Group", self.g2))
 
     def test_a_session_of_a_running_plan_cant_be_changed(self):
         plan, _groups, items = self._ready_plan()
@@ -407,9 +455,13 @@ class TestAPlanWithALargeFile(ImportRunCase):
         content = ("Name\n" + "".join(f"{code}\n" for code in self.codes)).encode()
         started = self._run("start_import_session", {"file_url": self._file("brands.csv", content).file_url})
         session = started["result"]["session_id"]
-        mapped = self._run("set_column_mapping", {"session": session, "mapping": {"Name": "brand"}, "doctype": "Brand"})
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": {"Name": "brand"}, "doctype": "Brand"}
+        )
         self.assertTrue(mapped["success"], mapped)
-        plan = self._run("plan_migration", {"sessions": [session], "failure_rule": "leave_out"})["result"]["plan"]
+        plan = self._run("plan_migration", {"sessions": [session], "failure_rule": "leave_out"})["result"][
+            "plan"
+        ]
         return plan, session
 
     def _ready(self, plan, rows):
@@ -421,7 +473,9 @@ class TestAPlanWithALargeFile(ImportRunCase):
             import_dry_run.run_job(session.name, user)
 
         answers = [{"id": "plan:failure_rule", "rule": "leave_out"}]
-        with self._each_row_commits(), patch.object(import_dry_run, "enqueue", side_effect=check_now) as queued:
+        with self._each_row_commits(), patch.object(
+            import_dry_run, "enqueue", side_effect=check_now
+        ) as queued:
             ready = self._run("plan_questions", {"plan": plan, "answers": answers})["result"]
             if rows > import_dry_run.BACKGROUND_ROWS:
                 self.assertFalse(ready["ready"], ready)
@@ -491,3 +545,223 @@ class TestAPlanWithALargeFile(ImportRunCase):
 
             with self.assertRaises(import_dry_run.DryRunProblem):
                 import_dry_run.run(session)
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Item Group and Item")
+class TestAPlanThatIsStartedOrEnded(ImportRunCase):
+    """One approval, one run; a plan being opened never overwrites a run; a plan nothing runs for
+    ends (#34431). The plans are the ones TestRunMigrationPlan builds."""
+
+    _mapped = TestRunMigrationPlan._mapped
+    _ready_plan = TestRunMigrationPlan._ready_plan
+    _approve = TestRunMigrationPlan._approve
+
+    def _start(self, plan):
+        """The plan as one approval leaves it: Running, with the run queued (not run)."""
+        with patch.object(import_plan.frappe, "enqueue"):
+            import_plan.start(import_plan.get_plan(plan))
+        return import_plan._settings(plan)
+
+    def _another_file(self):
+        return self._mapped(
+            "more-groups.csv",
+            f"Name,Parent,Is Group\nG3 {self.tag},All Item Groups,0\n".encode(),
+            "Item Group",
+            {"Name": "item_group_name", "Parent": "parent_item_group", "Is Group": "is_group"},
+        )
+
+    # -- an open path never overwrites a run ------------------------------------------------
+
+    def test_plan_questions_overlapping_the_start_leaves_the_run_alone(self):
+        plan, _groups, _items = self._ready_plan()
+        real = import_plan.arrange
+        started = {}
+
+        def start_meanwhile(plan_doc):
+            if not started:  # the plan_questions that loaded it Ready to Run is still working
+                started.update(self._start(plan))
+            return real(plan_doc)
+
+        with patch.object(import_plan, "arrange", side_effect=start_meanwhile):
+            response = self._run("plan_questions", {"plan": plan})
+
+        self.assertFalse(response["success"], response)
+        self.assertIn("Running", str(response))
+        stored = import_plan._settings(plan)
+        self.assertEqual(stored["status"], "Running")
+        for key in ("approved", "done", "current", "user"):
+            self.assertEqual(stored["progress"].get(key), started["progress"].get(key), key)
+        self.assertEqual(stored["steps"], started["steps"])
+        self.assertIn("Approved", stored["steps"][-1]["message"])
+
+    def test_no_open_plan_path_overwrites_a_running_plan(self):
+        plan, groups, _items = self._ready_plan()
+        extra = self._another_file()
+        stale = import_plan.get_plan(plan)  # loaded while Ready to Run, as the open paths load it
+        running = self._start(plan)
+        item = {
+            "doctype": "Customer Group",
+            "data": {"customer_group_name": f"M {self.tag}", "parent_customer_group": "All Customer Groups"},
+        }
+        paths = {
+            "apply_answers": lambda: import_plan.apply_answers(
+                stale, [{"id": "plan:failure_rule", "rule": "stop"}]
+            ),
+            "open_questions": lambda: import_plan.open_questions(stale),
+            "add_masters": lambda: import_plan.add_masters(frappe.get_doc(SESSION, groups), [item]),
+            "plan_migration": lambda: self._run(
+                "plan_migration",
+                {"plan": plan, "sessions": [extra], "order": [extra], "cut_off": "2026-03-31"},
+            ),
+        }
+        for name, path in paths.items():
+            with self.subTest(name), patch.object(import_plan, "load_plan", return_value=stale):
+                try:
+                    path()
+                except (import_plan.PlanProblem, frappe.ValidationError):
+                    pass
+
+                self.assertEqual(import_plan._settings(plan), running)
+                self.assertEqual(frappe.db.get_value(SESSION, extra, "migration_plan"), None)
+
+    def test_an_open_plan_path_never_reopens_an_ended_plan(self):
+        plan, groups, _items = self._ready_plan()
+        stale = import_plan.get_plan(plan)
+        for status in ("Stopped", "Completed", "Partially Completed", "Failed"):
+            with self.subTest(status):
+                set_plan(plan, status=status)
+                ended = import_plan._settings(plan)
+
+                for path in (
+                    lambda: import_plan.open_questions(stale),
+                    lambda: import_plan.apply_answers(stale, [{"id": "plan:failure_rule", "rule": "stop"}]),
+                    lambda: import_plan.add_masters(
+                        frappe.get_doc(SESSION, groups),
+                        [{"doctype": "Customer Group", "data": {"customer_group_name": f"M {self.tag}"}}],
+                    ),
+                ):
+                    with patch.object(import_plan, "load_plan", return_value=stale), self.assertRaises(
+                        import_plan.PlanProblem
+                    ):
+                        path()
+                    self.assertEqual(import_plan._settings(plan), ended)
+
+    # -- one approval, one run ---------------------------------------------------------------
+
+    def test_start_refuses_a_plan_already_running_in_the_database(self):
+        plan, _groups, _items = self._ready_plan()
+        stale = import_plan.get_plan(plan)
+        running = self._start(plan)
+
+        with patch.object(import_plan.frappe, "enqueue") as enqueue:
+            with self.assertRaises(import_plan.PlanProblem):
+                import_plan.start(stale)
+
+        enqueue.assert_not_called()
+        self.assertEqual(import_plan._settings(plan), running)
+
+    def test_a_second_approval_doesnt_start_a_second_run(self):
+        plan, groups, _items = self._ready_plan()
+        stale = import_plan.get_plan(plan)  # what a second call loads before the first commits
+
+        with patch.object(import_plan.frappe, "enqueue") as enqueue:
+            first = self._approve(plan)
+            with patch.object(import_plan, "load_plan", return_value=stale):
+                second = self._approve(plan)
+
+        self.assertTrue(first["success"], first)
+        self.assertFalse(second["success"], second)
+        self.assertIn("already running", str(second))
+        runs = [call for call in enqueue.call_args_list if call.args[0].endswith(".run_job")]
+        self.assertEqual(len(runs), 1, enqueue.call_args_list)
+        with self._each_row_commits():
+            import_plan.run_job(plan, "Administrator")  # the one queued run
+        self.assertEqual(import_plan.get_plan(plan).status, "Completed")
+        steps = [step.message for step in import_plan.get_plan(plan).steps]
+        self.assertEqual(len([s for s in steps if s.startswith("groups.csv:")]), 1, steps)
+
+    def test_the_plan_job_is_enqueued_once(self):
+        plan, _groups, _items = self._ready_plan()
+
+        with patch.object(import_plan.frappe, "enqueue") as enqueue:
+            import_plan.start(import_plan.get_plan(plan))
+
+        enqueue.assert_called_once()
+        self.assertTrue(enqueue.call_args.kwargs["deduplicate"])
+        self.assertEqual(enqueue.call_args.kwargs["job_id"], import_plan.PLAN_JOB.format(plan))
+        # the hand-off to continue_job is never dropped as a duplicate of a run_job still finishing
+        with patch.object(import_plan.frappe, "enqueue") as enqueue:
+            import_plan._enqueue(plan, "continue_job", session_name="X", user="Administrator")
+        self.assertFalse(enqueue.call_args.kwargs["deduplicate"])
+
+    # -- a plan nothing runs for -------------------------------------------------------------
+
+    def test_the_sweep_stops_a_running_plan_nothing_runs(self):
+        plan, groups, items = self._ready_plan()
+        self._start(plan)
+        self.assertTrue(import_plan.imported_by_its_plan(frappe.get_doc(SESSION, groups)))
+
+        with patch.object(import_plan, "alive", return_value=False):
+            import_plan.sweep_dead_plans()
+
+        doc = import_plan.get_plan(plan)
+        self.assertEqual(doc.status, "Stopped")
+        self.assertIn("No job was running", doc.steps[-1].message)
+        self.assertIn("imported stays", doc.steps[-1].message)
+        self.assertIsNone(import_plan.imported_by_its_plan(frappe.get_doc(SESSION, groups)))
+        joined = self._run("plan_migration", {"sessions": [groups, items]})
+        self.assertTrue(joined["success"], joined)
+
+    def test_the_sweep_leaves_live_and_idle_plans_alone(self):
+        plan, _groups, _items = self._ready_plan()
+        fresh = {"handoff_at": str(frappe.utils.now_datetime())}
+        scenarios = (
+            ("Running, job alive", "Running", {}, True),
+            ("Running, hand-off a moment ago", "Running", fresh, False),
+            ("Planning", "Planning", {}, False),
+            ("Ready to Run", "Ready to Run", {}, False),
+            ("Stopped", "Stopped", {}, False),
+            ("Completed", "Completed", {}, False),
+        )
+        for name, status, progress, alive in scenarios:
+            with self.subTest(name):
+                set_plan(plan, status=status, progress=frappe.as_json(progress))
+                before = import_plan._settings(plan)
+
+                with patch.object(import_plan, "alive", return_value=alive):
+                    import_plan.sweep_dead_plans()
+
+                self.assertEqual(import_plan._settings(plan), before)
+
+    def test_one_broken_plan_doesnt_stop_the_sweep(self):
+        first, _g, _i = self._ready_plan()
+        self.tag = f"{self.tag}b"
+        second, _g, _i = self._ready_plan()
+        for plan in (first, second):
+            set_plan(plan, status="Running")
+        real = import_plan._end
+
+        def end(plan_name, status, message):
+            if plan_name == first:
+                raise RuntimeError("the plan is broken")
+            return real(plan_name, status, message)
+
+        with patch.object(import_plan, "alive", return_value=False), patch.object(
+            import_plan, "_end", side_effect=end
+        ), patch.object(import_plan.frappe, "log_error") as log_error:
+            import_plan.sweep_dead_plans()
+
+        self.assertEqual(import_plan.get_plan(second).status, "Stopped")
+        self.assertEqual(import_plan.get_plan(first).status, "Running")
+        log_error.assert_called_once()
+
+    def test_the_sweep_is_scheduled(self):
+        def paths(events):
+            if isinstance(events, dict):
+                return [path for value in events.values() for path in paths(value)]
+            return list(events)
+
+        self.assertIn(
+            "frappe_assistant_core.utils.import_plan.sweep_dead_plans",
+            paths(frappe.get_hooks("scheduler_events")),
+        )

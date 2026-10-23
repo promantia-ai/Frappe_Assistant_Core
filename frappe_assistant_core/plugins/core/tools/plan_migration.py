@@ -137,6 +137,7 @@ class PlanMigration(BaseTool):
             if fixed_order is not None:
                 progress = frappe.parse_json(plan.progress or "{}") or {}
                 plan.progress = frappe.as_json({**progress, "fixed_order": list(dict.fromkeys(fixed_order))})
+            plan.require_open()  # before any file is linked: a plan that started meanwhile keeps its files
             for session in sessions:
                 session.db_set("migration_plan", plan.name)
             plan.status = "Planning"  # a new file has questions of its own
@@ -146,7 +147,7 @@ class PlanMigration(BaseTool):
                 "Warning" if problems else "Success",
                 _("{0} files in order.").format(len(import_plan.children(plan))),
             )
-            plan.save()
+            plan.save_open()
         except import_plan.PlanProblem as e:
             return {"success": False, "error": str(e)}
         except Exception as e:

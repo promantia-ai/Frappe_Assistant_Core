@@ -101,6 +101,8 @@ class RunMigrationPlan(BaseTool):
             return {"success": False, "error": problem, "plan": plan.name}
         try:
             import_plan.start(plan)
+        except import_plan.PlanProblem as e:
+            return {"success": False, "error": str(e), "plan": plan.name}
         except Exception as e:
             frappe.log_error(title=_("Run Migration Plan Error"), message=frappe.get_traceback())
             return {"success": False, "error": exception_message(e), "plan": plan.name}

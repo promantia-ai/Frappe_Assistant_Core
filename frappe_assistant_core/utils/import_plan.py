@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
-from frappe.utils import add_months, cint, cstr, get_last_day, getdate, now_datetime, today
+from frappe.utils import add_months, cint, cstr, get_datetime, get_last_day, getdate, now_datetime, today
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
 
@@ -84,6 +84,23 @@ class Plan:
 
     def reload(self) -> None:
         self._read(_settings(self.name))
+
+    def require_open(self) -> None:
+        """Raise PlanProblem unless the plan is open in the database now, and hold its row until
+        this transaction ends: the run's start waits for it. A plan not saved yet is open."""
+        stored = _settings(self.name, for_update=True).get("status")
+        if stored and stored not in OPEN:
+            raise PlanProblem(
+                _("Plan {0} is {1} now, so it can't be changed: its files are fixed.").format(
+                    self.name, _(stored)
+                )
+            )
+
+    def save_open(self) -> None:
+        """save() for the paths that open a plan: never over a plan that has started or ended since
+        this copy was read (it would take Running, and the run's progress, back)."""
+        self.require_open()
+        self.save()
 
     def save(self) -> None:
         settings = {
@@ -257,7 +274,7 @@ def add_masters(session, items: List[Dict[str, Any]]) -> None:
                 {"session": session.name, "doctype": item["doctype"], "name": name, "data": item["data"]}
             )
     plan.masters = frappe.as_json(entries)
-    plan.save()
+    plan.save_open()
 
 
 def create_planned(plan) -> List[Dict[str, Any]]:
@@ -631,7 +648,7 @@ def open_questions(plan) -> Dict[str, Any]:
     _add_needed_by(questions, files)
     ready = bool(files) and not questions and all(s.status == "Ready to Import" for s in files)
     plan.status = "Ready to Run" if ready else "Planning"
-    plan.save()
+    plan.save_open()
     result = {**describe(plan), "questions": questions, "ready": ready}
     if ready:  # what run_migration_plan is given, so its approval card shows it
         result["approval"] = card_figures(plan)
@@ -704,6 +721,7 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
             session = files[session_name]
             done += import_fixes.apply_fixes(session, import_fixes.last_groups(session), session_fixes)
             session.save()
+        plan.require_open()  # not after the plan started: its files' fixes roll back with the savepoint
         if rule or cut_off:
             plan.reload()
             progress = _progress(plan)
@@ -717,7 +735,7 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
                 plan.log_step("Questions", "Success", _("Cut-off date: {0}.").format(cut_off))
                 done.append(_("Cut-off date: {0}.").format(cut_off))
             plan.progress = frappe.as_json(progress)
-            plan.save()
+            plan.save_open()
     except Exception:
         frappe.db.rollback(save_point=ANSWERS_SAVEPOINT)
         raise
@@ -989,6 +1007,17 @@ def run_problem(plan) -> Optional[str]:
 def start(plan) -> None:
     """Run the approved plan in the background, as the user who approved it. Each file's
     fingerprint is kept: a file that changes after the approval isn't imported."""
+    # The status as the database has it, locked: a second approval waits for the first to commit,
+    # then finds the plan Running (the copy it was given says Ready to Run).
+    stored = _settings(plan.name, for_update=True).get("status")
+    if stored == "Running":
+        raise PlanProblem(_("Plan {0} is already running.").format(plan.name))
+    if stored != "Ready to Run":
+        raise PlanProblem(
+            _("Plan {0} is {1}: only a plan that is Ready to Run can be started.").format(
+                plan.name, _(stored or "Planning")
+            )
+        )
     approved = {s.name: s.validated_fingerprint for s in children(plan)}
     request_stop(plan.name, 0)
     _update(
@@ -1001,15 +1030,19 @@ def start(plan) -> None:
         approved=approved,
         user=frappe.session.user,
     )
-    _enqueue(plan.name, "run_job", user=frappe.session.user)
+    _enqueue(plan.name, "run_job", deduplicate=True, user=frappe.session.user)
 
 
-def _enqueue(plan_name: str, method: str, **kwargs) -> None:
+def _enqueue(plan_name: str, method: str, deduplicate: bool = False, **kwargs) -> None:
+    """Queue a job of the plan. Only the run's start deduplicates: continue_job is queued while the
+    job that started the file may still be STARTED (it returns after queueing the file's import),
+    and a dropped continue would leave the plan Running with nothing to carry it on."""
     frappe.enqueue(
         f"{__name__}.{method}",
         queue="long",
         timeout=4 * 60 * 60,
         job_id=PLAN_JOB.format(plan_name),
+        deduplicate=deduplicate,
         enqueue_after_commit=True,
         # Always a job, also in developer mode (where Data Import runs in the request): a plan imports
         # every file, and in a chat request it would outlast the client's timeout and roll back.
@@ -1037,6 +1070,39 @@ def alive(plan) -> bool:
     return bool(session.data_imports) and is_job_enqueued(
         import_run._job_id(session.data_imports[-1].data_import)
     )
+
+
+#: A plan whose file's job ended less than this ago is between that job and its continue job.
+HANDOFF_GRACE_SECONDS = 300
+SWEEP_SAVEPOINT = "fac_plan_sweep"
+
+
+def sweep_dead_plans() -> None:
+    """Scheduled: end each Running plan nothing is running for (its worker died, or Redis was
+    flushed), so its files can be imported on their own or planned again. What it imported stays."""
+    for name in frappe.get_all(SESSION_DOCTYPE, filters={"plan_status": "Running"}, pluck="name"):
+        frappe.db.savepoint(SWEEP_SAVEPOINT)
+        try:
+            if _end_if_dead(name) and not frappe.flags.in_test:
+                frappe.db.commit()  # nosemgrep: frappe-manual-commit — a scheduled job commits its own work
+        except Exception:
+            frappe.db.rollback(save_point=SWEEP_SAVEPOINT)
+            frappe.log_error(title=_("FAC migration plan sweep failed"), message=frappe.get_traceback())
+
+
+def _end_if_dead(name: str) -> bool:
+    _settings(name, for_update=True)  # the plan's row, held while it is judged and ended
+    try:
+        plan = get_plan(name)
+    except frappe.DoesNotExistError:
+        return False
+    if plan.status != "Running" or alive(plan):
+        return False
+    handoff = _progress(plan).get("handoff_at")
+    if handoff and (now_datetime() - get_datetime(handoff)).total_seconds() < HANDOFF_GRACE_SECONDS:
+        return False
+    _end(name, "Stopped", _("No job was running the plan, so it was stopped. What it imported stays."))
+    return True
 
 
 def _guarded(plan_name: str, work) -> None:
@@ -1085,6 +1151,9 @@ def child_finished(session_name: str) -> None:
         return
     if plan.status != "Running" or _progress(plan).get("current") != session_name:
         return
+    # Committed with this job, before the continue job is in Redis: the sweep leaves the plan alone
+    # while the hand-off is this fresh (sweep_dead_plans).
+    _update(plan_name, handoff_at=str(now_datetime()))
     _enqueue(
         plan_name,
         "continue_job",
@@ -1149,7 +1218,13 @@ def _prepare(plan, child) -> Optional[str]:
     from frappe_assistant_core.utils import import_fixes
 
     approved = (_progress(plan).get("approved") or {}).get(child.name)
-    if child.status != "Ready to Import" or child.validated_fingerprint != approved:
+    # What was checked is compared with what is there now (checked_as_is), not with a stored copy: a
+    # changed file, mapping or rule leaves the stored fingerprint alone.
+    if (
+        child.status != "Ready to Import"
+        or child.validated_fingerprint != approved
+        or not import_fixes.checked_as_is(child)
+    ):
         return _(
             "{0} changed after the plan was approved ({1} now), so it isn't imported. Check the plan "
             "again with plan_questions."
