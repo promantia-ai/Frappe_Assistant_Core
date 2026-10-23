@@ -767,15 +767,17 @@ def _erpnext_check(
                 (dry_run.CAUSE_REJECTED, kind, message),
                 {"cause": dry_run.CAUSE_REJECTED, "error": kind, "message": message},
             )
-        if commit_progress and done % dry_run.PROGRESS_EVERY == 0:
-            frappe.db.set_value(
-                dry_run.SESSION_DOCTYPE,
-                session.name,
-                "progress",
-                dry_run._progress("running", done, total),
-                update_modified=False,
-            )
-            frappe.db.commit()  # nosemgrep: frappe-manual-commit — each row is already rolled back, so this keeps only the progress
+        if done % dry_run.PROGRESS_EVERY == 0:
+            if commit_progress:
+                frappe.db.set_value(
+                    dry_run.SESSION_DOCTYPE,
+                    session.name,
+                    "progress",
+                    dry_run._progress("running", done, total),
+                    update_modified=False,
+                )
+            # In every mode, to release the naming series locks the rows took (#34401)
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — each row is already rolled back
     return passed
 
 

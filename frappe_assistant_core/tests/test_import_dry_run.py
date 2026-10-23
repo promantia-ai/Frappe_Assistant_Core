@@ -21,6 +21,7 @@ import hashlib
 import json
 import threading
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import frappe
@@ -665,32 +666,28 @@ class TestDryRunImport(BaseAssistantTest):
                 frappe.db.rollback(save_point="fac_test_google")
             sync.assert_not_called()
 
-    def test_held_back_swallows_commits_jobs_and_events_then_restores_them(self):
+    # Jobs are proved on the real queue, by the tests below (a patched enqueue only proves what
+    # the patch swaps, #34401).
+    def test_held_back_swallows_commits_and_events_then_restores_them(self):
         frappe.db.after_commit.add(print)
         with (
             patch.object(frappe.db.__class__, "commit") as real_commit,
-            patch("frappe.enqueue") as real_enqueue,
-            patch("frappe.utils.background_jobs.enqueue") as real_bg_enqueue,
             patch("frappe.publish_realtime") as real_publish,
         ):
             with import_dry_run.held_back():
                 self.assertTrue(frappe.flags.mute_emails and frappe.flags.in_import)
-                frappe.enqueue("frappe.ping")
-                frappe.utils.background_jobs.enqueue("frappe.ping")
                 # nosemgrep: frappe-realtime-pick-room — mocked: the test checks it is held back
                 frappe.publish_realtime("x")
                 # nosemgrep: frappe-manual-commit — mocked: the test checks it is held back
                 frappe.db.commit()
                 frappe.db.after_commit.add(len)  # a row's callback must not outlive the row
 
-            for real in (real_commit, real_enqueue, real_bg_enqueue, real_publish):
+            for real in (real_commit, real_publish):
                 real.assert_not_called()
             # Restored afterwards.
             # nosemgrep: frappe-manual-commit — mocked: the test checks it goes out again
             frappe.db.commit()
-            frappe.enqueue("frappe.ping")
             real_commit.assert_called_once()
-            real_enqueue.assert_called_once()
 
         self.assertEqual(list(frappe.db.after_commit._functions)[-1], print)
         frappe.db.after_commit._functions.pop()
@@ -721,6 +718,156 @@ class TestDryRunImport(BaseAssistantTest):
 
             for real in (real_enqueue, real_bg_enqueue, real_publish, real_realtime_publish):
                 real.assert_called_once()
+
+    # -- what a row's controller does while the check runs (#34401) ------------------------------------
+
+    @contextmanager
+    def _customer_controller(self, does):
+        """Run ``does(doc)`` in Customer's own validate, as an app's controller does. Frappe runs a
+        row through the real Importer and controller; only the extra work is added."""
+        from erpnext.selling.doctype.customer.customer import Customer
+
+        original = Customer.validate
+
+        def validate(doc, *args, **kwargs):
+            does(doc)
+            return original(doc, *args, **kwargs)
+
+        with patch.object(Customer, "validate", validate):
+            yield
+
+    @staticmethod
+    def _remove_jobs(queue, jobs):
+        from rq.exceptions import NoSuchJobError
+        from rq.job import Job
+
+        for job in jobs:
+            try:
+                Job.fetch(job.id, connection=queue.connection).delete()
+            except NoSuchJobError:
+                pass
+
+    def test_a_job_enqueued_through_a_bound_import_never_reaches_the_queue(self):
+        # HRMS' salary_slip and ERPNext's payment_request did `from frappe.utils.background_jobs
+        # import enqueue`: they hold the function itself, so swapping the module's attribute
+        # misses them. inspect.unwrap is that function, however held_back holds it back.
+        import inspect
+
+        from rq.job import Job
+
+        from frappe.utils.background_jobs import get_queue
+
+        bound_enqueue = inspect.unwrap(frappe.utils.background_jobs.enqueue)
+        queue = get_queue("short")
+        before, sent = queue.count, []
+        self.addCleanup(self._remove_jobs, queue, sent)
+        session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])
+
+        with self._customer_controller(lambda doc: sent.append(bound_enqueue("frappe.ping", queue="short"))):
+            result = self._check(session)
+
+        self.assertEqual(result["ready"], 1, result)
+        self.assertTrue(sent, "the controller didn't run")
+        self.assertEqual(queue.count, before)
+        # A worker may have taken a job off the queue: its record is still there.
+        self.assertFalse([job.id for job in sent if Job.exists(job.id, connection=queue.connection)])
+
+    def test_a_held_job_has_an_id_a_controller_can_read(self):
+        session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])
+        ids = []
+
+        def read_ids(doc):
+            ids.append(frappe.enqueue("frappe.ping", queue="short").id)
+            ids.append(frappe.utils.background_jobs.enqueue("frappe.ping", queue="short").id)
+
+        with self._customer_controller(read_ids):
+            result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (1, 0), result)
+        self.assertTrue(ids and all(isinstance(i, str) and i for i in ids), ids)
+
+    def test_a_controllers_full_rollback_doesnt_end_the_run(self):
+        # The savepoint a row is tried in is gone after a full rollback: the check used to end
+        # with "SAVEPOINT ... does not exist" instead of a result.
+        session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])
+
+        with self._customer_controller(lambda doc: frappe.db.rollback()):
+            result = self._check(session)
+
+        self.assertEqual((result["total_rows"], result["ready"]), (1, 1), result)
+
+    def _series_is_free(self, prefix):
+        """Whether a second database connection can lock the series row at once."""
+        import pymysql
+
+        conf = frappe.conf
+        connection = pymysql.connect(
+            host=conf.get("db_host") or "127.0.0.1",
+            port=int(conf.get("db_port") or 3306),
+            user=conf.get("db_user") or conf.db_name,
+            password=conf.db_password,
+            database=conf.db_name,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET SESSION innodb_lock_wait_timeout = 1")
+                try:
+                    cursor.execute(
+                        "SELECT `current` FROM `tabSeries` WHERE `name` = %s FOR UPDATE", (prefix,)
+                    )
+                except pymysql.err.OperationalError as e:
+                    if e.args[0] == 1205:  # lock wait timeout
+                        return False
+                    raise
+                return True
+        finally:
+            connection.rollback()
+            connection.close()
+
+    def _remove_committed(self, session, prefix, started):
+        """What the series test committed for real, deleted again and committed."""
+        from frappe.database.database import Database
+
+        gone = {"force": True, "ignore_permissions": True, "delete_permanently": True}
+        frappe.delete_doc("FAC Import Session", session, **gone)
+        frappe.delete_doc("Customer", self.existing, **gone)
+        frappe.db.delete("Series", {"name": prefix})
+        frappe.db.delete("Deleted Document", {"creation": (">=", started)})
+        Database.commit(frappe.db)
+
+    def test_a_check_lets_go_of_the_series_it_locked_every_hundred_rows(self):
+        # A controller that names its record from a series (getseries) locks the series row with
+        # SELECT ... FOR UPDATE, which a savepoint rollback doesn't release. The check commits
+        # every PROGRESS_EVERY rows, in every mode, to end that transaction.
+        # This test commits for real (BaseAssistantTest turns commit into a no-op, and a lock is
+        # only seen from a second connection once its row is committed): _remove_committed deletes
+        # what it made, all of it named with this test's own tag.
+        from frappe.database.database import Database
+        from frappe.model.naming import getseries
+
+        started = frappe.utils.now_datetime()
+        prefix = f"FACLOCK-{self.tag}-"
+        count = import_dry_run.PROGRESS_EVERY + 1
+        session = self._session([[f"Row{n} {self.tag}", GROUP, "Company", ""] for n in range(count)])
+        self.addCleanup(self._remove_committed, session, prefix, started)
+        frappe.qb.into("Series").columns("name", "current").insert(prefix, 0).run()
+        Database.commit(frappe.db)
+        named, free = set(), []
+
+        def name_from_series(doc):
+            named.add(doc.customer_name)
+            if len(named) == count:  # the row after the first hundred, before it takes the lock again
+                free.append(self._series_is_free(prefix))
+            getseries(prefix, 5)
+
+        with (
+            patch.object(frappe.db.__class__, "commit", Database.commit),
+            self._customer_controller(name_from_series),
+        ):
+            result = self._check(session)
+
+        self.assertEqual(result["ready"], count, result)
+        self.assertEqual(free, [True], "the series row was still locked after a hundred rows")
 
     # -- when it can't run ---------------------------------------------------------------------------
 

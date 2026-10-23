@@ -42,6 +42,7 @@ from frappe.core.doctype.data_import.importer import (
     get_autoname_field,
 )
 from frappe.utils import cstr, now_datetime, strip_html
+from rq import Queue
 
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.utils.import_session import (
@@ -342,15 +343,20 @@ def run(session_name: str, commit_progress: bool = False) -> Dict[str, Any]:
     total = len(payloads)
     for done, payload in enumerate(payloads, start=1):
         checker.check(payload, excluded, imported)
-        if commit_progress and done % PROGRESS_EVERY == 0:
-            frappe.db.set_value(
-                SESSION_DOCTYPE,
-                session_name,
-                "progress",
-                _progress("running", done, total),
-                update_modified=False,
-            )
-            frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background check commits its progress
+        if done % PROGRESS_EVERY == 0:
+            if commit_progress:
+                frappe.db.set_value(
+                    SESSION_DOCTYPE,
+                    session_name,
+                    "progress",
+                    _progress("running", done, total),
+                    update_modified=False,
+                )
+            # Ends the transaction in every mode: a row's SELECT ... FOR UPDATE on a naming series
+            # survives its savepoint's rollback, and keeps real users' documents waiting until the
+            # next commit (#34401). Each row is already rolled back, so only what the request wrote
+            # before the check (and the progress) is kept.
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — each row is already rolled back
 
     return _store(session_name, file_doc, checker, total)
 
@@ -1055,6 +1061,9 @@ _HELD_FUNCTIONS = (
     (frappe.utils.background_jobs, "enqueue"),
     # A Server Script's frappe.enqueue: safe_exec took its own copy of enqueue on import
     ("frappe.utils.safe_exec", "enqueue"),
+    # Where every enqueue ends up, whoever holds the function: a module that did `from
+    # frappe.utils.background_jobs import enqueue` keeps the real one, which still ends here.
+    (Queue, "enqueue_job"),
     (frappe, "publish_realtime"),
     (frappe.realtime, "publish_realtime"),
 )
@@ -1089,12 +1098,36 @@ def _held_functions() -> List[Tuple[Any, str]]:
     return held
 
 
-def _hold_aware(original):
-    """``original``, doing nothing while this request holds back (held_back)."""
+class HeldJob:
+    """What enqueue gives back while a job is held back: a controller may read its ``id``."""
+
+    def __init__(self, job_id: Optional[str] = None):
+        self.id = cstr(job_id) if job_id else f"fac_dry_run_held::{frappe.generate_hash(length=12)}"
+
+    def get_id(self) -> str:
+        return self.id
+
+
+def _held_enqueue(*args, **kwargs) -> HeldJob:
+    return HeldJob(kwargs.get("job_id"))
+
+
+def _held_queue_job(queue, job, *args, **kwargs):
+    """RQ's Queue.enqueue_job, held: the job rq made (and has not saved) is what is given back."""
+    return job
+
+
+#: What a held function gives back instead of None, by name
+_HELD_RESULTS = {"enqueue": _held_enqueue, "enqueue_job": _held_queue_job}
+
+
+def _hold_aware(original, held=None):
+    """``original``, doing nothing while this request holds back (held_back): ``held(*args,
+    **kwargs)`` is what the caller gets then, None unless said."""
 
     def hold_aware(*args, **kwargs):
         if getattr(frappe.local, "fac_holding_back", 0):
-            return None
+            return held(*args, **kwargs) if held else None
         return original(*args, **kwargs)
 
     hold_aware.__wrapped__ = original
@@ -1108,7 +1141,7 @@ def _install_hold_aware() -> None:
         for owner, name in _held_functions():
             current = getattr(owner, name)
             if getattr(current, "fac_hold_aware", False) is not True:  # a Mock answers any attribute
-                setattr(owner, name, _hold_aware(current))
+                setattr(owner, name, _hold_aware(current, _HELD_RESULTS.get(name)))
 
 
 @contextmanager
@@ -1142,6 +1175,17 @@ def held_back():
     # in place before goes back after: the class's commit, or a stand-in set around this check.
     before = frappe.db.__dict__.get("commit")
     frappe.db.commit = swallow
+    # Nor may it roll the whole transaction back: that ends the row's savepoint, and the run
+    # with it ("SAVEPOINT does not exist"). A rollback to a savepoint goes through. What the row
+    # wrote is undone by its own savepoint's rollback, as with document_batch's guard.
+    rollback = frappe.db.rollback
+    before_rollback = frappe.db.__dict__.get("rollback")
+
+    def hold_full_rollback(*args, save_point=None, **kwargs):
+        if save_point:
+            return rollback(*args, save_point=save_point, **kwargs)
+
+    frappe.db.rollback = hold_full_rollback
     try:
         yield
     finally:
@@ -1149,6 +1193,10 @@ def held_back():
             del frappe.db.commit
         else:
             frappe.db.commit = before
+        if before_rollback is None:
+            del frappe.db.rollback
+        else:
+            frappe.db.rollback = before_rollback
         frappe.local.fac_holding_back -= 1
         rolled_back = list(frappe.db.after_rollback._functions)[len(callbacks["after_rollback"]) :]
         for name, functions in callbacks.items():

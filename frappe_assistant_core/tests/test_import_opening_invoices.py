@@ -1233,9 +1233,13 @@ class TestFinalFixes(OpeningInvoicesCase):
         )
         self.assertEqual(self._doc(session).status, "Ready to Import")
 
-    def test_the_check_never_commits_when_not_asked_to(self):
+    def test_the_check_commits_every_n_rows_even_when_not_asked_for_progress(self):
+        # The commit lets go of the naming series the rows locked (#34401); progress is only
+        # written when the check was asked to report it.
         session, _ = self._ready(self._lines(5))
-        self.assertEqual(self._count_commits(session, False), [])
+        commits = self._count_commits(session, False)
+        self.assertEqual(len(commits), 2)
+        self.assertFalse([c for c in commits if c and c.get("state") == "running"])
 
 
 class TestSessionIsOneKind(OpeningInvoicesCase):
