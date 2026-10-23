@@ -158,7 +158,7 @@ def resolve_mapping(
             continue
         key, problem = _field_key(doctype, field, targets, by_label)
         if problem:
-            problems.append(f"Column '{headers[int(position)]}': {problem}")
+            problems.append(_("Column '{0}': {1}").format(headers[int(position)], problem))
             continue
         resolved[position] = key
 
@@ -172,7 +172,9 @@ def duplicate_targets(column_to_field_map: Dict[str, str], headers: List[str]) -
         if field != DONT_IMPORT and position.isdigit() and int(position) < len(headers):
             columns_by_field.setdefault(field, []).append(headers[int(position)])
     return [
-        f"Columns {', '.join(repr(c) for c in columns)} all map to '{field}'. Map only one of them."
+        _("Columns {0} all map to '{1}'. Map only one of them.").format(
+            ", ".join(repr(c) for c in columns), field
+        )
         for field, columns in columns_by_field.items()
         if len(columns) > 1
     ]
@@ -234,20 +236,17 @@ def describe_mapping(
         [] if update else _required_when(meta, targets, mapped_fields, column_to_field_map, samples)
     )
 
-    summary = (
-        f"{len(parent_rows) + sum(len(rows) for rows in child_rows.values())} columns mapped, "
-        f"{len(not_imported)} not imported, {len(unmapped)} unmapped."
+    summary = _("{0} columns mapped, {1} not imported, {2} unmapped.").format(
+        len(parent_rows) + sum(len(rows) for rows in child_rows.values()), len(not_imported), len(unmapped)
     )
     if missing_required:
-        summary += (
-            f" {len(missing_required)} required field(s) have no column: "
-            f"{', '.join(m['label'] for m in missing_required)}."
+        summary += " " + _("{0} required field(s) have no column: {1}.").format(
+            len(missing_required), ", ".join(m["label"] for m in missing_required)
         )
     if required_when:
-        summary += (
-            f" {len(required_when)} field(s) may be required for some rows (Desk asks for them when "
-            f"its condition holds): {', '.join(r['label'] for r in required_when)}."
-        )
+        summary += " " + _(
+            "{0} field(s) may be required for some rows (Desk asks for them when its condition holds): {1}."
+        ).format(len(required_when), ", ".join(r["label"] for r in required_when))
 
     return {
         "mapping": parent_rows,
@@ -318,7 +317,18 @@ def _rows_meeting(condition: str, docs: List[frappe._dict]) -> Optional[int]:
 
 
 def _column_position(column: Any, headers: List[str]) -> Tuple[Optional[str], Optional[str]]:
+    """The 0-based position of ``column``: a header, or a position. A number is a position first
+    (#34413), as the reply names a repeated header's columns by position; only when it is also
+    the header of another single column is it refused, naming both ways to say each."""
     key = str(column).strip()
+    if key.isdigit() and int(key) < len(headers):
+        same = [i for i, header in enumerate(headers) if header.strip() == key]
+        if len(same) == 1 and same[0] != int(key):
+            return None, _(
+                "'{0}' is both a position and the header of column {1}. Pass {1} for the column "
+                "headed '{0}', or '{2}' for the column at position {0}."
+            ).format(key, same[0], headers[int(key)])
+        return key, None
     for matches in (
         [i for i, header in enumerate(headers) if header.strip() == key],
         [i for i, header in enumerate(headers) if header.strip().lower() == key.lower()],
@@ -326,13 +336,10 @@ def _column_position(column: Any, headers: List[str]) -> Tuple[Optional[str], Op
         if len(matches) == 1:
             return str(matches[0]), None
         if len(matches) > 1:
-            return None, (
-                f"Column '{key}' appears {len(matches)} times in the file. "
-                f"Use its 0-based position instead: {', '.join(str(i) for i in matches)}."
-            )
-    if key.isdigit() and int(key) < len(headers):
-        return key, None
-    return None, f"'{key}' is not a column in the file. Its columns are: {', '.join(headers)}."
+            return None, _(
+                "Column '{0}' appears {1} times in the file. Use its 0-based position instead: {2}."
+            ).format(key, len(matches), ", ".join(str(i) for i in matches))
+    return None, _("'{0}' is not a column in the file. Its columns are: {1}.").format(key, ", ".join(headers))
 
 
 def _field_key(
@@ -346,7 +353,7 @@ def _field_key(
     if value.lower() in by_label:
         return by_label[value.lower()], None
 
-    table_part, _, fieldname = value.rpartition(".")
+    table_part, _dot, fieldname = value.rpartition(".")
     meta = frappe.get_meta(doctype)
     if table_part:
         # a child table's field: judged on the child DocType (#34408)
@@ -356,17 +363,23 @@ def _field_key(
     if df and (df.hidden or df.read_only):
         return (
             None,
-            f"'{value}' is {'hidden' if df.hidden else 'read-only'} on {meta.name}, so an import won't set it.",
+            (
+                _("'{0}' is hidden on {1}, so an import won't set it.")
+                if df.hidden
+                else _("'{0}' is read-only on {1}, so an import won't set it.")
+            ).format(value, meta.name),
         )
 
     candidates = {**{key: key for key in targets}, **by_label}
     close = difflib.get_close_matches(value.lower(), [c.lower() for c in candidates], n=3, cutoff=0.6)
     lookup = {c.lower(): key for c, key in candidates.items()}
     suggestions = list(dict.fromkeys(lookup[c] for c in close))
-    problem = f"'{value}' is not an importable field of {doctype}."
+    problem = _("'{0}' is not an importable field of {1}.").format(value, doctype)
     if suggestions:
-        problem += " Did you mean " + " or ".join(f"'{s}' ({targets[s]['label']})" for s in suggestions) + "?"
-    return None, problem + " Check get_import_schema for the field list."
+        problem += " " + _("Did you mean {0}?").format(
+            f" {_('or')} ".join(f"'{s}' ({targets[s]['label']})" for s in suggestions)
+        )
+    return None, problem + " " + _("Check get_import_schema for the field list.")
 
 
 def _unique_labels(targets: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
@@ -396,7 +409,7 @@ def load_session(name: str):
     # The import tools change the session through this copy: it is the engine's (#34400).
     doc = engine_session(name)
     if not frappe.has_permission(SESSION_DOCTYPE, "write", doc=doc):
-        raise frappe.PermissionError(f"You can't change import session {name}.")
+        raise frappe.PermissionError(_("You can't change import session {0}.").format(name))
     plan = doc.get("migration_plan")
     if plan and import_plan.plan_status(plan) == "Running":
         raise frappe.PermissionError(

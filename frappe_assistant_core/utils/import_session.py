@@ -35,9 +35,11 @@ from frappe import _
 from frappe.core.api.file import get_max_file_size
 from frappe.utils import cint
 
+from frappe_assistant_core.chat.api.settings.uploads import CHAT_UPLOAD_MAX_BYTES
+
 SUPPORTED_EXTENSIONS = ("csv", "xlsx", "xls")
 SAMPLE_SIZE = 10
-MAX_FILE_SIZE = 50 * 1024 * 1024  # same ceiling as chat uploads
+MAX_FILE_SIZE = CHAT_UPLOAD_MAX_BYTES  # the chat's ceiling; the site's Max File Size may be lower
 # A Google Sheet's download: seconds to connect and between two pieces, and in all.
 DOWNLOAD_TIMEOUT = (10, 30)
 DOWNLOAD_SECONDS = 120
@@ -158,13 +160,12 @@ def file_from_google_sheet(url: str):
 def _download_sheet(url: str) -> bytes:
     """The CSV export of the tab ``url`` links to, the way Frappe's
     get_csv_content_from_google_sheets builds its link, but streamed: refused once it passes
-    MAX_FILE_SIZE or DOWNLOAD_SECONDS, so a huge or trickling sheet can't hold a worker."""
+    max_file_size() or DOWNLOAD_SECONDS, so a huge or trickling sheet can't hold a worker."""
     # The tab's number only: a "link to this range" adds "&range=…" after it
     gid = re.search(r"gid=(\d+)", url)
     export = url.split("/edit", 1)[0] + f"/export?format=csv&gid={gid.group(1) if gid else 0}"
     deadline = time.monotonic() + DOWNLOAD_SECONDS
-    # Frappe's File refuses what passes System Settings' Max File Size (25 MB by default)
-    limit = min(MAX_FILE_SIZE, get_max_file_size())
+    limit = max_file_size()
     too_large = _("The sheet is larger than {0} MB, the largest file this site takes.").format(
         round(limit / (1024 * 1024), 1)
     )
@@ -233,8 +234,7 @@ def read_spreadsheet(
     extension = (file_doc.get_extension()[1] or "").lstrip(".").lower()
     if extension not in SUPPORTED_EXTENSIONS:
         raise FileProblem(_("Only .csv, .xlsx or .xls files can be imported."))
-    if (file_doc.file_size or 0) > MAX_FILE_SIZE:
-        raise FileProblem(_("The file is larger than 50 MB."))
+    check_size(file_doc)
 
     try:
         content = file_bytes(file_doc)
@@ -257,6 +257,23 @@ def read_spreadsheet(
     return SpreadsheetRead(sheets=sheets, chosen=chosen)
 
 
+def max_file_size() -> int:
+    """The largest file an import reads (#34413): the chat's ceiling, or System Settings' Max File
+    Size when it is lower (Frappe's File refuses more; 25 MB by default)."""
+    return min(MAX_FILE_SIZE, get_max_file_size())
+
+
+def check_size(file_doc) -> None:
+    """Raises FileProblem when ``file_doc`` is larger than max_file_size()."""
+    limit = max_file_size()
+    if (file_doc.file_size or 0) > limit:
+        raise FileProblem(
+            _("The file is larger than {0} MB, the largest file this site takes.").format(
+                f"{limit / (1024 * 1024):g}"
+            )
+        )
+
+
 def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
     """Every row of one sheet as text, header first, for the engine (never the model).
 
@@ -266,6 +283,7 @@ def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
     extension = (file_doc.get_extension()[1] or "").lstrip(".").lower()
     if extension not in SUPPORTED_EXTENSIONS:
         raise FileProblem(_("Only .csv, .xlsx or .xls files can be imported."))
+    check_size(file_doc)
     try:
         content = file_bytes(file_doc)
         names = []

@@ -15,6 +15,7 @@ the mapping, the fixes and the validation results between messages. Its step
 log records what was done, by whom, and what failed.
 """
 
+import copy
 from typing import Any, List, Optional
 
 import frappe
@@ -100,6 +101,21 @@ class FACImportSession(Document):
             if not same:
                 changed.append(df.fieldname)
         return changed
+
+    def save_version(self):
+        """Desk's history of the session, without its JSON fields (#34413): the check's summary,
+        the file's sheets and the rules are large, and every save would copy them into a Version.
+        The steps table says what happened."""
+        before = self._doc_before_save
+        if before is not None:
+            # the same JSON on both sides: Version records no change to it
+            self._doc_before_save = copy.copy(before)
+            for df in self.meta.get("fields", {"fieldtype": "JSON"}):
+                self._doc_before_save.set(df.fieldname, self.get(df.fieldname))
+        try:
+            super().save_version()
+        finally:
+            self._doc_before_save = before
 
     def before_save(self):
         # A plan's run saves a file's session it read before it moved the plan on: that copy must

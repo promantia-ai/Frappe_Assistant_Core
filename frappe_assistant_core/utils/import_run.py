@@ -77,7 +77,9 @@ def cannot_import(doctype: str, import_type: str = INSERT) -> str:
 
 
 def _runs_now() -> bool:
-    """As Data Import decides: in tests and developer mode the import runs in the request."""
+    """As Data Import decides: in tests and developer mode the import runs in the request, so the
+    tool call lasts as long as the import, and a large file can hit the request timeout there
+    (#34413). Everywhere else it runs in the background."""
     return bool(frappe.flags.in_test or frappe.conf.developer_mode)
 
 
@@ -190,7 +192,7 @@ def _new_import(
                 "reference_doctype": session.target_doctype,
                 "import_type": session.import_type or INSERT,
                 "import_file": file_doc.file_url,
-                "template_options": frappe.as_json({"column_to_field_map": column_map}),
+                "template_options": frappe.as_json(data_import_options(session, column_map)),
                 "mute_emails": 1,
                 "submit_after_import": session.submit_after_import,
             }
@@ -302,6 +304,18 @@ def _remove_from_disk(file_doc) -> None:
 
 
 # -- the cleaned file -----------------------------------------------------------------------
+
+
+# What Data Import reads of template_options besides the mapping: Frappe 16's per-column date
+# formats. The dry run parses with the session's own, so the import is given them too (#34413).
+PARSE_OPTIONS = ("column_to_date_format_map",)
+
+
+def data_import_options(session, column_map: Dict[str, str]) -> Dict[str, Any]:
+    """The template_options the real Data Import is given: the cleaned file's mapping, and the
+    session's parse options as the dry run read them. The cleaned file keeps the columns' places."""
+    options = frappe.parse_json(session.template_options or "{}") or {}
+    return {"column_to_field_map": column_map, **{k: options[k] for k in PARSE_OPTIONS if options.get(k)}}
 
 
 def _cleaned_file(session, earlier: List[str], only: Optional[set] = None, waiting: set = frozenset()):

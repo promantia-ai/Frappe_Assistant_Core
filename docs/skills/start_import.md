@@ -90,6 +90,9 @@ Rows that can't be fixed in chat go to the user as a file (`dry_run_import` with
 - **The values passed don't match the last check:** pass the check's own.
 - **The user can't use Data Import** (System Managers only, unless given the permission), or can't import that DocType: say so and stop.
 - **The scheduler is off:** imports run in the background, so a System Manager must turn it on.
+- **Developer mode:** on a site in developer mode (and under tests) the import runs inside the call, as
+  Frappe's Data Import does there: the reply comes when the import has ended, and a large file can hit
+  the request timeout. Use a small file there, or a site out of developer mode.
 - **Rows failed and weren't checked again:** call `dry_run_import` first (see **When rows failed**).
 - **Already imported:** every row of the file is imported (or left out); its Data Imports are named in the error.
 

@@ -4,6 +4,8 @@
 
 The `extract_file_content` tool extracts text and data from files stored in Frappe's file system. Supports PDF, images (OCR), spreadsheets, and documents.
 
+**Not for imports.** A CSV or Excel file the user wants brought into ERPNext goes to `start_import_session`, not here. This tool renames a repeated header (`Phone.1`) and reads `00123` as `123`, so the columns it shows won't match the import's mapping.
+
 ## Parameters
 
 | Parameter | Type | Required | Default | Description |

@@ -174,7 +174,7 @@ class TestSurvey(XmlCase):
         frappe.db.set_value("File", doc.name, "file_size", 51 * 1024 * 1024)
         with self.assertRaises(FileProblem) as raised:
             tally.survey(frappe.get_doc("File", doc.name))
-        self.assertIn("50 MB", str(raised.exception))
+        self.assertIn("larger than", str(raised.exception))  # the site's Max File Size (#34413)
 
     def test_empty_bom_only_and_garbage_files_are_refused(self):
         doc = self._upload(export(ledger("A", "Sundry Debtors")))

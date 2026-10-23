@@ -340,7 +340,7 @@ class TestApply(PresetToolCase):
         before = frappe.db.count("FAC Import Session"), frappe.db.count("File")
         reply = self._run({"file_id": file_doc.name})
         self.assertFalse(reply["success"])
-        self.assertIn("The file is larger than 50 MB.", reply["error"])
+        self.assertIn("The file is larger than", reply["error"])  # the site's Max File Size (#34413)
         self.assertEqual((frappe.db.count("FAC Import Session"), frappe.db.count("File")), before)
 
     def test_a_target_the_user_cannot_import_is_skipped_with_the_reason(self):

@@ -1,5 +1,6 @@
 import { api } from "@/api/client";
 import { useToast } from "@/composables/useToast";
+import { __ } from "@/utils/i18n";
 import { logger } from "@/utils/logger";
 
 /**
@@ -18,7 +19,7 @@ export function useMessageFileUpload() {
 		for (const file of files) {
 			const upload = api.chat.uploadFile(file).catch((err) => {
 				logger.error("File upload failed:", err);
-				showError(`${file.name}: ${err?.userMessage || err?.message || "Upload failed"}`);
+				showError(`${file.name}: ${err?.userMessage || err?.message || __("Upload failed")}`);
 				uploads.delete(file);
 				onFailed?.(file);
 				return null;

@@ -33,12 +33,12 @@ from frappe import _
 from openpyxl import load_workbook
 
 from frappe_assistant_core.utils.import_session import (
-    MAX_FILE_SIZE,
     SUPPORTED_EXTENSIONS,
     FileProblem,
     _as_text,
     _describe_read_error,
     _iter_sheets,
+    check_size,
     csv_delimiter,
     decode_csv,
     file_bytes,
@@ -499,8 +499,7 @@ def _extension(file_doc) -> str:
 def _content(file_doc) -> bytes:
     if _extension(file_doc) not in SUPPORTED_EXTENSIONS:
         raise FileProblem(_("Only .csv, .xlsx or .xls files can be imported."))
-    if (file_doc.file_size or 0) > MAX_FILE_SIZE:
-        raise FileProblem(_("The file is larger than 50 MB."))
+    check_size(file_doc)
     return file_bytes(file_doc)
 
 

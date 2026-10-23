@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, get_url, strip_html
+from frappe.utils import cstr, get_url
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
 from frappe_assistant_core.utils import import_fixes
@@ -211,15 +211,7 @@ def failure_groups(
 
 def log_reason(messages: Optional[str]) -> str:
     """The last message ERPNext showed for a failed record, as plain text."""
-    texts = []
-    for entry in json.loads(messages or "[]") or []:
-        if isinstance(entry, str):
-            try:
-                entry = json.loads(entry)
-            except ValueError:
-                entry = {"message": entry}
-        if isinstance(entry, dict) and entry.get("message"):
-            texts.append(" ".join(strip_html(cstr(entry["message"])).split()))
+    texts = dry_run.message_texts(json.loads(messages or "[]"))
     return texts[-1] if texts else _("ERPNext refused it")
 
 
@@ -265,6 +257,21 @@ def runs(session) -> List[Dict[str, Any]]:
 # -- the failed-rows file -------------------------------------------------------------------
 
 
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_cell(value) -> str:
+    """``value`` as a CSV cell a spreadsheet won't run: a cell that starts like a formula gets a
+    leading ' (#34413). A plain number, -5 or +3.5, is left as it is."""
+    text = cstr(value)
+    if text.startswith(FORMULA_START):
+        try:
+            float(text)
+        except ValueError:
+            return "'" + text
+    return text
+
+
 def failed_rows_file(session) -> Dict[str, Any]:
     """The rows still not imported, failed or left out, with the user's columns (the value
     maps applied), their row number and the reason, as a private CSV on the session."""
@@ -285,7 +292,7 @@ def failed_rows_file(session) -> Dict[str, Any]:
             out.append((rows[number - 1] + [""] * width)[:width] + [str(number), reasons[number]])
 
     buffer = io.StringIO()
-    csv.writer(buffer, lineterminator="\n").writerows([[cstr(value) for value in row] for row in out])
+    csv.writer(buffer, lineterminator="\n").writerows([[csv_cell(value) for value in row] for row in out])
     file_name = f"{session.name}-failed-rows.csv"
     for old in frappe.get_all(
         "File",

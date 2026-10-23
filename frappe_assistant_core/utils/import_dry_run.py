@@ -959,8 +959,7 @@ class _Checker:
         self, payload, needs=(), from_files=None
     ) -> Tuple[List[Tuple[Tuple, Dict]], Optional[str]]:
         doc = frappe._dict(copy.deepcopy(_with_links(payload.doc, needs)))
-        frappe.clear_messages()
-        with held_back():
+        with own_messages(), held_back():
             frappe.db.savepoint(SAVEPOINT)
             try:
                 if self.import_type != INSERT:
@@ -992,7 +991,6 @@ class _Checker:
                 ], None
             finally:
                 frappe.db.rollback(save_point=SAVEPOINT)
-                frappe.clear_messages()
 
     def _group(self, key: Tuple, info: Dict, payload) -> str:
         group = self.groups.get(key)
@@ -1128,20 +1126,38 @@ def _title_field(session, header, key_df):
 _TEMPORARY_NAME = re.compile(r"\bnew-[a-z0-9-]+-[a-z0-9]{6,}\b")
 
 
-def _message_of(e: Exception) -> str:
-    """The message ERPNext showed for ``e``, as plain text, without per-row temporary names."""
-    messages = []
-    for entry in frappe.local.message_log or []:
+def message_texts(entries) -> List[str]:
+    """The messages of a message log, Frappe's or a Data Import Log's, as plain text: each entry a
+    dict, its JSON, or the text itself. The dry run and the import's failures read them alike."""
+    texts = []
+    for entry in entries or []:
         if isinstance(entry, str):
             try:
                 entry = json.loads(entry)
             except ValueError:
                 entry = {"message": entry}
         if isinstance(entry, dict) and entry.get("message"):
-            messages.append(cstr(entry["message"]))
-    text = messages[-1] if messages else cstr(e) or type(e).__name__
-    text = " ".join(strip_html(text).split())
+            texts.append(" ".join(strip_html(cstr(entry["message"])).split()))
+    return texts
+
+
+def _message_of(e: Exception) -> str:
+    """The message ERPNext showed for ``e``, as plain text, without per-row temporary names."""
+    texts = message_texts(frappe.local.message_log)
+    text = texts[-1] if texts else " ".join(strip_html(cstr(e) or type(e).__name__).split())
     return _TEMPORARY_NAME.sub("", text).strip()
+
+
+@contextmanager
+def own_messages():
+    """Messages a row's check makes stay its own: the request's earlier messages are put back
+    after (#34413), rather than cleared with the row's."""
+    before = list(frappe.local.message_log or [])
+    frappe.clear_messages()
+    try:
+        yield
+    finally:
+        frappe.local.message_log = before
 
 
 #: What a row's insert could send out at once: held back by held_back(), in its request only.

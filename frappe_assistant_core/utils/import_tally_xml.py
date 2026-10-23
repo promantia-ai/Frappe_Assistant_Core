@@ -27,7 +27,7 @@ from frappe import _
 from lxml import etree
 
 from frappe_assistant_core.utils.import_presets import MAX_PRESET_ROWS, Sheet, _number, _plain
-from frappe_assistant_core.utils.import_session import MAX_FILE_SIZE, FileProblem
+from frappe_assistant_core.utils.import_session import FileProblem, check_size
 
 PARTS = {"LEDGER": "ledgers", "STOCKITEM": "stock_items", "GROUP": "groups"}
 IMPORTABLE = {"ledgers": "tally_prime.ledgers", "stock_items": "tally_prime.stock_items"}
@@ -110,8 +110,7 @@ def is_xml(file_doc) -> bool:
 def _content(file_doc) -> bytes:
     if not is_xml(file_doc):
         raise FileProblem(_("Only a Tally .xml export can be read here."))
-    if (file_doc.file_size or 0) > MAX_FILE_SIZE:
-        raise FileProblem(_("The file is larger than 50 MB."))
+    check_size(file_doc)
     # The bytes as written: Frappe v16's get_content() decodes a file read from disk with the
     # first encoding that doesn't fail, and Tally's UTF-16 passes as windows-1250 with its BOM
     # lost, so lxml found no ENVELOPE. encodings=() keeps them; v15 has no such argument and keeps

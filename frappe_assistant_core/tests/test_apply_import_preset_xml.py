@@ -285,8 +285,9 @@ class TestRefusals(TallyXmlToolCase):
     def test_an_xml_over_50_mb_is_refused_and_writes_nothing(self):
         doc = self._file()
         frappe.db.set_value("File", doc.name, "file_size", 51 * 1024 * 1024)
-        self._refused({"file_id": doc.name}, "The file is larger than 50 MB.")
-        self._refused({"file_id": doc.name, "parts": ["ledgers"]}, "The file is larger than 50 MB.")
+        # the site's Max File Size, at most 50 MB (#34413)
+        self._refused({"file_id": doc.name}, "The file is larger than")
+        self._refused({"file_id": doc.name, "parts": ["ledgers"]}, "The file is larger than")
 
     def test_an_unreadable_xml_is_refused_and_writes_nothing(self):
         doc = self._upload(b"\x00\x01 not xml at all")
