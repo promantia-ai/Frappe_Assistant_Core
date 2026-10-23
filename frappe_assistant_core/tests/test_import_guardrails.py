@@ -362,6 +362,90 @@ class TestTheModelSeesASummary(GuardrailCase):
         self.assertIn(session, reply["error"])
 
 
+class TestAFileIsHeldOnlyWhileItsImportIsOpen(GuardrailCase):
+    """#34437: a session holds its file while it is being worked on, and only from its own user."""
+
+    def _held(self, file_name):
+        """What extract_file_content and the chat's file list ask, as the current user."""
+        from frappe_assistant_core.utils.import_session import holding_session
+
+        return holding_session(file_name)
+
+    def _extract(self, file_name):
+        # the data_science plugin may be off on a test site: call the tool itself
+        from frappe_assistant_core.plugins.data_science.tools.extract_file_content import ExtractFileContent
+
+        return ExtractFileContent().execute({"file_id": file_name})
+
+    def _started(self):
+        file_doc = self._csv([f"Acme {self.tag},{self.group},Company"])
+        session = self._run("start_import_session", {"file_id": file_doc.name})["result"]["session_id"]
+        return file_doc, session
+
+    def test_the_file_is_held_while_its_import_is_open(self):
+        file_doc, session = self._started()
+        for status in (
+            "File Read",
+            "Mapped",
+            "Dry Run Failed",
+            "Ready to Import",
+            "Importing",
+            "Partially Completed",
+            "Undoing",
+            "Partially Undone",
+        ):
+            with self.subTest(status=status):
+                # as the import tools leave it at each step (a check, an import, an undo)
+                frappe.db.set_value("FAC Import Session", session, "status", status)
+                self.assertEqual(self._held(file_doc.name), session)
+
+    def test_the_file_is_free_again_once_its_import_is_over(self):
+        file_doc, session = self._started()
+        for status in ("Completed", "Failed", "Undone", "Cancelled"):
+            with self.subTest(status=status):
+                # as the import, its undo or a cancelled import leave it
+                frappe.db.set_value("FAC Import Session", session, "status", status)
+                self.assertIsNone(self._held(file_doc.name))
+                reply = self._extract(file_doc.name)
+                self.assertNotIn("being imported", json.dumps(reply))
+
+    def test_a_completed_import_frees_its_file(self):
+        session, checked = self._ready_session()
+        self.assertTrue(self._run("start_import", self._card(session, checked))["success"])
+        self.assertEqual(self._doc(session).status, "Completed")
+
+        self.assertIsNone(self._held(self._doc(session).original_file))
+
+    def test_another_users_identical_file_is_not_held_and_their_session_never_named(self):
+        # Frappe keeps identical bytes once: another user's upload of the same file shares its URL.
+        content = f"{','.join(run_tests.MAPPING)}\nAcme {self.tag},{self.group},Company\n".encode()
+        first = self._file("customers.csv", content)
+        session = self._run("start_import_session", {"file_id": first.name})["result"]["session_id"]
+        frappe.set_user(self.make_desk_user("analyst"))
+        theirs = self._file("customers.csv", content)
+        self.assertEqual((theirs.file_url, theirs.name == first.name), (first.file_url, False))
+
+        reply = self._extract(theirs.name)
+
+        self.assertIsNone(self._held(theirs.name))
+        self.assertNotIn("being imported", json.dumps(reply))
+        self.assertNotIn(session, json.dumps(reply))
+
+    def test_another_users_identical_file_is_listed_in_their_chat_without_this_session(self):
+        from frappe_assistant_core.chat.api.chat import conversation_files
+
+        content = f"{','.join(run_tests.MAPPING)}\nAcme {self.tag},{self.group},Company\n".encode()
+        first = self._file("customers.csv", content)
+        session = self._run("start_import_session", {"file_id": first.name})["result"]["session_id"]
+        frappe.set_user(self.make_desk_user("analyst"))
+        theirs = self._file("customers.csv", content)
+
+        listing = conversation_files.files_addendum([theirs])
+
+        self.assertNotIn(session, listing)
+        self.assertNotIn("being imported", listing)
+
+
 class TestTheRowLimit(GuardrailCase):
     def _limit(self, value):
         frappe.db.set_single_value("Assistant Core Settings", "max_import_rows", value)
