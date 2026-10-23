@@ -737,7 +737,8 @@ def chunks(lines: List[Ready]) -> List[List[Ready]]:
 
 def build_document(stock: Dict[str, Any], lines: List[Ready]):
     """An unsaved Opening Stock Stock Reconciliation of ``lines``."""
-    batch_fields = bool(frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields"))
+    # A row that names a batch or serial asks ERPNext to make its bundle from those fields. It
+    # does so whatever Stock Settings says, which is off on a fresh v16 site (#34428).
     return frappe.get_doc(
         {
             "doctype": TARGET,
@@ -757,7 +758,7 @@ def build_document(stock: Dict[str, Any], lines: List[Ready]):
                     "allow_zero_valuation_rate": 0 if line.valuation_rate else 1,
                     "batch_no": line.batch_no or None,
                     "serial_no": line.serial_no or None,
-                    "use_serial_batch_fields": 1 if batch_fields and (line.batch_no or line.serial_no) else 0,
+                    "use_serial_batch_fields": 1 if (line.batch_no or line.serial_no) else 0,
                 }
                 for line in lines
             ],
@@ -825,7 +826,7 @@ def _erpnext_check(session, ready: List[Ready], checker: _StockChecker) -> List[
                 passed += remaining
                 break
             message, kind = dry_run._message_of(error), type(error).__name__
-            named = re.search(r"Row #(\d+)", message)
+            named = re.search(r"Row\s*#\s*(\d+)", message)
             index = int(named.group(1)) if named else 0
             if named and 1 <= index <= len(remaining) and isolated < ISOLATE_LIMIT:
                 bad = remaining.pop(index - 1)

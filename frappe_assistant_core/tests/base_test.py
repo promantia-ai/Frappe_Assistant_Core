@@ -63,6 +63,21 @@ class BaseAssistantTest(IntegrationTestCase):
 
     SHOW_TRANSACTION_COMMIT_WARNINGS = True
 
+    def name_customers_by(self, mode: str) -> None:
+        """Customers are named by ``mode`` ("Customer Name" or "Naming Series") for this test.
+
+        Only what Customer.autoname reads is patched: the default is never written, because a
+        commit later in the test (an import's row-by-row commits) would make it permanent.
+        """
+        real = frappe.defaults.get_global_default
+
+        def get_global_default(key, *args, **kwargs):
+            return mode if key == "cust_master_name" else real(key, *args, **kwargs)
+
+        patcher = patch.object(frappe.defaults, "get_global_default", get_global_default)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @classmethod
     def setUpClass(cls):
         """Set up class-level test environment.
@@ -327,10 +342,8 @@ class BaseAssistantTest(IntegrationTestCase):
         A test that proves a refusal checks this first, so a role that quietly grants the right
         makes it fail instead of passing for another reason (#34412).
         """
-        self.assertFalse(
-            frappe.has_permission(doctype, ptype, doc=doc, user=user),
-            f"{user} may {ptype} {doc or doctype}",
-        )
+        allowed = frappe.has_permission(doctype, ptype, doc=doc, user=user)
+        self.assertFalse(allowed, f"{user} may {ptype} {doc or doctype}")
 
     def create_test_document(self, doctype, data):
         """Create a test document"""
