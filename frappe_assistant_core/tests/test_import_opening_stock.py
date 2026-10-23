@@ -82,7 +82,22 @@ class OpeningStockCase(BaseAssistantTest):
             .name
         )
 
+    def _allow_batch_and_serial_items(self):
+        """ERPNext v16 refuses an Item with Has Batch No / Has Serial No while Stock Settings'
+        "Activate Serial / Batch No for Item" is off, and a fresh site has it off. That is only
+        needed to make such an Item here (the import never makes Items), so turn it on for the
+        test and put it back after. v15 has no such setting."""
+        field = "enable_serial_and_batch_no_for_item"
+        if not frappe.get_meta("Stock Settings").has_field(field):
+            return
+        old = frappe.db.get_single_value("Stock Settings", field)
+        if not old:
+            frappe.db.set_single_value("Stock Settings", field, 1)
+            self.addCleanup(frappe.db.set_single_value, "Stock Settings", field, old)
+
     def _item(self, code, **flags):
+        if flags.get("has_batch_no") or flags.get("has_serial_no"):
+            self._allow_batch_and_serial_items()
         doc = {
             "doctype": "Item",
             "item_code": code,
@@ -477,9 +492,6 @@ class TestErpnextValidation(OpeningStockCase):
         self.assertEqual([len(c) for c in opening_stock.chunks(lines)], [1000, 1000, 500])
 
     def test_a_batch_item_with_a_new_batch_and_a_serial_item_pass(self):
-        old = frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields")
-        frappe.db.set_single_value("Stock Settings", "use_serial_batch_fields", 1)
-        self.addCleanup(frappe.db.set_single_value, "Stock Settings", "use_serial_batch_fields", old)
         batch_item = self._item(f"OS-B-{self.tag}", has_batch_no=1, create_new_batch=0)
         serial_item = self._item(f"OS-S-{self.tag}", has_serial_no=1)
         session = self._session(
@@ -505,6 +517,59 @@ class TestErpnextValidation(OpeningStockCase):
 
         self.assertEqual((result["ready"], result["failed"]), (2, 0), result["groups"])
         self.assertFalse(frappe.db.exists("Batch", f"B-{self.tag}"))  # rolled back
+
+    def test_batch_and_serial_rows_pass_with_the_use_serial_batch_fields_setting_off(self):
+        # A fresh v16 site has "Use Serial / Batch Fields" off (#34428); the import must not need it.
+        old = frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields")
+        frappe.db.set_single_value("Stock Settings", "use_serial_batch_fields", 0)
+        self.addCleanup(frappe.db.set_single_value, "Stock Settings", "use_serial_batch_fields", old)
+        batch_item = self._item(f"OS-B0-{self.tag}", has_batch_no=1, create_new_batch=0)
+        serial_item = self._item(f"OS-S0-{self.tag}", has_serial_no=1)
+        session = self._session(
+            [
+                f"{self.item},{self.stores},1,5,,",
+                f"{batch_item},{self.stores},3,2,B0-{self.tag},",
+                f"{serial_item},{self.stores},2,9,,S1-{self.tag} S2-{self.tag}",
+            ],
+            header="Item,Warehouse,Qty,Rate,Batch,Serial",
+        )
+        self._setup(
+            session,
+            columns={
+                "Item": "item_code",
+                "Warehouse": "warehouse",
+                "Qty": "qty",
+                "Rate": "valuation_rate",
+                "Batch": "batch_no",
+                "Serial": "serial_no",
+            },
+        )
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (3, 0), result["groups"])
+
+    def test_a_row_named_with_a_space_after_the_hash_fails_alone(self):
+        from unittest.mock import patch
+
+        from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import StockReconciliation
+
+        def refuse_the_second_item(doc, *args, **kwargs):
+            for index, row in enumerate(doc.items, start=1):
+                if row.item_code == self.item2:
+                    frappe.throw(f"Row # {index}: refused for a test")  # ERPNext's wording
+
+        session = self._session(
+            [f"{self.item},{self.stores},5,10", f"{self.item2},{self.stores},2,7", f"{self.item},{self.shop},1,3"]
+        )
+        self._setup(session)
+
+        with patch.object(StockReconciliation, "validate", refuse_the_second_item):
+            result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 1), result["groups"])
+        rejected = next(g for g in result["groups"] if g["cause"] == "Rejected by ERPNext")
+        self.assertEqual([e["row"] for e in rejected["examples"]], [3])
 
 
 class TestOpeningStockFixes(OpeningStockCase):
@@ -844,9 +909,6 @@ class TestFinalReviewFixes(OpeningStockCase):
         self.assertEqual((stores["file_qty"], stores["erpnext_qty"]), (7, 7))
 
     def test_two_batches_of_one_item_in_a_warehouse_are_not_counted_twice(self):
-        old = frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields")
-        frappe.db.set_single_value("Stock Settings", "use_serial_batch_fields", 1)
-        self.addCleanup(frappe.db.set_single_value, "Stock Settings", "use_serial_batch_fields", old)
         batch_item = self._item(f"OS-BB-{self.tag}", has_batch_no=1, create_new_batch=0)
         session = self._session(
             [

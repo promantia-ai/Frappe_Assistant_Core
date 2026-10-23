@@ -1809,10 +1809,7 @@ class TestRunSubmittedStock(OpeningStockCase):
 
     def _batched(self):
         """An opening Stock Reconciliation of a batch item, whose batch the import made."""
-        old = frappe.db.get_single_value("Stock Settings", "use_serial_batch_fields")
-        frappe.db.set_single_value("Stock Settings", "use_serial_batch_fields", 1)
-        self.addCleanup(frappe.db.set_single_value, "Stock Settings", "use_serial_batch_fields", old)
-        item = self._item(f"OS-UB-{self.tag}", has_batch_no=1, create_new_batch=0)
+        item =self._item(f"OS-UB-{self.tag}", has_batch_no=1, create_new_batch=0)
         batch = f"UB-{self.tag}"
         session = self._session([f"{item},{self.stores},3,2,{batch}"], header="Item,Warehouse,Qty,Rate,Batch")
         columns = {
