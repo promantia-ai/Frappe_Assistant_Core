@@ -43,6 +43,7 @@ DOWNLOAD_TIMEOUT = (10, 30)
 DOWNLOAD_SECONDS = 120
 HEADER_SEARCH_ROWS = 20  # how far down a sheet its headings are looked for (#34403)
 FIRST_ROWS_SHOWN = 5  # a sheet's top rows, shown when its headings can't be found for sure
+CELL_CHARS_SHOWN = 200  # a cell shown to the model is cut to this many characters (#34406)
 DELIMITERS = (",", ";", "\t", "|")  # a CSV's, in the order a tie goes
 
 
@@ -476,7 +477,9 @@ def _summarise(
         index, sure = _heading_index(top)
     summary = SheetSummary(name=name, header_row=index + 1, header_sure=sure)
     if index or not sure:
-        summary.first_rows = [_trimmed(row) for row in top[: max(FIRST_ROWS_SHOWN, index + 2)]]
+        summary.first_rows = [
+            [shown_cell(cell) for cell in _trimmed(row)] for row in top[: max(FIRST_ROWS_SHOWN, index + 2)]
+        ]
     kept: Optional[List[List[str]]] = [] if keep else None
 
     width = None
@@ -495,7 +498,7 @@ def _summarise(
             continue
         summary.row_count += 1
         if len(summary.sample_rows) < SAMPLE_SIZE:
-            summary.sample_rows.append(row)
+            summary.sample_rows.append([shown_cell(cell) for cell in row])
 
     if not summary.columns:
         summary.row_count = 0
@@ -505,6 +508,12 @@ def _summarise(
             kept.pop()  # formatted but empty rows at the end of a sheet
         summary.rows = kept
     return summary
+
+
+def shown_cell(value: str) -> str:
+    """A cell as the model is shown it: cut to CELL_CHARS_SHOWN characters, so one long cell
+    can't fill the reply (#34406). The file and its copy keep it whole."""
+    return value if len(value) <= CELL_CHARS_SHOWN else value[:CELL_CHARS_SHOWN] + "…"
 
 
 def _trimmed(row: List[str]) -> List[str]:
