@@ -38,7 +38,13 @@ from frappe_assistant_core.utils.import_mapping import (
     session_headers,
     session_mapping,
 )
-from frappe_assistant_core.utils.import_session import import_target_problem
+from frappe_assistant_core.utils.import_session import (
+    SAMPLE_SIZE,
+    FileProblem,
+    import_target_problem,
+    read_sheet_rows,
+    readable_session_file,
+)
 
 
 class SetColumnMapping(BaseTool):
@@ -170,7 +176,9 @@ class SetColumnMapping(BaseTool):
                     "columns": headers,
                 }
 
-            described = describe_mapping(schema, headers, merged, update=import_type == import_update.UPDATE)
+            described = describe_mapping(
+                schema, headers, merged, update=import_type == import_update.UPDATE, samples=_samples(doc)
+            )
             doc.import_type = import_type
             doc.match_key = match_key
             save_mapping(doc, target, merged, described["summary"])
@@ -187,6 +195,14 @@ class SetColumnMapping(BaseTool):
                 title=_("Set Column Mapping Error"), message=f"Error saving column mapping: {e!s}"
             )
             return {"success": False, "error": str(e)}
+
+
+def _samples(doc) -> list:
+    """The file's first rows under its headings: what the mapping judges a field's condition on."""
+    try:
+        return read_sheet_rows(readable_session_file(doc), doc.sheet or None)[1 : SAMPLE_SIZE + 1]
+    except FileProblem:
+        return []  # a session whose file stayed in the chat (before #34405)
 
 
 # Make sure class name matches file name for discovery

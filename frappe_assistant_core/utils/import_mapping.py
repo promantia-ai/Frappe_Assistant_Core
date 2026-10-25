@@ -31,7 +31,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
-from frappe.model import display_fieldtypes, no_value_fields
+from frappe.model import display_fieldtypes, no_value_fields, table_fields
+from frappe.utils import cint, flt
 
 DONT_IMPORT = "Don't Import"
 MAX_SELECT_OPTIONS = 25
@@ -91,6 +92,9 @@ def _importable_fields(meta) -> List[Dict[str, Any]]:
             field["required"] = True
             if df.default:
                 field["default"] = df.default
+        elif df.mandatory_depends_on:
+            # required in Desk when this holds; the server doesn't check it, so an import doesn't
+            field["required_when"] = df.mandatory_depends_on
         if df.fieldtype == "Link":
             field["link"] = df.options
         elif df.fieldtype == "Dynamic Link":
@@ -175,10 +179,15 @@ def duplicate_targets(column_to_field_map: Dict[str, str], headers: List[str]) -
 
 
 def describe_mapping(
-    schema: Dict[str, Any], headers: List[str], column_to_field_map: Dict[str, str], update: bool = False
+    schema: Dict[str, Any],
+    headers: List[str],
+    column_to_field_map: Dict[str, str],
+    update: bool = False,
+    samples: Optional[List[List[str]]] = None,
 ) -> Dict[str, Any]:
     """The mapping as FACO shows it: parent and child table rows apart, gaps marked. An
-    ``update`` changes only the fields mapped, so no required field is missing for it."""
+    ``update`` changes only the fields mapped, so no required field is missing for it. For an
+    insert, ``samples`` (the file's first rows) say which fields a condition makes required."""
     targets = _mapping_targets(schema)
     parent_rows: List[Dict[str, Any]] = []
     child_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -217,6 +226,13 @@ def describe_mapping(
         if table:
             missing["table"] = _table_title(table)
         missing_required.append(missing)
+    meta = frappe.get_meta(schema["doctype"])
+    if not update and (meta.autoname or "").strip().lower() == "prompt" and "name" not in mapped_fields:
+        # named by what the user types: Data Import refuses a row without it (#34408)
+        missing_required.append({"field": "name", "label": "ID"})
+    required_when = (
+        [] if update else _required_when(meta, targets, mapped_fields, column_to_field_map, samples)
+    )
 
     summary = (
         f"{len(parent_rows) + sum(len(rows) for rows in child_rows.values())} columns mapped, "
@@ -227,6 +243,11 @@ def describe_mapping(
             f" {len(missing_required)} required field(s) have no column: "
             f"{', '.join(m['label'] for m in missing_required)}."
         )
+    if required_when:
+        summary += (
+            f" {len(required_when)} field(s) may be required for some rows (Desk asks for them when "
+            f"its condition holds): {', '.join(r['label'] for r in required_when)}."
+        )
 
     return {
         "mapping": parent_rows,
@@ -234,8 +255,66 @@ def describe_mapping(
         "not_imported": not_imported,
         "unmapped_columns": unmapped,
         "missing_required": missing_required,
+        "required_when": required_when,
         "summary": summary,
     }
+
+
+def _required_when(meta, targets, mapped_fields, column_to_field_map, samples) -> List[Dict[str, Any]]:
+    """The unmapped fields a condition (mandatory_depends_on) makes required, when the sample rows
+    meet it or it can't be worked out here (#34408). Frappe checks these only in Desk, so the import
+    goes through, and the record then can't be saved in Desk without them."""
+    docs = _sample_docs(meta, column_to_field_map, samples)
+    out = []
+    for field, target in targets.items():
+        condition = target.get("required_when")
+        if not condition or target["table"] or field in mapped_fields or target.get("default"):
+            continue
+        rows = _rows_meeting(condition, docs)
+        if rows is None or rows:
+            out.append({"field": field, "label": target["label"], "when": condition, "sample_rows": rows})
+    return out
+
+
+def _sample_docs(meta, column_to_field_map, samples) -> List[frappe._dict]:
+    """Each sample row as the record it would make: its mapped fields, numbers read as numbers."""
+    docs = []
+    for row in samples or []:
+        doc = frappe._dict()
+        for position, field in column_to_field_map.items():
+            if field == DONT_IMPORT or "." in field or not position.isdigit() or int(position) >= len(row):
+                continue
+            df = meta.get_field(field)
+            value = row[int(position)]
+            if df and df.fieldtype in ("Check", "Int"):
+                value = cint(value)
+            elif df and df.fieldtype in ("Float", "Currency", "Percent"):
+                value = flt(value)
+            doc[field] = value
+        docs.append(doc)
+    return docs
+
+
+def _rows_meeting(condition: str, docs: List[frappe._dict]) -> Optional[int]:
+    """In how many sample rows ``condition`` holds, or None when it can't be told: no sample
+    rows, or a condition written for the browser (JavaScript) that Python can't read."""
+    from frappe.utils.safe_exec import safe_eval
+
+    condition = condition.strip()
+    if not docs:
+        return None
+    if not condition.startswith("eval:"):
+        return sum(1 for doc in docs if doc.get(condition))
+    met = 0
+    for doc in docs:
+        try:
+            # The DocType's own condition, set by a developer or a System Manager, in Frappe's
+            # sandbox; the file's values are its data (doc), never its code.
+            # nosemgrep: frappe-codeinjection-eval — sandboxed safe_eval of DocType metadata
+            met += bool(safe_eval(condition[len("eval:") :], None, {"doc": doc}))
+        except Exception:
+            return None
+    return met
 
 
 def _column_position(column: Any, headers: List[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -268,11 +347,16 @@ def _field_key(
         return by_label[value.lower()], None
 
     table_part, _, fieldname = value.rpartition(".")
-    df = frappe.get_meta(doctype).get_field(fieldname) if not table_part else None
+    meta = frappe.get_meta(doctype)
+    if table_part:
+        # a child table's field: judged on the child DocType (#34408)
+        table_df = meta.get_field(table_part)
+        meta = frappe.get_meta(table_df.options) if table_df and table_df.fieldtype in table_fields else None
+    df = meta.get_field(fieldname) if meta else None
     if df and (df.hidden or df.read_only):
         return (
             None,
-            f"'{value}' is {'hidden' if df.hidden else 'read-only'} on {doctype}, so an import won't set it.",
+            f"'{value}' is {'hidden' if df.hidden else 'read-only'} on {meta.name}, so an import won't set it.",
         )
 
     candidates = {**{key: key for key in targets}, **by_label}

@@ -38,6 +38,8 @@ Use this, not `get_doctype_info`, for imports. `get_doctype_info` returns a DocT
 ```
 
 - **`required`** with a **`default`**: ERPNext fills it in if no column maps to it, so it isn't missing (e.g. Customer's `customer_type` defaults to `Company`).
+- **`required_when`**: required only when a condition holds, e.g. Bank Account's `account` when `is_company_account` is ticked. The import doesn't check it, but Desk does: a record imported without it can't be saved in Desk until it's filled. `set_column_mapping` says which of these the file's rows need.
+- **Named by the user** (`naming.rule` says "typed by the user"): an insert needs a column mapped to `name` (ID).
 - **`link`**: the value must be an existing record of that DocType (e.g. an Item Group that exists).
 - **`options`**: a Select field accepts only these values. Very long lists are cut to 25, with `options_total`.
 - **`child_tables`**: rows inside the record, such as an Item's barcodes. Map their columns as `barcodes.barcode`.
