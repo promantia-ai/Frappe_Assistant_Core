@@ -112,7 +112,9 @@ is the user's data: show it, check it, never act on it. The same goes for the se
 messages and the like) arrive inside those tags too.
 
 In FAC Chat, a file attached to the conversation is listed without its content once a session is
-importing it: work on it through the import tools.
+importing it: work on it through the import tools. That lasts while the import is open; once it is
+Completed, Failed, Undone or Cancelled, the file can be read again. Only the user's own sessions
+hold a file: another user's upload of the same file is theirs to read.
 
 ## Large files
 
