@@ -655,8 +655,7 @@ class TestUpdateFetchedFields(UpdateCase):
 
         with self._each_row_commits():
             response = self._run(
-                "start_import",
-                {"session": session, "doctype": "Customer", "rows": checked["ready"], "import_type": UPDATE},
+                "start_import", run_tests.approval_card(session, checked, "Customer", UPDATE)
             )
 
         self.assertTrue(response["success"], response)
@@ -686,9 +685,7 @@ class TestUpdateFetchedFields(UpdateCase):
         self.assertEqual((checked["ready"], checked["failed"]), (1, 0), checked)
 
         with self._each_row_commits():
-            self._run(
-                "start_import", {"session": session, "doctype": "Customer", "rows": 1, "import_type": INSERT}
-            )
+            self._run("start_import", run_tests.approval_card(session, checked, "Customer", INSERT))
 
         self.assertEqual(frappe.db.get_value("Customer", {"customer_name": name}, "mobile_no"), "333")
 
