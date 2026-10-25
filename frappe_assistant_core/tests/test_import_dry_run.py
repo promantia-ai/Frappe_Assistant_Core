@@ -390,6 +390,26 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual((result["ready"], result["failed"]), (0, 1), result)
         self.assertEqual(self._group(result, "Rejected by ERPNext")["error"], "DuplicateEntryError")
 
+    def test_a_name_repeated_in_the_file_fails_where_customers_are_named_by_it(self):
+        # On a default site a Customer is named by its customer name: the import would refuse the
+        # second "Shared", though the check, rolling each row back, never sees the first (#34398).
+        self.name_customers_by("Customer Name")
+        t = self.tag
+        session = self._session(
+            [
+                [f"Shared {t}", GROUP, "Company", ""],  # row 2
+                [f"shared {t}", GROUP, "Company", ""],  # row 3: the same name to MariaDB
+                [f"Other {t}", GROUP, "Company", ""],  # row 4
+            ]
+        )
+
+        result = self._check(session)
+
+        self.assertEqual((result["ready"], result["failed"]), (2, 1), result)
+        group = self._group(result, "Duplicate in the file")
+        self.assertEqual((group["field"], [e["row"] for e in group["examples"]]), ("customer_name", [3]))
+        self.assertEqual(result.get("warnings") or [], [])
+
     def test_no_warning_when_no_name_is_shared(self):
         session = self._session([[f"One {self.tag}", GROUP, "Company", ""]])
 

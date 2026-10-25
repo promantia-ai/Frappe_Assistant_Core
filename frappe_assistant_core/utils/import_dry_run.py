@@ -565,8 +565,11 @@ class _Checker:
         self.alias_field = getattr(header, "tree_alias_field", None)
         self.key_df = _key_field(session, header)
         self.seen_keys: Dict[str, int] = {}
+        # The field ERPNext names the record after, by a setting (#34398): a repeat in the file fails
+        self.named_df = None if self.key_df else _named_field(session, header)
+        self.seen_named: Dict[str, int] = {}
         # The title field, when it isn't the key: rows sharing its value are a warning, not a failure
-        self.title_df = _title_field(session, header, self.key_df)
+        self.title_df = _title_field(session, header, self.key_df or self.named_df)
         self.seen_titles: Dict[str, int] = {}
         self.shared_rows: List[int] = []
         self.groups: Dict[Tuple, Dict[str, Any]] = {}
@@ -903,6 +906,9 @@ class _Checker:
                     {"cause": CAUSE_SAME_RECORD, "label": self.key_label, "message": message},
                 )
             ]
+        named = self._named_duplicate(payload)
+        if named:
+            return named
         self._note_shared_title(payload)
         if not self.key_df:
             return []
@@ -962,6 +968,25 @@ class _Checker:
                 )
             )
         return problems
+
+    def _named_duplicate(self, payload) -> List[Tuple[Tuple, Dict]]:
+        """A row repeating an earlier row's value of the field ERPNext names the record after
+        (named_df). The import would refuse the second record of that name, but the check rolls
+        each row back, so its insert can't see the first (#34398). One already in ERPNext is
+        refused by the check's own insert."""
+        if not self.named_df:
+            return []
+        value = cstr(payload.doc.get(self.named_df.fieldname)).strip()
+        if not value:
+            return []
+        row = payload.rows[0].row_number
+        first = self.seen_named.setdefault(value.casefold(), row)
+        if first == row:
+            return []
+        label = _(self.named_df.label)
+        message = _("{0} '{1}' is also in row {2}.").format(label, value, first)
+        info = {"cause": CAUSE_DUPLICATE_IN_FILE, "field": self.named_df.fieldname, "label": label}
+        return [((CAUSE_DUPLICATE_IN_FILE, self.named_df.fieldname), {**info, "message": message})]
 
     def _note_shared_title(self, payload) -> None:
         """Remember a row whose title repeats an earlier row's or a record in ERPNext. Two records
@@ -1148,6 +1173,16 @@ def _mapped_fields(session, header) -> Dict[str, Any]:
         for column in header.columns
         if column.df and not column.skip_import and column.df.parent == session.target_doctype
     }
+
+
+def _named_field(session, header):
+    """The mapped field a setting names the record after on this site (NAMED_BY_SETTING: a
+    Customer by its customer name, as Selling Settings has it unless changed), or None. Read as
+    the controller reads it, from the global default (#34398)."""
+    rule = NAMED_BY_SETTING.get(session.target_doctype)
+    if not rule or frappe.defaults.get_global_default(rule[1]) != rule[2]:
+        return None
+    return _mapped_fields(session, header).get(rule[3])
 
 
 def _key_field(session, header):
