@@ -421,6 +421,7 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
             "{0}: more than one record has this {1}, so FACO can't tell which. {2}"
         ),
         dry_run.CAUSE_SAME_RECORD: _("{0}: another row updates the same record, so only the first can. {2}"),
+        dry_run.CAUSE_FETCHED: _("{0}: {2}"),
     }
     template = explanations.get(cause, _("{0} would fail. {2}"))
     explanation = template.format(rows, label, group.get("message") or "").strip()

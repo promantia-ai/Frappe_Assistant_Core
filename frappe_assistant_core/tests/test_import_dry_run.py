@@ -69,9 +69,12 @@ class TestDryRunImport(BaseAssistantTest):
             ).insert()
         self.existing = f"Existing {self.tag}"
         self.name_customers_by("Naming Series")  # so a repeated customer name is no clash of record names
-        frappe.get_doc(
-            {"doctype": "Customer", "customer_name": self.existing, "customer_group": GROUP}
-        ).insert()
+        # Named by a series, so its record name is not its customer name: keep the record name.
+        self.existing_record = (
+            frappe.get_doc({"doctype": "Customer", "customer_name": self.existing, "customer_group": GROUP})
+            .insert()
+            .name
+        )
 
     def tearDown(self):
         frappe.set_user("Administrator")
@@ -1025,7 +1028,7 @@ class TestDryRunImport(BaseAssistantTest):
 
         gone = {"force": True, "ignore_permissions": True, "delete_permanently": True}
         frappe.delete_doc("FAC Import Session", session, **gone)
-        frappe.delete_doc("Customer", self.existing, **gone)
+        frappe.delete_doc("Customer", self.existing_record, **gone)
         if self.made_group:  # this test's setUp made it, and the commit made it permanent
             frappe.delete_doc("Customer Group", GROUP, **gone)
         frappe.db.delete("Series", {"name": prefix})
@@ -1065,6 +1068,17 @@ class TestDryRunImport(BaseAssistantTest):
 
         self.assertEqual(result["ready"], count, result)
         self.assertEqual(free, [True], "the series row was still locked after a hundred rows")
+
+    def test_the_series_tests_cleanup_removes_the_rows_setup_made(self):
+        # setUp's customer is named by a series (CUST-.), so its record name isn't its customer
+        # name: the cleanup missed it, and the commit made it and its group permanent (#34412).
+        # The commit is held here only so this test's rows stay in its own transaction.
+        session = self._session([[f"Row {self.tag}", GROUP, "Company", ""]])
+        with patch("frappe.database.database.Database.commit"):
+            self._remove_committed(session, f"FACLOCK-{self.tag}-", frappe.utils.now_datetime())
+        self.assertFalse(frappe.db.exists("Customer", {"customer_name": self.existing}))
+        if self.made_group:  # on a site that already holds the group, the test must leave it
+            self.assertFalse(frappe.db.exists("Customer Group", GROUP))
 
     # -- when it can't run ---------------------------------------------------------------------------
 

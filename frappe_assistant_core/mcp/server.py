@@ -413,12 +413,14 @@ class MCPServer:
             )
 
             is_error = False
+            own_message = False  # an error FAC wrote itself, with nothing of the user's file in it
             if tool.get("safeExecuteEnvelope") and isinstance(result, dict):
                 if result.get("success") is True and "result" in result:
                     result = result["result"]
                 elif result.get("success") is False:
                     is_error = True
                     inner = result.get("result")
+                    own_message = bool(result.get("own_message"))
                     result = (
                         inner
                         if isinstance(inner, dict)
@@ -440,7 +442,8 @@ class MCPServer:
             if isinstance(result, dict) and tool.get("untrustedFields"):
                 from frappe_assistant_core.utils.untrusted_output import fence_fields
 
-                result = fence_fields(result, tool["untrustedFields"])
+                fenced = [f for f in tool["untrustedFields"] if not (own_message and f == "error")]
+                result = fence_fields(result, fenced)
 
             # Serialize the text result (default=str handles datetime, Decimal, etc.)
             if isinstance(result, str):

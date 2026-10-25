@@ -256,6 +256,23 @@ class TestDocumentBatch(BaseAssistantTest):
         # Refused before any insert is tried, not by the ToDo's own missing description.
         self.assertIn("Pass doctype and data", response["result"]["error"])
 
+    def test_an_empty_list_of_documents_says_so_with_and_without_an_import_session(self):
+        # A masters batch with nothing missing is an empty list: it said "Missing doctype, data."
+        # for an import session, and asked for doctype and data without one (#33992).
+        for extra in ({}, {"import_session": "any-session"}):
+            with self.subTest(extra=extra):
+                response = self._run("create_document", {"documents": [], **extra})
+
+                self.assertFalse(response["success"], response)
+                self.assertIn("documents is empty", response["result"]["error"])
+                self.assertEqual(self._todos(), set())
+
+    def test_an_empty_list_beside_one_record_still_creates_the_record(self):
+        # Clients fill optional inputs with empty values: [] beside doctype and data reads as not given.
+        response = self._run("create_document", {"documents": [], **self._todo("Single")})
+
+        self.assertTrue(response["success"], response)
+
     def test_a_callers_own_commit_stand_in_is_given_back(self):
         creator = DocumentCreate()
 

@@ -38,6 +38,10 @@ from frappe_assistant_core.utils.tool_category_detector import detect_tool_categ
 
 CONTACTS_CSV = "First Name,Last Name,E-mail,Mobile,Company,Notes\nAnn,Lee,ann@example.com,98450,Acme,VIP\n"
 ADDRESSES_CSV = "Street,Town,Remarks\n12 MG Road,Bengaluru,Head office\n"
+# India Compliance on the site, and its GST Settings refusing a sales Item without an HSN/SAC code
+HSN_VALIDATED = "india_compliance" in frappe.get_installed_apps() and bool(
+    frappe.db.get_single_value("GST Settings", "validate_hsn_code")
+)
 
 
 class ImportToolTestCase(BaseAssistantTest):
@@ -109,6 +113,20 @@ class TestGetImportSchema(ImportToolTestCase):
         full = self._run("get_doctype_info", {"doctype": "Delivery Note"})
         self.assertLess(size, 20000)
         self.assertLess(size, len(json.dumps(full, default=str)) / 3)
+
+    @unittest.skipUnless(HSN_VALIDATED, "needs India Compliance validating HSN/SAC codes")
+    def test_an_item_hsn_code_is_required_where_the_site_validates_it(self):
+        # India Compliance refuses a sales Item without one; only the dry run said so (e2e finding, #33989).
+        hsn = next(f for f in self._schema("Item")["fields"] if f["fieldname"] == "gst_hsn_code")
+
+        self.assertTrue(hsn.get("required"), hsn)
+        self.assertIn("India Compliance", hsn["note"])
+
+    @unittest.skipIf(HSN_VALIDATED, "this site validates HSN/SAC codes")
+    def test_an_item_hsn_code_is_not_required_where_the_site_does_not_validate_it(self):
+        fields = {f["fieldname"]: f for f in self._schema("Item")["fields"]}
+
+        self.assertFalse(fields.get("gst_hsn_code", {}).get("required"))
 
     def test_doctypes_data_import_refuses_are_refused(self):
         for doctype, reason in (
@@ -206,6 +224,22 @@ class TestSetColumnMapping(ImportToolTestCase):
         self.assertTrue(result["success"], result)
         self.assertEqual(result["unmapped_columns"], ["Remarks"])
         self.assertEqual(sorted(m["field"] for m in result["missing_required"]), ["address_type", "country"])
+
+    @unittest.skipUnless(HSN_VALIDATED, "needs India Compliance validating HSN/SAC codes")
+    def test_an_items_missing_hsn_column_is_listed_for_an_insert_only(self):
+        session = self._session("Code,Name\nIT-1,Widget\n", "items.csv")
+        mapping = {"Code": "item_code", "Name": "item_name"}
+
+        inserting = self._map(session, mapping, doctype="Item")
+        updating = self._map(
+            session,
+            {"Code": "name", "Name": "item_name"},
+            doctype="Item",
+            import_type="Update Existing Records",
+        )
+
+        self.assertIn("gst_hsn_code", [m["field"] for m in inserting["missing_required"]], inserting)
+        self.assertNotIn("gst_hsn_code", [m["field"] for m in updating["missing_required"]], updating)
 
     def test_a_child_tables_required_fields_count_once_it_is_used(self):
         result = self._map(self._session(), {"Mobile": "phone_nos.is_primary_mobile_no"}, doctype="Contact")

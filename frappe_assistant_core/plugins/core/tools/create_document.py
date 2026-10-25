@@ -148,6 +148,13 @@ class DocumentCreate(BaseTool):
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new document, or, with ``documents``, several in one call"""
+        if (
+            arguments.get("documents") == []
+            and not arguments.get("doctype")
+            and not document_batch.given(arguments.get("data"))
+        ):
+            # A masters batch with nothing missing: say so, not "pass doctype and data".
+            return {"success": False, "error": _("documents is empty: nothing to create.")}
         if document_batch.given(arguments.get("import_session")) and not document_batch.given(
             arguments.get("documents")
         ):

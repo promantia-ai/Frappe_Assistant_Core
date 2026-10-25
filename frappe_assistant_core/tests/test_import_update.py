@@ -22,6 +22,7 @@ from frappe_assistant_core.tests import test_import_run as run_tests
 from frappe_assistant_core.tests.base_test import item_hsn_fields
 from frappe_assistant_core.utils import import_update
 
+INSERT = "Insert New Records"
 UPDATE = "Update Existing Records"
 KEYED = {"Tax ID": "tax_id", "Customer Group": "customer_group", "Website": "website"}
 
@@ -552,6 +553,157 @@ class TestUpdateRun(UpdateCase):
         self.assertFalse(response["success"], response)
         self.assertIn("Nothing to update", response["result"]["error"])
         self.assertFalse(self._doc(session).data_imports)
+
+
+class TestUpdateFetchedFields(UpdateCase):
+    """A field that ``fetch_from`` a linked record is copied back on every save, so an update can't
+    change it while the link is set (E2E 2026-10-24, finding 1). Customer's mobile_no and email_id
+    fetch from the primary contact; ERPNext 16 hides them, so they can't be mapped there."""
+
+    HEADER = "ID,Mobile No,Email"
+    MAPPING = {"ID": "name", "Mobile No": "mobile_no", "Email": "email_id"}
+
+    def setUp(self):
+        super().setUp()
+        self.fetched = not frappe.get_meta("Customer").get_field("mobile_no").hidden
+        # A's primary contact is set the way ERPNext sets it: on the saved customer, which then fetches
+        contact = frappe.get_doc(
+            {
+                "doctype": "Contact",
+                "first_name": f"Primary {self.tag}",
+                "phone_nos": [{"phone": "111", "is_primary_mobile_no": 1}],
+                "email_ids": [{"email_id": f"old-{self.tag}@example.com", "is_primary": 1}],
+                "links": [{"link_doctype": "Customer", "link_name": self.customers["a"]}],
+            }
+        ).insert()
+        self.contact = contact.name
+        if self.fetched:
+            customer = frappe.get_doc("Customer", self.customers["a"])
+            customer.customer_primary_contact = self.contact
+            customer.save()
+            frappe.db.set_value(
+                "Customer", self.customers["b"], {"mobile_no": "222", "email_id": f"b-{self.tag}@example.com"}
+            )
+
+    def _check(self, lines):
+        session, mapped = self._session(lines, mapping=self.MAPPING, match_on=(), header=self.HEADER)
+        self.assertTrue(mapped["success"], mapped)
+        reply = self._run("dry_run_import", {"session": session})
+        self.assertTrue(reply["success"], reply)
+        return session, reply["result"]
+
+    def _need_fetched(self):
+        if not self.fetched:
+            self.skipTest("Customer's mobile_no is hidden here, so it can't be mapped")
+
+    def _rows(self, a_mobile, b_mobile, a_email=None, b_email=None):
+        a, b = self.customers["a"], self.customers["b"]
+        return [
+            f"{a},{a_mobile},{a_email if a_email is not None else f'old-{self.tag}@example.com'}",
+            f"{b},{b_mobile},{b_email if b_email is not None else f'b-{self.tag}@example.com'}",
+        ]
+
+    def test_a_field_fetched_from_the_primary_contact_is_refused_while_the_link_is_set(self):
+        self._need_fetched()
+
+        _session, result = self._check(self._rows("999", "888"))
+
+        [group] = [g for g in result["groups"] if g["cause"] == "Comes from a linked record"]
+        self.assertEqual((group["count"], group["field"]), (1, "mobile_no"), group)
+        self.assertIn(self.contact, group["message"])
+        self.assertIn(self.customers["a"], group["message"])
+        self.assertEqual((result["ready"], result["failed"]), (1, 1), result)
+        self.assertEqual(result["update"]["records_changing"], 1)
+        self.assertEqual(result["update"]["fields_changing"], 1)
+
+    def test_an_email_fetched_from_the_primary_contact_is_refused_the_same_way(self):
+        self._need_fetched()
+
+        _session, result = self._check(
+            self._rows("111", "222", f"new-{self.tag}@example.com", f"nb-{self.tag}@example.com")
+        )
+
+        [group] = [g for g in result["groups"] if g["cause"] == "Comes from a linked record"]
+        self.assertEqual((group["count"], group["field"]), (1, "email_id"), group)
+        self.assertEqual((result["ready"], result["failed"]), (1, 1), result)
+
+    def test_the_groups_fix_is_to_leave_the_rows_out(self):
+        self._need_fetched()
+        session, result = self._check(self._rows("999", "888"))
+        [group] = [g for g in result["groups"] if g["cause"] == "Comes from a linked record"]
+
+        advice = self._run("dry_run_import", {"session": session})["result"]
+        shown = [g for g in advice["groups"] if g["id"] == group["id"]][0]
+
+        self.assertEqual([f["action"] for f in shown["fixes"]], ["leave_out"], shown)
+
+    def test_the_value_the_record_already_holds_is_no_problem(self):
+        self._need_fetched()
+
+        _session, result = self._check(self._rows("111", "888"))
+
+        self.assertEqual(result["groups"], [])
+        self.assertEqual((result["ready"], result["failed"], result["unchanged"]), (1, 0, 1), result)
+
+    def test_leaving_the_row_out_updates_the_customer_without_a_contact_and_reports_the_other(self):
+        self._need_fetched()
+        session, result = self._check(self._rows("999", "888"))
+        [group] = [g for g in result["groups"] if g["cause"] == "Comes from a linked record"]
+        fixes = [{"group": group["id"], "action": "leave_out", "reason": "Change it on the Contact"}]
+        checked = self._run("dry_run_import", {"session": session, "fixes": fixes})["result"]
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+
+        with self._each_row_commits():
+            response = self._run(
+                "start_import",
+                {"session": session, "doctype": "Customer", "rows": checked["ready"], "import_type": UPDATE},
+            )
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(frappe.db.get_value("Customer", self.customers["b"], "mobile_no"), "888")
+        self.assertEqual(frappe.db.get_value("Customer", self.customers["a"], "mobile_no"), "111")
+        self.assertIn("1 row left out (Change it on the Contact: row 2)", response["result"]["message"])
+
+    def test_an_insert_still_sets_the_mobile_number(self):
+        self._need_fetched()
+        name = f"Fresh {self.tag}"
+        file_doc = self._file(
+            "fresh.csv",
+            f"Customer Name,Customer Group,Customer Type,Mobile No\n{name},{self.group},Company,333\n".encode(),
+        )
+        session = self._run("start_import_session", {"file_id": file_doc.name})["result"]["session_id"]
+        mapping = {
+            "Customer Name": "customer_name",
+            "Customer Group": "customer_group",
+            "Customer Type": "customer_type",
+            "Mobile No": "mobile_no",
+        }
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual((checked["ready"], checked["failed"]), (1, 0), checked)
+
+        with self._each_row_commits():
+            self._run(
+                "start_import", {"session": session, "doctype": "Customer", "rows": 1, "import_type": INSERT}
+            )
+
+        self.assertEqual(frappe.db.get_value("Customer", {"customer_name": name}, "mobile_no"), "333")
+
+    def test_a_hidden_fetched_field_still_can_not_be_mapped(self):
+        if self.fetched:
+            self.skipTest("Customer's mobile_no isn't hidden here")
+
+        _session, mapped = self._session(
+            [f"{self.customers['a']},999"],
+            mapping={"ID": "name", "Mobile No": "mobile_no"},
+            match_on=(),
+            header="ID,Mobile No",
+        )
+
+        self.assertIn("hidden", str(mapped))
 
 
 class TestPrices(UpdateCase):
