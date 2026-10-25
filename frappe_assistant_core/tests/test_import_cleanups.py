@@ -155,3 +155,37 @@ class TestPlanAnswers(unittest.TestCase):
         self.assertFalse(reply["success"])
         self.assertEqual(reply["applied"], [{"id": "q1"}])
         self.assertIn("were applied", reply["error"])
+
+
+class TestReviewFindings(ImportToolTestCase):
+    """The full round's review of fixes 8-18, each pinned by a test that failed first."""
+
+    def test_a_cell_made_spreadsheet_safe_comes_back_as_the_user_wrote_it(self):
+        # #34413: the failed-rows file writes '+91 98450 12345; read back, the ' comes off
+        from frappe_assistant_core.utils import import_session
+
+        for cell in ("+91 98450 12345", "-A12", "=x", "@home", "Acme", "'quoted"):
+            with self.subTest(cell=cell):
+                self.assertEqual(import_session._as_text(import_failures.csv_cell(cell)), cell)
+
+    def test_a_session_copy_over_the_sites_max_file_size_is_refused_plainly(self):
+        # #34405: an xlsx grows as CSV; Frappe's own refusal named neither cause nor way out
+        from frappe_assistant_core.utils import import_session
+
+        chosen = frappe._dict(rows=[["Name"], ["x" * 200]], columns=["Name"])
+        with patch("frappe.core.api.file.get_max_file_size", return_value=100), self.assertRaises(
+            import_session.FileProblem
+        ) as raised:
+            import_session.save_session_copy("big.xlsx", chosen)
+
+        self.assertIn("Max File Size", str(raised.exception))
+
+    def test_the_trial_submit_leaves_no_stock_cache_for_the_real_one(self):
+        # #34435: ERPNext caches future stock moves by voucher name, which the real one reuses
+        from frappe_assistant_core.utils import import_opening_stock
+
+        frappe.local.future_sle = {"MAT-RECO-0001": {("A", "W"): 1}}
+        with patch.object(import_opening_stock, "build_document", side_effect=frappe.ValidationError("x")):
+            import_opening_stock._draft_error({}, [])
+
+        self.assertEqual(frappe.local.future_sle, {})

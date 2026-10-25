@@ -33,7 +33,7 @@ from frappe.utils import cstr, get_url
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
 from frappe_assistant_core.utils import import_fixes
-from frappe_assistant_core.utils.import_session import read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils.import_session import FORMULA_START, read_sheet_rows, readable_session_file
 
 #: The columns the failed-rows file adds after the user's own. A file sent back with them is
 #: the same file: they are not imported.
@@ -255,9 +255,6 @@ def runs(session) -> List[Dict[str, Any]]:
 
 
 # -- the failed-rows file -------------------------------------------------------------------
-
-
-FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 
 
 def csv_cell(value) -> str:

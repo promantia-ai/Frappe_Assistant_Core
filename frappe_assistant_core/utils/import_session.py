@@ -349,18 +349,31 @@ def save_session_copy(file_name: str, chosen: SheetSummary):
     """The sheet a session works on, as a private CSV of its own (#34405): its headings found and
     made unique, its text decoded, written once. Every later step reads this copy, so the file the
     user gave may go (chat retention deletes a chat's attachments) while the session carries on."""
+    from frappe.core.doctype.file.exceptions import MaxFileSizeReachedError
+
     buffer = io.StringIO()
     csv.writer(buffer, lineterminator="\n").writerows(chosen.rows or [chosen.columns])
-    return frappe.get_doc(
-        {
-            "doctype": "File",
-            # never the name of a file the session writes itself, which is replaced by name:
-            # a corrected failed-rows file, uploaded again, is called the same as the next one
-            "file_name": f"{os.path.splitext(file_name or '')[0] or 'import'} - session copy.csv",
-            "content": buffer.getvalue().encode("utf-8"),
-            "is_private": 1,
-        }
-    ).insert()
+    content = buffer.getvalue().encode("utf-8")
+    try:
+        return frappe.get_doc(
+            {
+                "doctype": "File",
+                # never the name of a file the session writes itself, which is replaced by name:
+                # a corrected failed-rows file, uploaded again, is called the same as the next one
+                "file_name": f"{os.path.splitext(file_name or '')[0] or 'import'} - session copy.csv",
+                "content": content,
+                "is_private": 1,
+            }
+        ).insert()
+    except MaxFileSizeReachedError:
+        # a workbook grows several times over as CSV: the copy, not the file, passed the limit
+        frappe.clear_messages()
+        raise FileProblem(
+            _(
+                "The sheet is {0} MB as text, more than the {1} MB this site takes for a file. Split it "
+                "into smaller files, or ask an administrator to raise Max File Size in System Settings."
+            ).format(f"{len(content) / (1024 * 1024):.1f}", f"{max_file_size() / (1024 * 1024):g}")
+        ) from None
 
 
 def attach_session_copy(copy, session_name: str) -> None:
@@ -542,10 +555,22 @@ def _trimmed(row: List[str]) -> List[str]:
     return row[:end]
 
 
+# A cell starting with one of these is a formula to a spreadsheet: the failed-rows file writes it
+# with a leading ' (import_failures.csv_cell), which comes off again when it is read back (#34413).
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
 def _as_text(value: Any) -> str:
     """A cell as Data Import would read it, written as plain text."""
     if value is None:
         return ""
+    if (
+        isinstance(value, str)
+        and value.startswith("'")
+        and value[1:2]
+        and value[1:].startswith(FORMULA_START)
+    ):
+        return value[1:]
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, datetime.datetime):
@@ -565,7 +590,8 @@ DEFAULT_MAX_IMPORT_ROWS = 50000
 
 
 #: A session holds its file while it is being worked on (#34437): a check, an import, a retry of
-#: failed rows, an undo. Once it is Completed, Failed, Undone or Cancelled, the file is free again.
+#: failed rows (after a Failed import too). Once it is Completed, Undone or Cancelled, the file is
+#: free again.
 HOLDING_STATUSES = (
     "File Read",
     "Mapped",
@@ -573,6 +599,7 @@ HOLDING_STATUSES = (
     "Ready to Import",
     "Importing",
     "Partially Completed",
+    "Failed",
     "Undoing",
     "Partially Undone",
 )

@@ -826,6 +826,9 @@ def _draft_error(stock: Dict[str, Any], lines: List[Ready]) -> Optional[Exceptio
         finally:
             frappe.db.rollback(save_point=SAVEPOINT)
             frappe.clear_messages()
+            # ERPNext caches, by voucher name, whether later stock moves exist: the real document
+            # gets the same name, so the rolled-back one's answer must not be read for it (#34435)
+            frappe.local.future_sle = {}
 
 
 def _erpnext_check(session, ready: List[Ready], checker: _StockChecker) -> List[Ready]:

@@ -1025,7 +1025,9 @@ class _Checker:
                 return [], self.importer.try_row(doc).name
             except Exception as e:
                 # ERPNext's refusals quote the row's value: one group per message, not per value
-                message, values = message_pattern(_message_of(e), _values_of(payload.doc))
+                message, values = message_pattern(
+                    _message_of(e), _values_of([row.data for row in payload.rows])
+                )
                 kind = type(e).__name__
                 return [
                     (
@@ -1461,7 +1463,8 @@ def message_pattern(message: str, values: Iterable[Any]) -> Tuple[str, List[str]
 
 
 def _values_of(doc: Any) -> List[str]:
-    """Every value a row's record holds, its child rows' too, as text."""
+    """Every value in ``doc`` as text: given the file's rows, what the user wrote, never a default
+    Frappe filled in (#34407)."""
     if isinstance(doc, dict):
         return [v for value in doc.values() for v in _values_of(value)]
     if isinstance(doc, (list, tuple)):

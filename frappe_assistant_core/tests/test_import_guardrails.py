@@ -479,6 +479,7 @@ class TestAFileIsHeldOnlyWhileItsImportIsOpen(GuardrailCase):
             "Ready to Import",
             "Importing",
             "Partially Completed",
+            "Failed",  # its rows can be checked and imported again
             "Undoing",
             "Partially Undone",
         ):
@@ -489,7 +490,7 @@ class TestAFileIsHeldOnlyWhileItsImportIsOpen(GuardrailCase):
 
     def test_the_file_is_free_again_once_its_import_is_over(self):
         file_doc, session = self._started()
-        for status in ("Completed", "Failed", "Undone", "Cancelled"):
+        for status in ("Completed", "Undone", "Cancelled"):
             with self.subTest(status=status):
                 # as the import, its undo or a cancelled import leave it
                 frappe.db.set_value("FAC Import Session", session, "status", status)
