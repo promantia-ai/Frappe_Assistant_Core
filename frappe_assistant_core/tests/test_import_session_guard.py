@@ -17,7 +17,7 @@ import frappe
 import frappe.client
 
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import PLAN_FIELDS
-from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase
+from frappe_assistant_core.tests.test_import_run import MAPPING, ImportRunCase, approval_card
 from frappe_assistant_core.utils import import_dry_run, import_run
 from frappe_assistant_core.utils.import_session import readable_session_file
 
@@ -131,13 +131,7 @@ class TestWritesToAnExistingSession(SessionGuardCase):
                     pass
 
                 reply = self._run(
-                    "start_import",
-                    {
-                        "session": session,
-                        "doctype": "Customer",
-                        "rows": checked["ready"],
-                        "import_type": "Insert New Records",
-                    },
+                    "start_import", approval_card(session, checked, "Customer", "Insert New Records")
                 )
 
                 self.assertFalse(reply["success"], reply)

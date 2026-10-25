@@ -81,8 +81,20 @@ def _runs_now() -> bool:
     return bool(frappe.flags.in_test or frappe.conf.developer_mode)
 
 
-def check_card(session, doctype: str, rows: Any, import_type: str) -> None:
-    """The approval card shows what FACO passed: refuse unless it is what the last check found."""
+def check_card(
+    session,
+    doctype: str,
+    rows: Any,
+    import_type: str,
+    fingerprint: Any = None,
+    file_name: Any = None,
+    submit: Any = None,
+) -> None:
+    """The approval card shows what FACO passed: refuse unless it is what the last check found.
+
+    The check's fingerprint binds the approval to that check (#34402): a remap and a new check of
+    the same row count, in another tab or a parallel call, is another check, so it isn't imported
+    under this approval. The file's name and whether records are submitted are on the card too."""
     summary = frappe.parse_json(session.validation_summary or "{}") or {}
     checked = (session.target_doctype, summary.get("ready"), session.import_type or INSERT)
     asked = (cstr(doctype).strip(), _int(rows), cstr(import_type).strip())
@@ -93,6 +105,30 @@ def check_card(session, doctype: str, rows: Any, import_type: str) -> None:
                 "those, so the approval card shows them."
             ).format(*checked)
         )
+    if cstr(fingerprint).strip() != cstr(session.validated_fingerprint):
+        raise ImportProblem(
+            _(
+                "The file was checked again since: pass the last check's validated_fingerprint, "
+                "so the approval is of what was checked. Show the user that check's result first."
+            )
+        )
+    card = (cstr(file_name).strip(), _bool(submit))
+    if card != (cstr(session.file_name), bool(session.submit_after_import)):
+        raise ImportProblem(
+            _("Pass file_name '{0}' and submit_after_import {1}, so the approval card shows them.").format(
+                session.file_name, "true" if session.submit_after_import else "false"
+            )
+        )
+
+
+def _bool(value) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if cstr(value).strip().lower() in ("1", "true", "yes"):
+        return True
+    if cstr(value).strip().lower() in ("0", "false", "no"):
+        return False
+    return None
 
 
 def _int(value) -> Optional[int]:
