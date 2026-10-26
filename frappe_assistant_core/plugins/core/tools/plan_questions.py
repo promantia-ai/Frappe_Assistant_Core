@@ -50,8 +50,25 @@ class PlanQuestions(BaseTool):
             "true, the plan is Ready to Run: next run_migration_plan, given approval exactly."
         )
         self.requires_permission = None  # checked on the plan and its sessions
-        # Questions quote the user's files: values, file names, columns (#34003).
-        self.untrusted_fields = ("questions", "files", "problems", "applied", "error", "approval")
+        # What the user's files say is fenced (#34003): their names, columns and values. FAC's own
+        # directions in a question's message are not, nor the approval, which run_migration_plan
+        # is given back exactly (#34438). A fix question's message, explanation and fixes quote
+        # the file's values: a fix question's message is ERPNext's refusal quoting the file.
+        self.untrusted_fields = (
+            "questions[kind=fix].message",
+            "questions[kind=fix].explanation",
+            "questions[kind=fix].fixes",
+            "questions[].file_name",
+            "questions[].columns",
+            "questions[].dates",
+            "questions[].file_names_say",
+            "questions[].needed_by",
+            "files[].file_name",
+            "files[].reason",
+            "problems",
+            "applied",
+            "error",
+        )
 
         self.inputSchema = {
             "type": "object",

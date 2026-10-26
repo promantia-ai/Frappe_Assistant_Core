@@ -222,3 +222,38 @@ class TestSeriesLockCommits(unittest.TestCase):
                 frappe.local.fac_plan_running = None
 
         self.assertEqual(commit.call_count, 1)
+
+
+class TestPlanFencing(unittest.TestCase):
+    def test_only_what_the_files_say_is_fenced_in_the_plans_questions(self):
+        # #34438: FAC's own directions and the approval run_migration_plan is given back exactly
+        # were fenced as file content
+        from frappe_assistant_core.plugins.core.tools.plan_questions import PlanQuestions
+        from frappe_assistant_core.utils.untrusted_output import fence_fields
+
+        result = {
+            "questions": [
+                {
+                    "kind": "fix",
+                    "file_name": "items.csv",
+                    "message": "Brand 'Acme' doesn't exist.",
+                    "fixes": [{"action": "map"}],
+                },
+                {
+                    "kind": "cut_off",
+                    "message": "The cut-off date: never guess it.",
+                    "dates": {"stock.csv": "2026-03-31"},
+                },
+            ],
+            "approval": {"files": 1, "decisions": ["Create Brand 'Acme'."]},
+        }
+
+        fenced = fence_fields(result, PlanQuestions().untrusted_fields)
+
+        fix, cut_off = fenced["questions"]
+        self.assertNotEqual(fix["message"], "Brand 'Acme' doesn't exist.")
+        self.assertIn("Acme", fix["message"])
+        self.assertNotEqual(fix["file_name"], "items.csv")
+        self.assertEqual(cut_off["message"], "The cut-off date: never guess it.")
+        self.assertNotEqual(cut_off["dates"], {"stock.csv": "2026-03-31"})
+        self.assertEqual(fenced["approval"], result["approval"])

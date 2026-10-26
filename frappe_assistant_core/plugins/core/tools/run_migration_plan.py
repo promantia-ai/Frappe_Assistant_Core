@@ -41,7 +41,8 @@ class RunMigrationPlan(BaseTool):
         )
         self.requires_permission = None  # checked on the plan; each file's import checks its own
         # File names and messages quote the user's files (#34003).
-        self.untrusted_fields = ("files", "message", "error", "approval")
+        # The approval is given back exactly, so it isn't fenced (#34438); the files' names are.
+        self.untrusted_fields = ("files[].file_name", "files[].reason", "message", "error")
 
         self.inputSchema = {
             "type": "object",

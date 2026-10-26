@@ -70,11 +70,18 @@ def fence_document(doctype: str, doc: Dict[str, Any]) -> Dict[str, Any]:
 
 def _fence(node: Dict[str, Any], parts: List[str], kind: str) -> None:
     head, rest = parts[0], parts[1:]
-    if head.endswith("[]"):
-        key = head[:-2]
+    if head.endswith("]") and "[" in head:
+        # "questions[]" is every item; "questions[kind=fix]" only the items whose kind is "fix"
+        key, _bracket, where = head[:-1].partition("[")
+        field, _equals, value = where.partition("=")
         items = node.get(key)
         if isinstance(items, list) and rest:
-            node[key] = [_fenced_item(item, rest, kind) for item in items]
+            node[key] = [
+                _fenced_item(item, rest, kind)
+                if not field or (isinstance(item, dict) and str(item.get(field)) == value)
+                else item
+                for item in items
+            ]
         return
     if node.get(head) in (None, "", [], {}):
         return
