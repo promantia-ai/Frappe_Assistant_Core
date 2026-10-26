@@ -1345,6 +1345,10 @@ _HELD_FUNCTIONS = (
     # Where every enqueue ends up, whoever holds the function: a module that did `from
     # frappe.utils.background_jobs import enqueue` keeps the real one, which still ends here.
     (Queue, "enqueue_job"),
+    # Past enqueue_job: enqueue_many puts its jobs in with _enqueue_job, and enqueue_at and
+    # enqueue_in with schedule_job (#34401)
+    (Queue, "_enqueue_job"),
+    (Queue, "schedule_job"),
     (frappe, "publish_realtime"),
     (frappe.realtime, "publish_realtime"),
     # A naming series: its SELECT ... FOR UPDATE outlives the row's savepoint (#34401)
@@ -1414,7 +1418,13 @@ def _held_series(key: str, digits: int) -> str:
     return ("%0" + str(digits) + "d") % taken[key]
 
 
-_HELD_RESULTS = {"enqueue": _held_enqueue, "enqueue_job": _held_queue_job, "getseries": _held_series}
+_HELD_RESULTS = {
+    "enqueue": _held_enqueue,
+    "enqueue_job": _held_queue_job,
+    "_enqueue_job": _held_queue_job,
+    "schedule_job": _held_queue_job,
+    "getseries": _held_series,
+}
 
 
 def _hold_aware(original, held=None):

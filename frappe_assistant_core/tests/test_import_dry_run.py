@@ -1017,6 +1017,33 @@ class TestDryRunImport(BaseAssistantTest):
         # A worker may have taken a job off the queue: its record is still there.
         self.assertFalse([job.id for job in sent if Job.exists(job.id, connection=queue.connection)])
 
+    def test_jobs_enqueued_many_at_once_or_for_later_never_reach_redis(self):
+        # #34401, Paul's review of 49da112: RQ's enqueue_many and enqueue_at / enqueue_in go past
+        # enqueue_job (to _enqueue_job and schedule_job), so a controller using them still queued
+        import datetime
+
+        from frappe.utils.background_jobs import get_queue
+        from rq.job import Job
+        from rq.registry import ScheduledJobRegistry
+
+        queue = get_queue("short")
+        scheduled = ScheduledJobRegistry(queue=queue)
+        before, later, sent = queue.count, scheduled.count, []
+        self.addCleanup(self._remove_jobs, queue, sent)
+        session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])
+
+        def enqueue(doc):
+            sent.extend(queue.enqueue_many([queue.prepare_data("frappe.ping")]))
+            sent.append(queue.enqueue_in(datetime.timedelta(hours=1), "frappe.ping"))
+
+        with self._customer_controller(enqueue):
+            result = self._check(session)
+
+        self.assertEqual(result["ready"], 1, result)
+        self.assertEqual(len(sent), 2, "the controller didn't run")
+        self.assertEqual((queue.count, scheduled.count), (before, later))
+        self.assertFalse([job.id for job in sent if Job.exists(job.id, connection=queue.connection)])
+
     def test_a_held_job_has_an_id_a_controller_can_read(self):
         session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])
         ids = []
