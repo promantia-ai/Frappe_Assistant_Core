@@ -14,7 +14,7 @@ What goes in is exactly what was checked: the session's sheet, with the value ma
 | `doctype` | string | **Yes** | The DocType imported, as the last check said |
 | `rows` | integer | **Yes** | Rows to import: the last check's `ready` |
 | `import_type` | string | **Yes** | `Insert New Records` or `Update Existing Records`, as the last check said |
-| `validated_fingerprint` | string | **Yes** | The last check's `validated_fingerprint`, from `dry_run_import`'s reply (or the session's `validated_fingerprint`) |
+| `validated_fingerprint` | string | **Yes** | The last check's `validated_fingerprint`, from `dry_run_import`'s reply: 12 characters, copied as given (the session's whole `validated_fingerprint` works too) |
 | `file_name` | string | **Yes** | The session's `file_name`: the file imported |
 | `submit_after_import` | boolean | **Yes** | The session's `submit_after_import`: whether the records are submitted |
 

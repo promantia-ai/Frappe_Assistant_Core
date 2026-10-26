@@ -729,10 +729,23 @@ class TestTheApprovalNamesTheCheck(ImportRunCase):
     """#34402: the import's approval is of one check, and the card names the file."""
 
     def test_the_check_names_itself_for_the_approval(self):
+        # 12 characters, which FACO copies onto the card: it dropped one of 64 twice (#34545)
         session, checked = self._ready_session()
 
-        self.assertEqual(checked["validated_fingerprint"], self._doc(session).validated_fingerprint)
-        self.assertTrue(checked["validated_fingerprint"])
+        self.assertEqual(len(checked["validated_fingerprint"]), 12)
+        self.assertTrue(self._doc(session).validated_fingerprint.startswith(checked["validated_fingerprint"]))
+
+    def test_the_card_takes_the_checks_id_or_its_whole_fingerprint_and_nothing_less(self):
+        session, checked = self._ready_session()
+        full = self._doc(session).validated_fingerprint
+
+        for given in (full[:11], "0" * 12, ""):
+            with self.subTest(given=given):
+                reply = self._import(session, checked, validated_fingerprint=given)
+                self.assertFalse(reply["success"], reply)
+        with self._each_row_commits():
+            reply = self._import(session, checked, validated_fingerprint=full.upper())
+        self.assertTrue(reply["success"], reply)
 
     def test_an_approval_of_an_earlier_check_imports_nothing(self):
         session, checked = self._ready_session()

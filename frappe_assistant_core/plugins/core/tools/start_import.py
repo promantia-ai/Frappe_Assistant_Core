@@ -66,7 +66,8 @@ class StartImport(BaseTool):
                 },
                 "validated_fingerprint": {
                     "type": "string",
-                    "description": "The last check's validated_fingerprint, from dry_run_import's reply",
+                    "description": "The last check's validated_fingerprint, from dry_run_import's "
+                    "reply: 12 characters, as given",
                 },
                 "file_name": {"type": "string", "description": "The session's file_name: the file imported"},
                 "submit_after_import": {

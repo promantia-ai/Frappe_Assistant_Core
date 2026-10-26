@@ -66,7 +66,7 @@ Call it once the columns are mapped (`set_column_mapping`). Then call it again w
 }
 ```
 
-- **`validated_fingerprint`** names this check (the file, mapping and fixes it was of). Pass it to `start_import`: the import is refused when the file was mapped or checked again since.
+- **`validated_fingerprint`** names this check (the file, mapping and fixes it was of), in 12 characters. Pass it to `start_import` as given: the import is refused when the file was mapped or checked again since.
 - **Rows** are numbered as in the spreadsheet: row 1 is the header, so the first data row is row 2. When the headings were below a title row (`header_row` from `start_import_session`), rows count from the heading row.
 - **`cause`** is one of: `Missing link`, `Not an allowed option`, `Wrong date format`, `Invalid value`, `Duplicate in the file`, `Already in ERPNext`, `Rejected by ERPNext` (the DocType's own rules; `error` is the exception type). Rows ERPNext refused with the same message are one group even when the message names each row's own value: the value reads as `…` in `message`, and `values` lists them (up to 20).
 - **`previous`** appears on a second check: how many rows failed last time, and how many of those now pass.

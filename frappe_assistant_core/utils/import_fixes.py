@@ -1129,7 +1129,7 @@ def check(session_name: str, commit_progress: bool = False, in_background: bool 
     session = frappe.get_doc(dry_run.SESSION_DOCTYPE, session_name)
     reply = report(session, summary)
     # What this check was of (file, mapping, fixes): the import's approval names it (#34402).
-    reply["validated_fingerprint"] = session.validated_fingerprint
+    reply["validated_fingerprint"] = dry_run.check_id(session.validated_fingerprint)
     kept = [
         {
             **{k: v for k, v in group.items() if k != "examples"},

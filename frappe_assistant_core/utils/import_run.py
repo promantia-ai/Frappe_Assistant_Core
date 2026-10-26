@@ -107,7 +107,7 @@ def check_card(
                 "those, so the approval card shows them."
             ).format(*checked)
         )
-    if cstr(fingerprint).strip() != cstr(session.validated_fingerprint):
+    if not dry_run.names_check(fingerprint, session.validated_fingerprint):
         raise ImportProblem(
             _(
                 "The file was checked again since: pass the last check's validated_fingerprint, "

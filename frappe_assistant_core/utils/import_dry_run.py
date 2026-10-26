@@ -1679,6 +1679,22 @@ def _replace_results_file(session, content: Dict[str, Any]) -> None:
     session.validation_results = file_doc.file_url
 
 
+#: How much of a check's fingerprint names it to FACO and on the approval card (#34545): it
+#: copied 64 characters and dropped one, twice, so an import took three approvals.
+CHECK_ID_LENGTH = 12
+
+
+def check_id(fingerprint: Optional[str]) -> Optional[str]:
+    """The check's name as FACO passes it to start_import: its fingerprint's first characters."""
+    return fingerprint[:CHECK_ID_LENGTH] if fingerprint else fingerprint
+
+
+def names_check(given: Any, fingerprint: Optional[str]) -> bool:
+    """Whether ``given`` (a check id, or the whole fingerprint) names the check ``fingerprint``."""
+    given = cstr(given).strip().lower()
+    return bool(fingerprint) and len(given) >= CHECK_ID_LENGTH and fingerprint.startswith(given)
+
+
 def fingerprint(session, file_doc) -> str:
     """Changes when anything the check depended on changes, so an import can tell
     whether it is importing what was checked."""
