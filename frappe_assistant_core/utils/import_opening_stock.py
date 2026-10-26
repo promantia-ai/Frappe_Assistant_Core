@@ -852,7 +852,7 @@ def _erpnext_check(session, ready: List[Ready], checker: _StockChecker) -> List[
             if error is None:
                 passed += remaining
                 break
-            message, kind = dry_run._message_of(error), type(error).__name__
+            kind, message = dry_run.refusal(error)
             named = re.search(r"Row\s*#\s*(\d+)", message)
             index = int(named.group(1)) if named else 0
             if named and 1 <= index <= len(remaining) and isolated < ISOLATE_LIMIT:

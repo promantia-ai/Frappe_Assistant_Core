@@ -148,6 +148,33 @@ class TestDryRunImport(BaseAssistantTest):
 
     # -- what a check must not leave behind -------------------------------------------
 
+    def test_a_row_with_no_customer_name_is_its_own_group(self):
+        # #34537, live: ERPNext names a Customer by its name and strips it before Frappe says it is
+        # required, so a blank-name row came back as "'NoneType' object has no attribute 'strip'"
+        session = self._session([[f"Named {self.tag}", GROUP, "Company", ""], ["", GROUP, "Company", "end"]])
+
+        result = self._check(session)
+
+        groups = {g["cause"]: g for g in result["groups"]}
+        self.assertIn(import_dry_run.CAUSE_REQUIRED_MISSING, groups, result["groups"])
+        group = groups[import_dry_run.CAUSE_REQUIRED_MISSING]
+        self.assertEqual(group["count"], 1)
+        self.assertIn("Customer Name", group["explanation"])
+        self.assertEqual([fix["action"] for fix in group["fixes"]], ["leave_out"])
+        self.assertNotIn("NoneType", frappe.as_json(result))
+
+    def test_an_internal_error_is_told_plainly_and_logged(self):
+        # #34537: a refusal never shows a Python exception's class or text; the server log has it
+        try:
+            None.strip()
+        except AttributeError as e:
+            with patch.object(import_dry_run.frappe, "logger") as logger:
+                kind, message = import_dry_run.refusal(e)
+
+        self.assertNotIn("AttributeError", kind + message)
+        self.assertNotIn("NoneType", message)
+        logger.return_value.error.assert_called_once()
+
     def test_a_check_adds_nothing_to_global_search(self):
         # Saving a Customer queues its search entry in Redis, which no rollback undoes.
         session = self._session([[f"Alpha {self.tag}", GROUP, "Company", ""]])

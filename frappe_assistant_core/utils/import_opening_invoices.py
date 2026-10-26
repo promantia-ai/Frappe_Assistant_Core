@@ -789,7 +789,7 @@ def _erpnext_check(
         if error is None:
             passed.append(line)
         else:
-            message, kind = dry_run._message_of(error), type(error).__name__
+            kind, message = dry_run.refusal(error)
             checker.fail(
                 line.row,
                 (dry_run.CAUSE_REJECTED, kind, message),

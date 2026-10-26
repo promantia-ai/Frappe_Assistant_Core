@@ -105,6 +105,11 @@ CAUSE_DUPLICATE_IN_FILE = "Duplicate in the file"
 CAUSE_ALREADY_EXISTS = "Already in ERPNext"
 CAUSE_SHARED_VALUE = "Shared value"  # a warning, never a group: the rows stay ready
 CAUSE_REJECTED = "Rejected by ERPNext"
+CAUSE_REQUIRED_MISSING = "Required value missing"  # a new record's required or naming field blank
+#: What a row refused with an internal error rather than a message is told (#34537): never Python's.
+UNEXPLAINED = (
+    "ERPNext refused these rows with an internal error, not a message. The server log has it in full."
+)
 # An update (#34005): the row's record isn't found, is found more than once, or another row has it.
 CAUSE_NO_MATCH = "No match"
 CAUSE_MANY_MATCHES = "More than one match"
@@ -574,6 +579,8 @@ class _Checker:
         self.seen_named: Dict[str, int] = {}
         # The title field, when it isn't the key: rows sharing its value are a warning, not a failure
         self.title_df = _title_field(session, header, self.key_df or self.named_df)
+        # A new record's mapped fields it can't be saved without: blank, the row is its own group
+        self.required = _required_fields(session, header) if self.import_type == INSERT else []
         self.seen_titles: Dict[str, int] = {}
         self.shared_rows: List[int] = []
         self.groups: Dict[Tuple, Dict[str, Any]] = {}
@@ -613,6 +620,7 @@ class _Checker:
             # otherwise show only once the typo is fixed, a second round of questions.
             problems += self._duplicate_problems(payload)
             problems += self._fetched_problems(payload)
+            problems += self._required_problems(payload)
         record, changed = self._record(payload), []
         if not problems and record:
             from frappe_assistant_core.utils import import_update
@@ -704,6 +712,24 @@ class _Checker:
             self.preview["samples"].append({"row": row, "record": record, "changes": changed})
 
     # Data Import's own value checks, made while it parsed the rows.
+    def _required_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
+        """A required field, or the one the record is named by, that the row leaves blank (#34537).
+        ERPNext can fail on it before Frappe says it is required: naming a Customer strips its
+        Customer Name, so a blank one failed as "'NoneType' object has no attribute 'strip'"."""
+        problems = []
+        for df in self.required:
+            if cstr(payload.doc.get(df.fieldname)).strip():
+                continue
+            label = _(df.label)
+            info = {
+                "cause": CAUSE_REQUIRED_MISSING,
+                "field": df.fieldname,
+                "label": label,
+                "message": _("{0} is empty.").format(label),
+            }
+            problems.append(((CAUSE_REQUIRED_MISSING, df.fieldname), info))
+        return problems
+
     def _parse_problems(self, payload, needs=(), from_files=None) -> List[Tuple[Tuple, Dict]]:
         problems = []
         planned = {entry[key].casefold() for entry in needs for key in ("name", "alias") if entry.get(key)}
@@ -1054,10 +1080,8 @@ class _Checker:
                 return [], self.importer.try_row(doc).name
             except Exception as e:
                 # ERPNext's refusals quote the row's value: one group per message, not per value
-                message, values = message_pattern(
-                    _message_of(e), _values_of([row.data for row in payload.rows])
-                )
-                kind = type(e).__name__
+                kind, text = refusal(e)
+                message, values = message_pattern(text, _values_of([row.data for row in payload.rows]))
                 return [
                     (
                         (CAUSE_REJECTED, kind, message),
@@ -1150,14 +1174,43 @@ NAMED_BY_SETTING = {
 
 
 def _name_field(doctype: str) -> Optional[str]:
-    """The field whose value a new ``doctype`` record is named by, if it is named by one."""
+    """The field whose value a new ``doctype`` record is named by, if it is named by one. The
+    setting is read as the controller reads it, from the global default, as _named_field does."""
     autoname = get_autoname_field(doctype)
     if autoname:
         return autoname.fieldname
     rule = NAMED_BY_SETTING.get(doctype)
-    if rule and frappe.db.get_single_value(rule[0], rule[1]) == rule[2]:
+    if rule and frappe.defaults.get_global_default(rule[1]) == rule[2]:
         return rule[3]
     return None
+
+
+def _required_fields(session, header) -> List[Any]:
+    """The mapped fields a new record can't be saved without: required with no default, and the
+    one it is named by (#34537)."""
+    named = _name_field(session.target_doctype)
+    return [
+        df
+        for fieldname, df in _mapped_fields(session, header).items()
+        if fieldname == named or (df.reqd and not df.default)
+    ]
+
+
+def refusal(e: Exception) -> Tuple[str, str]:
+    """(kind, message) of a row ERPNext refused: its message, or for an internal error (a Python
+    exception, not a message for the user) a plain sentence, the error going to the server log in
+    full (#34537). The Error Log can't take it: the row's savepoint is rolled back after."""
+    if message_texts(frappe.local.message_log) or isinstance(e, frappe.ValidationError):
+        return type(e).__name__, _message_of(e)
+    logged = getattr(frappe.local, "fac_logged_errors", None)
+    if logged is None:
+        logged = frappe.local.fac_logged_errors = set()
+    if (type(e).__name__, str(e)) not in logged:
+        logged.add((type(e).__name__, str(e)))
+        frappe.logger("frappe_assistant_core.import", allow_site=True).error(
+            "A row of an import check failed with an internal error:\n" + frappe.get_traceback()
+        )
+    return "InternalError", _(UNEXPLAINED)
 
 
 def _with_links(doc, needs) -> Dict[str, Any]:

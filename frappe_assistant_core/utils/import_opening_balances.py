@@ -801,7 +801,7 @@ def _erpnext_check(
     error = _entry_error(balances, ready)
     if error is None:
         return ready
-    message, kind = dry_run._message_of(error), type(error).__name__
+    kind, message = dry_run.refusal(error)
     for row in ready:
         checker.fail(
             row.row,

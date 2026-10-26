@@ -417,6 +417,10 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
             "{0}: a record with this {1} is already in ERPNext, so importing would duplicate it."
         ),
         dry_run.CAUSE_REJECTED: _("{0} rejected by ERPNext: {2}"),
+        dry_run.CAUSE_REQUIRED_MISSING: _(
+            "{0}: {1} is empty, and a new record can't be saved without it. Fill it in the file, "
+            "or leave the rows out."
+        ),
         dry_run.CAUSE_NO_MATCH: _("{0}: no record has this {1}, so there is nothing to update. {2}"),
         dry_run.CAUSE_MANY_MATCHES: _(
             "{0}: more than one record has this {1}, so FACO can't tell which. {2}"
