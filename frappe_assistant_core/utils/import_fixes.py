@@ -1142,7 +1142,11 @@ def ready_message(summary: Dict[str, Any]) -> str:
     update = summary.get("update")
     if update is not None:  # an update (#34005): records that change, and rows that wouldn't
         if not summary["ready"]:
-            return _("Nothing to update: every matched record already has the file's values.")
+            # start_import closes it (#34436): left Ready to Import, the sign-off lists it as open
+            return _(
+                "Nothing to update: every matched record already has the file's values. "
+                "start_import closes the session as Completed, sending nothing."
+            )
         text = _("The file is ready: {0} will be updated ({1}).").format(
             _("1 record") if summary["ready"] == 1 else _("{0} records").format(summary["ready"]),
             _("1 field change")

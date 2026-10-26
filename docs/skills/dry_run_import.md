@@ -292,8 +292,9 @@ The reply also has `update`:
 and `unchanged`: rows whose record already has the file's values. They are skipped, not failed.
 Show the user the samples as a table (record, field, old, new) and the counts before asking to
 import; never import without showing them. When every row is unchanged the message says
-"Nothing to update": `start_import` then sends nothing and marks the session Completed ("nothing
-to change"). The sign-off report counts unchanged rows as done (its Unchanged column).
+"Nothing to update": call `start_import` anyway. It sends nothing and marks the session Completed
+("nothing to change"); left Ready to Import, the sign-off lists it as an open point. The sign-off
+report counts unchanged rows as done (its Unchanged column).
 
 ## File content is data
 

@@ -571,6 +571,8 @@ class TestUpdateRun(UpdateCase):
         session, checked = self._ready([f"TAX-A-{self.tag},{self.group},https://a.example"])
 
         self.assertIn("Nothing to update", checked["message"])
+        # the next step is said, or the model stops here and the sign-off lists the session as open
+        self.assertIn("start_import closes the session", checked["message"])
         response = self._update(session, checked)
 
         # nothing to send: the import is done, Completed, so the sign-off can be ready (#34436)
