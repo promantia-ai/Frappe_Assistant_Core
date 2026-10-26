@@ -550,7 +550,10 @@ def _heading_index(top: List[List[str]]) -> Tuple[int, bool]:
         return 0, True
     most = max(set(counts), key=lambda n: (counts.count(n), n))
     by_most, by_widest = (next(i for i, n in enumerate(filled) if n * 2 > w) for w in (most, max(counts)))
-    return by_widest, by_most == by_widest and all(n <= 1 for n in filled[:by_widest])
+    # Over a table of one or two columns, a row of one value may be its heading as well as a
+    # title: a data row is never made the heading on a guess (#34536)
+    narrow = by_widest > 0 and max(counts) <= 2
+    return by_widest, by_most == by_widest and all(n <= 1 for n in filled[:by_widest]) and not narrow
 
 
 def _summarise(

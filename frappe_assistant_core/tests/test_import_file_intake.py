@@ -174,6 +174,15 @@ class TestFileIntake(BaseAssistantTest):
         )
         self.assertTrue(any("windows-1252" in message for message in steps), steps)
 
+    def test_a_single_value_over_two_columns_is_asked_about(self):
+        # #34536: "Cust Name" over rows of two values is a title only by a guess; it may be the
+        # heading of a one-column file whose cells hold the delimiter. The user is asked.
+        original = self._upload("names.csv", b"Cust Name\r\nAcme;Pune\r\nRavi;Delhi\r\n")
+
+        response = self._start_fails("header_row", file_id=original.name)
+
+        self.assertEqual(response["result"]["header_row_guess"], 2)
+
     def test_headings_on_row_1_are_read_as_before(self):
         original = self._upload("customers.csv", _csv([HEADINGS, ["A", "Retail", "India"]]).encode())
 
