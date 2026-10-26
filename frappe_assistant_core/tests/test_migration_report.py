@@ -247,7 +247,9 @@ class TestDataImportSession(run_tests.ImportRunCase):
     def test_a_migration_plan_is_reported_on_its_own(self):
         # #34549: the report could be narrowed by dates only, so earlier test runs came into it
         session, _checked, _result = self._partly_imported()
-        other, _ = self._ready_session()  # another run of the user's, the same day
+        # another session of the user's, the same day: an earlier test run, say
+        other_file = self._file("other.csv", f"Customer Name\nOther {self.tag}\n".encode())
+        other = self._run("start_import_session", {"file_url": other_file.file_url})["result"]["session_id"]
         # what plan_migration does with the plan's files: the plan is its first file's session
         frappe.db.set_value("FAC Import Session", session, "migration_plan", session)
 
