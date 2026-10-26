@@ -88,6 +88,21 @@ class TestRunMigrationPlan(ImportRunCase):
             [frappe.db.get_value(SESSION, s, "status") for s in (groups, items)], ["Completed"] * 2
         )
 
+    def test_the_decisions_are_taken_back_in_their_fence(self):
+        # plan_questions fences each decision line, as it quotes the files (#34438): passed back
+        # as the model read them, they are still the approval
+        from frappe_assistant_core.utils.untrusted_output import fence_fields
+
+        plan, _groups, _items = self._ready_plan()
+        figures = import_plan.card_figures(import_plan.get_plan(plan))
+        fenced = fence_fields({"approval": figures}, ["approval.decisions[]"])["approval"]["decisions"]
+        self.assertNotEqual(fenced, figures["decisions"])
+
+        response = self._approve(plan, decisions=fenced)
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(import_plan.get_plan(plan).status, "Completed")
+
     def test_another_users_session_in_the_plan_is_never_imported(self):
         plan, _groups, _items = self._ready_plan()
         g3 = f"G3 {self.tag}"

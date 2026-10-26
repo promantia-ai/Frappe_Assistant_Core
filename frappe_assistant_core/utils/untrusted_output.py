@@ -17,6 +17,7 @@ server fences them as it serialises the result, so tools and their tests keep pl
 """
 
 import json
+import re
 from typing import Any, Dict, Iterable, List
 
 from frappe_assistant_core.chat.api._untrusted import wrap_untrusted
@@ -75,7 +76,10 @@ def _fence(node: Dict[str, Any], parts: List[str], kind: str) -> None:
         key, _bracket, where = head[:-1].partition("[")
         field, _equals, value = where.partition("=")
         items = node.get(key)
-        if isinstance(items, list) and rest:
+        if isinstance(items, list) and not rest:
+            # "decisions[]": each line in its own fence, so the list stays a list of lines
+            node[key] = [wrap_untrusted(item, kind=kind) if isinstance(item, str) else item for item in items]
+        elif isinstance(items, list):
             node[key] = [
                 _fenced_item(item, rest, kind)
                 if not field or (isinstance(item, dict) and str(item.get(field)) == value)
@@ -93,6 +97,12 @@ def _fence(node: Dict[str, Any], parts: List[str], kind: str) -> None:
     value = node[head]
     text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
     node[head] = wrap_untrusted(text, kind=kind)
+
+
+def unfenced(text: str, kind: str = FENCE) -> str:
+    """``text`` without the fence wrap_untrusted put round it: a fenced value the model passes back."""
+    match = re.fullmatch(rf"\s*<{kind}>\n[^\n]*\n(.*)\n</{kind}>\s*", text, flags=re.DOTALL)
+    return match.group(1) if match else text
 
 
 def _fenced_item(item: Any, rest: List[str], kind: str) -> Any:

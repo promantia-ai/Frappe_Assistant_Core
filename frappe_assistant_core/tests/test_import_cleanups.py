@@ -226,10 +226,10 @@ class TestSeriesLockCommits(unittest.TestCase):
 
 class TestPlanFencing(unittest.TestCase):
     def test_only_what_the_files_say_is_fenced_in_the_plans_questions(self):
-        # #34438: FAC's own directions and the approval run_migration_plan is given back exactly
-        # were fenced as file content
+        # #34438: FAC's own directions were fenced as file content. The decisions quote the files,
+        # so each line is fenced on its own and the approval is still a list of lines.
         from frappe_assistant_core.plugins.core.tools.plan_questions import PlanQuestions
-        from frappe_assistant_core.utils.untrusted_output import fence_fields
+        from frappe_assistant_core.utils.untrusted_output import fence_fields, unfenced
 
         result = {
             "questions": [
@@ -244,19 +244,28 @@ class TestPlanFencing(unittest.TestCase):
                     "message": "The cut-off date: never guess it.",
                     "dates": {"stock.csv": "2026-03-31"},
                 },
+                {"kind": "waiting", "message": "Checked once items.csv is."},
             ],
-            "approval": {"files": 1, "decisions": ["Create Brand 'Acme'."]},
+            "approval": {
+                "files": 1,
+                "decisions": ["Create Brand 'Acme'.", "Rows that still fail: the plan stops."],
+            },
         }
 
         fenced = fence_fields(result, PlanQuestions().untrusted_fields)
 
-        fix, cut_off = fenced["questions"]
+        fix, cut_off, waiting = fenced["questions"]
         self.assertNotEqual(fix["message"], "Brand 'Acme' doesn't exist.")
         self.assertIn("Acme", fix["message"])
         self.assertNotEqual(fix["file_name"], "items.csv")
         self.assertEqual(cut_off["message"], "The cut-off date: never guess it.")
         self.assertNotEqual(cut_off["dates"], {"stock.csv": "2026-03-31"})
-        self.assertEqual(fenced["approval"], result["approval"])
+        self.assertNotEqual(waiting["message"], "Checked once items.csv is.")
+        self.assertEqual(fenced["approval"]["files"], 1)
+        decisions = fenced["approval"]["decisions"]
+        self.assertEqual(len(decisions), 2)
+        self.assertNotIn(decisions[0], result["approval"]["decisions"])
+        self.assertEqual([unfenced(line) for line in decisions], result["approval"]["decisions"])
 
 
 class TestSessionReuse(ImportToolTestCase):

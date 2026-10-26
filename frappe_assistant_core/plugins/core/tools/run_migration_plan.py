@@ -21,6 +21,7 @@ from frappe.utils import cstr
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.utils import import_plan
+from frappe_assistant_core.utils.untrusted_output import unfenced
 
 
 class RunMigrationPlan(BaseTool):
@@ -41,8 +42,14 @@ class RunMigrationPlan(BaseTool):
         )
         self.requires_permission = None  # checked on the plan; each file's import checks its own
         # File names and messages quote the user's files (#34003).
-        # The approval is given back exactly, so it isn't fenced (#34438); the files' names are.
-        self.untrusted_fields = ("files[].file_name", "files[].reason", "message", "error")
+        # The files' names, and each decision line, which quotes the files (#34438).
+        self.untrusted_fields = (
+            "files[].file_name",
+            "files[].reason",
+            "message",
+            "error",
+            "approval.decisions[]",
+        )
 
         self.inputSchema = {
             "type": "object",
@@ -94,7 +101,7 @@ class RunMigrationPlan(BaseTool):
         if not problem:
             figures = import_plan.card_figures(plan)
             asked = {key: arguments.get(key) for key in figures}
-            asked["decisions"] = [cstr(line).strip() for line in asked["decisions"] or []]
+            asked["decisions"] = [unfenced(cstr(line)).strip() for line in asked["decisions"] or []]
             if asked != figures:
                 return {
                     "success": False,

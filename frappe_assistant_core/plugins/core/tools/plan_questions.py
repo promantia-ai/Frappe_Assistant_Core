@@ -51,11 +51,15 @@ class PlanQuestions(BaseTool):
         )
         self.requires_permission = None  # checked on the plan and its sessions
         # What the user's files say is fenced (#34003): their names, columns and values. FAC's own
-        # directions in a question's message are not, nor the approval, which run_migration_plan
-        # is given back exactly (#34438). A fix question's message, explanation and fixes quote
-        # the file's values: a fix question's message is ERPNext's refusal quoting the file.
+        # directions in a question's message are not (#34438). A fix question's message is
+        # ERPNext's refusal quoting the file; an order, waiting or blocked one names the files.
+        # Each decision line of the approval is fenced on its own, so it is still a list of lines
+        # run_migration_plan is given back (it takes them with or without their fence).
         self.untrusted_fields = (
             "questions[kind=fix].message",
+            "questions[kind=order].message",
+            "questions[kind=waiting].message",
+            "questions[kind=blocked].message",
             "questions[kind=fix].explanation",
             "questions[kind=fix].fixes",
             "questions[].file_name",
@@ -68,6 +72,7 @@ class PlanQuestions(BaseTool):
             "problems",
             "applied",
             "error",
+            "approval.decisions[]",
         )
 
         self.inputSchema = {
