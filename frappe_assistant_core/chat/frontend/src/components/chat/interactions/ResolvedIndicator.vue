@@ -19,6 +19,7 @@
 			</svg>
 		</div>
 		<span class="resolved-label">{{ resolvedLabel }}</span>
+		<p v-if="typedAnswer" class="resolved-answer">{{ typedAnswer }}</p>
 	</div>
 </template>
 
@@ -36,6 +37,14 @@ const props = defineProps({
 const isPositive = computed(() =>
 	["approved", "trusted", "answered", "resolved"].includes(props.block.status),
 );
+
+// An answer the user typed rather than picked is theirs, in full, where the chat shows it (#34546)
+const typedAnswer = computed(() => {
+	const answer = props.block.userResponse;
+	if (props.interactionType === "approval" || !answer || Array.isArray(answer)) return "";
+	const text = String(answer);
+	return (props.block.options || []).includes(text) ? "" : text;
+});
 
 const resolvedLabel = computed(() => {
 	const status = props.block.status;
@@ -58,6 +67,7 @@ const resolvedLabel = computed(() => {
 			return `Approved: ${action}`;
 		return `Rejected: ${action}`;
 	}
+	if (typedAnswer.value) return "You answered:";
 	const answer = props.block.userResponse;
 	if (answer) {
 		const display = Array.isArray(answer) ? answer.join(", ") : String(answer);
@@ -69,8 +79,17 @@ const resolvedLabel = computed(() => {
 </script>
 
 <style scoped>
+.resolved-answer {
+	flex-basis: 100%;
+	margin: 0.125rem 0 0 1.25rem;
+	white-space: pre-wrap;
+	font-size: 0.8125rem;
+	color: var(--ql-text);
+}
+
 .interaction-resolved {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 0.375rem;
 	padding: 0.1875rem 0.25rem;
