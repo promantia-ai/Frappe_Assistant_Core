@@ -582,6 +582,27 @@ class TestUpdateRun(UpdateCase):
         self.assertEqual((doc.status, len(doc.data_imports)), ("Completed", 0))
 
 
+class TestMatchingWithoutTheCollation(UpdateCase):
+    def test_a_key_matches_whatever_its_case_where_the_database_compares_text_exactly(self):
+        # #34438, Paul's review of 49da112: "tax-a" found "TAX-A" only by MariaDB's case-insensitive
+        # collation. This stands in for a database that compares text exactly (PostgreSQL): an
+        # "in" filter on the key matches its exact spelling only.
+        session, mapped = self._session([f"TAX-A-{self.tag},{self.group},https://a.example"])
+        self.assertTrue(mapped["success"], mapped)
+        rows = [list(KEYED), [f"  tax-a-{self.tag} ", self.group, "https://a.example"]]
+        real = frappe.get_list
+
+        def exact(doctype, *args, filters=None, **kwargs):
+            keyed = [f for f in filters or [] if f[1] == "in" and f[0] != "name"]
+            rows = real(doctype, *args, filters=[f for f in filters or [] if f not in keyed], **kwargs)
+            return [r for r in rows if all(r.get(f[0]) in f[2] for f in keyed)]
+
+        with unittest.mock.patch.object(import_update.frappe, "get_list", side_effect=exact):
+            found = import_update.match_records(self._doc(session), rows)
+
+        self.assertEqual(found[2], [self.customers["a"]])
+
+
 class TestUpdateInAPlan(UpdateCase):
     def test_an_all_unchanged_update_in_a_plan_is_completed(self):
         # #34436, Paul's review of 49da112: the plan skipped a file with no row to send, so the

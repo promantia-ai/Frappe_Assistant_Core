@@ -24,6 +24,7 @@ from frappe import _
 from frappe.core.doctype.data_import.importer import get_id_field
 from frappe.model.meta import get_field_precision
 from frappe.utils import cint, cstr, flt, get_datetime, getdate
+from pypika.functions import Lower, Trim
 
 UPDATE = "Update Existing Records"
 ID_HEADER = "FACO Record ID"  # not a header Data Import maps on its own, and not the file's
@@ -133,6 +134,20 @@ def _positions(session) -> Dict[str, int]:
     return {field: int(pos) for pos, field in mapped.items() if field != DONT_IMPORT}
 
 
+def _first_key_filter(doctype: str, field: str, df, keys: List[str]) -> list:
+    """The filter that finds the records whose first key is one of ``keys``. A text key is
+    compared trimmed and lower-cased by the query itself, as _norm does: matching on the
+    collation, it found "TAX-A" for "tax-a" on MariaDB only (#34438). get_list then keeps the
+    records the user may read."""
+    if df and df.fieldtype in ("Date", *NUMBER_TYPES):
+        return [field, "in", keys]
+    table = frappe.qb.DocType(doctype)
+    names = (
+        frappe.qb.from_(table).select(table.name).where(Lower(Trim(table[field])).isin(keys)).run(pluck=True)
+    )
+    return ["name", "in", names or [""]]
+
+
 def match_records(session, rows: List[list]) -> Dict[int, List[str]]:
     """Each row's matching records, by row number (the header is row 1): one name when the
     match is clean; none, or several, when it isn't. Only records the user may read match."""
@@ -151,7 +166,7 @@ def match_records(session, rows: List[list]) -> Dict[int, List[str]]:
         chunk = firsts[start : start + MATCH_CHUNK]
         for record in frappe.get_list(
             session.target_doctype,
-            filters=[[fields[0], "in", chunk]],
+            filters=[_first_key_filter(session.target_doctype, fields[0], dfs[0], chunk)],
             fields=list(dict.fromkeys(["name", *fields])),
             limit_page_length=0,
         ):
