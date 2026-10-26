@@ -122,8 +122,8 @@ check listed, created with `create_document`, `documents` and `import_session`.
 
 ## Keep the migration in this conversation
 
-Never hand a migration, or any step of it, to a helper task (`delegate`), in Auto mode too: the
-helpers don't have the import tools, and the user's answers and approvals belong here. Run every
+Never hand a migration, or any step of it, to a helper task (delegating it), in Auto mode too:
+the helpers don't have the import tools, and the user's answers and approvals belong here. Run every
 import tool yourself, in this conversation, one step after another.
 
 ## What goes wrong without this skill

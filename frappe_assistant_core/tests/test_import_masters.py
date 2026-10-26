@@ -315,6 +315,9 @@ class TestImportMasters(BaseAssistantTest):
                 "data": {"customer_group_name": loop, "parent_customer_group": self.group},
             }
         ]
+        for record in records:  # each holds the other, so each is sent as a group
+            if record["doctype"] == "Customer Group":
+                record["data"]["is_group"] = 1
 
         response = self._create(session, records)
 

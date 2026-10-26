@@ -328,7 +328,7 @@ class TestSystemSkillManifest(BaseAssistantTest):
         content = _skill_content("migrate_data.md")
         self.assertIn(DELEGATION_HEADING, content)
         rule = _one_line(content.split(DELEGATION_HEADING)[1].split("\n## ")[0])
-        self.assertIn("Never hand a migration, or any step of it, to a helper task (`delegate`)", rule)
+        self.assertIn("Never hand a migration, or any step of it, to a helper task (delegating it)", rule)
         self.assertIn("helpers don't have the import tools", rule)
 
     def test_migrate_data_never_replaces_a_users_value_unasked(self):
