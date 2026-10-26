@@ -159,6 +159,19 @@ describe("ApprovalCard for other tools", () => {
 	});
 });
 
+describe("ApprovalCard for a migration plan's run", () => {
+	// #34547: the card read "Decisions: 2 items", behind "+ 2 more", though the user approves them
+	it("lists every decision as a line, in sight", () => {
+		const decisions = ["Create GST HSN Code 82041100.", "Rows that still fail when their file comes up: the plan stops."];
+		const input = { plan: "IMP-1", files: 3, rows: 11, masters: 1, cut_off: "", decisions };
+		const block = { id: "t9", tool_name: "run_migration_plan", input, interrupts };
+		const wrapper = mount(ApprovalCard, { props: { block } });
+
+		expect(wrapper.findAll(".value-lines li").map((li) => li.text())).toEqual(decisions);
+		expect(wrapper.text()).not.toContain("2 items");
+	});
+});
+
 describe("ApprovalCard for customisations", () => {
 	const lines = (n) => Array.from({ length: n }, (_, i) => `line_${i} = ${i}`).join("\n");
 	const scriptBlock = (data, tool = "create_document") => ({

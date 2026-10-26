@@ -33,6 +33,12 @@
 			:language="codeLanguage(key, doctype)"
 			:previous="previousCode(key)"
 		/>
+		<div v-for="[key, lines] in listRows" :key="key" class="value-list">
+			<span class="field-key">{{ formatKey(key) }}</span>
+			<ul class="value-lines">
+				<li v-for="(line, i) in lines" :key="i">{{ line }}</li>
+			</ul>
+		</div>
 		<ChildTable v-for="[key, rows] in tableRows" :key="key" :label="key" :rows="rows" />
 		<ApprovalNotes :block="block" />
 	</div>
@@ -56,6 +62,7 @@ import {
 	isMoneyKey,
 	isCodeKey,
 	isChildTable,
+	isTextList,
 	isLongValue,
 	codeLanguage,
 	splitDetailFields,
@@ -84,10 +91,12 @@ const codeRows = computed(() =>
 	Object.entries(flat.value).filter(([k, v]) => isCodeKey(k) && typeof v === "string" && v !== ""),
 );
 const tableRows = computed(() => Object.entries(flat.value).filter(([, v]) => isChildTable(v)));
+// Every line of a list in sight, not "2 items" behind "+ more": the user approves them (#34547)
+const listRows = computed(() => Object.entries(flat.value).filter(([, v]) => isTextList(v)));
 const plainFields = computed(() =>
 	Object.fromEntries(
 		Object.entries(flat.value).filter(
-			([k, v]) => !codeRows.value.some(([ck]) => ck === k) && !isChildTable(v),
+			([k, v]) => !codeRows.value.some(([ck]) => ck === k) && !isChildTable(v) && !isTextList(v),
 		),
 	),
 );
@@ -108,6 +117,18 @@ function previousCode(key) {
 </script>
 
 <style scoped>
+.value-list {
+	grid-column: 1 / -1;
+	padding: 6px 0 0;
+}
+
+.value-lines {
+	margin: 4px 0 0;
+	padding-left: 18px;
+	font-size: 12px;
+	color: var(--ql-text);
+}
+
 .approval-table {
 	display: grid;
 	grid-template-columns: auto 1fr;

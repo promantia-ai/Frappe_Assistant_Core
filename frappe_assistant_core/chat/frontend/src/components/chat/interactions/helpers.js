@@ -57,6 +57,11 @@ export function isChildTable(value) {
 	return Array.isArray(value) && value.length > 0 && value.every(isPlainObject);
 }
 
+/** A list of sentences, such as a migration plan's decisions: shown line by line (#34547). */
+export function isTextList(value) {
+	return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string");
+}
+
 /**
  * Flatten a tool input dict for human display.
  *
