@@ -159,6 +159,21 @@ class TestFileIntake(BaseAssistantTest):
             rows, [["Cust Name"], ["MIGTEST Semi; One"], ["MIGTEST Semi; Two"], ["Sharma & Sons; Pune"]]
         )
 
+    def test_a_csv_read_as_windows_1252_says_so(self):
+        # #34541: a file that isn't UTF-8 is read by a guess, which the user checks
+        original = self._upload(
+            "customers.csv", _csv([HEADINGS[:3], ["Crème", "Señor", "£5"]]).encode("cp1252")
+        )
+
+        result = self._start(file_id=original.name)
+
+        self.assertEqual(result["sample_rows"][0][:3], ["Crème", "Señor", "£5"])
+        self.assertIn("windows-1252", result["note"])
+        steps = frappe.get_all(
+            "FAC Import Session Step", filters={"parent": result["session_id"]}, pluck="message"
+        )
+        self.assertTrue(any("windows-1252" in message for message in steps), steps)
+
     def test_headings_on_row_1_are_read_as_before(self):
         original = self._upload("customers.csv", _csv([HEADINGS, ["A", "Retail", "India"]]).encode())
 

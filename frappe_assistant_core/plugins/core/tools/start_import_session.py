@@ -26,6 +26,7 @@ from frappe.utils import cint
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_write
 from frappe_assistant_core.core.base_tool import BaseTool
 from frappe_assistant_core.utils.import_session import (
+    GUESSED_ENCODINGS,
     HOLDING_STATUSES,
     FileProblem,
     attach_session_copy,
@@ -241,6 +242,13 @@ class StartImportSession(BaseTool):
                     "replies count rows from the headings, so row 2 is the first row under them."
                 ).format(chosen.header_row)
             )
+        if chosen.encoding in GUESSED_ENCODINGS:
+            notes.append(
+                _(
+                    "The file isn't UTF-8: it was read as {0}. Check that accented letters look right "
+                    "in sample_rows; if they don't, save it as CSV UTF-8 and upload it again."
+                ).format(chosen.encoding)
+            )
         ignored = [s.name for s in sheets if s is not chosen and s.row_count]
         if ignored:
             notes.append(
@@ -315,6 +323,8 @@ class StartImportSession(BaseTool):
         read = _("Read {0} rows and {1} columns{2}.").format(chosen.row_count, len(chosen.columns), where)
         if chosen.header_row > 1:
             read += " " + _("The headings are on row {0}.").format(chosen.header_row)
+        if chosen.encoding in GUESSED_ENCODINGS:
+            read += " " + _("It isn't UTF-8: read as {0}.").format(chosen.encoding)
         session.log_step("Read File", "Success", read, rows_ok=chosen.row_count)
         engine_write(session).insert()  # the engine's own session (#34400)
         attach_session_copy(copy, session.name)

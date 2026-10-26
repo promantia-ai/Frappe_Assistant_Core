@@ -63,6 +63,7 @@ class SheetSummary:
     header_sure: bool = True  # False when rows above the headings hold several values too
     first_rows: List[List[str]] = field(default_factory=list)  # the top rows, when not on row 1
     rows: Optional[List[List[str]]] = None  # the headings and every row under them, when kept
+    encoding: Optional[str] = None  # a CSV's, as read (csv_encoding); never stored
 
     def as_dict(self) -> Dict[str, Any]:
         """What the session stores: no sample rows, so no data from the file. The headings' row
@@ -252,6 +253,8 @@ def read_spreadsheet(
             mine = extension == "csv" or (name == sheet if sheet else not found)
             sheets.append(_summarise(name, rows, header_row if mine else None, keep_rows and mine))
         chosen = _choose(sheets, sheet if extension != "csv" else None)
+        if extension == "csv" and not is_session_copy(file_doc):
+            chosen.encoding = csv_encoding(content)
     except FileProblem:
         raise
     except Exception as e:
@@ -331,21 +334,34 @@ def decode_csv(content: bytes, fallbacks: Tuple[str, ...] = ("windows-1250", "wi
     if content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return content.decode("utf-16")
     if set(fallbacks) == {"windows-1250", "windows-1252"}:
-        try:
-            return content.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            pass
-        central = content.decode("windows-1250", errors="replace")
-        western = content.decode("windows-1252", errors="replace")
-        central_letters = sum(1 for c in central if c in CENTRAL_EUROPEAN)
-        western_letters = sum(1 for c in western if c in WESTERN_EUROPEAN)
-        return central if central_letters > western_letters else western
+        encoding = csv_encoding(content)
+        return content.decode("utf-8-sig" if encoding == "utf-8" else encoding, errors="replace")
     for encoding in ("utf-8-sig", *fallbacks[:-1]):
         try:
             return content.decode(encoding)
         except UnicodeDecodeError:
             continue
     return content.decode(fallbacks[-1], errors="replace")
+
+
+def csv_encoding(content: bytes) -> str:
+    """The encoding decode_csv reads a CSV in: utf-16 (by its byte-order mark), utf-8, or, for a
+    file that isn't, windows-1250 when it gives more Central European letters than windows-1252
+    gives Western ones, else windows-1252."""
+    if content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return "utf-16"
+    try:
+        content.decode("utf-8-sig")
+        return "utf-8"
+    except UnicodeDecodeError:
+        pass
+    central = sum(1 for c in content.decode("windows-1250", errors="replace") if c in CENTRAL_EUROPEAN)
+    western = sum(1 for c in content.decode("windows-1252", errors="replace") if c in WESTERN_EUROPEAN)
+    return "windows-1250" if central > western else "windows-1252"
+
+
+#: What a CSV read in one of these was guessed to be written in: the user is told (#34541).
+GUESSED_ENCODINGS = ("windows-1250", "windows-1252")
 
 
 def csv_delimiter(text: str) -> str:
