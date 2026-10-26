@@ -79,3 +79,4 @@ frappe_assistant_core.patches.v3_2.backfill_fac_chat_conversations
 # Version 3.2.0 - the import undo tools were removed (#34002): delete the stored settings of
 # preview_import_undo and undo_import (FAC Tool Configuration rows); safe to run twice
 frappe_assistant_core.patches.v3_2.remove_import_undo_tool_configurations
+frappe_assistant_core.patches.v3_2.end_import_undo_sessions

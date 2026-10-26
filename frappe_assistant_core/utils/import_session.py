@@ -636,8 +636,6 @@ HOLDING_STATUSES = (
     "Importing",
     "Partially Completed",
     "Failed",
-    "Undoing",
-    "Partially Undone",
 )
 
 

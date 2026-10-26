@@ -397,6 +397,21 @@ class TestImportRun(ImportRunCase):
         self.assertNotIn("runs", second["result"])
         self.assertNotIn("In all", second["result"]["message"])
 
+    def test_an_import_whose_file_is_gone_still_records_its_result(self):
+        # #34538: the Data Import's file can go from disk. Its counts are on the Data Import Log,
+        # but record_result raised on the file each time resume() called it, so the session could
+        # never leave Importing.
+        session, checked = self._ready_session()
+        with self._each_row_commits():
+            data_import = self._import(session, checked)["result"]["data_import"]
+        file_url = frappe.db.get_value("Data Import", data_import, "import_file")
+        os.remove(frappe.get_doc("File", {"file_url": file_url}).get_full_path())
+
+        result = import_run.record_result(session, data_import)
+
+        self.assertEqual(result["created"], 3)
+        self.assertEqual(self._doc(session).status, "Completed")
+
     def test_a_timed_out_import_says_to_continue(self):
         session, checked = self._ready_session()
         with patch.object(import_run, "enqueue", autospec=True):  # queued, not run yet

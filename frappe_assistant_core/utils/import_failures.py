@@ -33,7 +33,12 @@ from frappe.utils import cstr, get_url
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
 from frappe_assistant_core.utils import import_fixes
-from frappe_assistant_core.utils.import_session import FORMULA_START, read_sheet_rows, readable_session_file
+from frappe_assistant_core.utils.import_session import (
+    FORMULA_START,
+    FileProblem,
+    read_sheet_rows,
+    readable_session_file,
+)
 
 #: The columns the failed-rows file adds after the user's own. A file sent back with them is
 #: the same file: they are not imported.
@@ -159,7 +164,12 @@ def _import_file_rows(data_import: str) -> List[List[str]]:
     file_doc = frappe.get_doc("File", files[0])
     if not frappe.has_permission("File", "read", doc=file_doc):
         return []
-    return read_sheet_rows(file_doc, None)
+    try:
+        return read_sheet_rows(file_doc, None)
+    except FileProblem:
+        # Gone from disk, say: the Data Import Log still has the counts, so the result is
+        # recorded with them, and the session doesn't stay Importing for good (#34538).
+        return []
 
 
 # -- explaining what failed -----------------------------------------------------------------

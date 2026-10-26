@@ -207,3 +207,25 @@ def get_permission_query_conditions(user=None):
 
 def has_permission(doc, user=None, permission_type=None):
     return _doc_owner_or_admin(doc, user)
+
+
+#: A session in one of these has ended: there is nothing to release.
+ENDED = ("Completed", "Cancelled", "Undone")
+
+
+@frappe.whitelist(methods=["POST"])
+def release(session: str) -> None:
+    """End a session no tool moves on any more, for a System Manager (#34538): an import whose
+    worker died, say. It is Cancelled, so it stops holding the user's file; nothing it imported is
+    undone. The engine writes it, as only it may (validate refuses a hand edit)."""
+    frappe.only_for("System Manager")
+    doc = engine_session(session)
+    if doc.status in ENDED:
+        frappe.throw(_("Import session {0} has ended already ({1}).").format(session, _(doc.status)))
+    doc.status = "Cancelled"
+    doc.log_step(
+        "Release",
+        "Warning",
+        _("Released by {0}: the session is cancelled. Records it imported stay.").format(frappe.session.user),
+    )
+    doc.save(ignore_permissions=True)

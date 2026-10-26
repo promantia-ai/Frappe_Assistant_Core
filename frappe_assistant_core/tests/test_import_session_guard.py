@@ -427,3 +427,43 @@ class TestInserts(SessionGuardCase):
             frappe.client.insert({"doctype": SESSION, "user": other})
 
         self.assertFalse(frappe.get_all(SESSION, filters={"user": other}))
+
+
+class TestStuckSessions(SessionGuardCase):
+    """#34538: a session no tool moves on any more can be ended, through the engine."""
+
+    def test_the_patch_ends_the_sessions_undo_left_behind(self):
+        from frappe_assistant_core.patches.v3_2 import end_import_undo_sessions
+        from frappe_assistant_core.utils.import_session import HOLDING_STATUSES
+
+        sessions = [self._failed_session()[0], self._failed_session()[0]]
+        frappe.set_user("Administrator")
+        # What a session undoing, or partly undone, when undo was removed still holds on a site.
+        for name, status in zip(sessions, ("Undoing", "Partially Undone")):
+            frappe.db.set_value(SESSION, name, "status", status)
+
+        end_import_undo_sessions.execute()
+
+        for name in sessions:
+            doc = frappe.get_doc(SESSION, name)
+            self.assertEqual(doc.status, "Partially Completed")
+            self.assertIn("undo", doc.steps[-1].message)
+        self.assertFalse({"Undoing", "Partially Undone"} & set(HOLDING_STATUSES))
+
+    def test_a_system_manager_can_release_a_stuck_session(self):
+        from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import release
+
+        session, _checked = self._failed_session()
+        frappe.db.set_value(SESSION, session, "status", "Importing")  # its worker died mid-import
+
+        with self.assertRaises(frappe.PermissionError):
+            release(session)  # not its owner: an import's state is the engine's
+
+        frappe.set_user(self.make_throwaway_user("manager", roles=("System Manager",)))
+        release(session)
+
+        doc = frappe.get_doc(SESSION, session)
+        self.assertEqual(doc.status, "Cancelled")
+        self.assertIn("Released", doc.steps[-1].message)
+        with self.assertRaises(frappe.ValidationError):
+            release(session)  # it has ended already
