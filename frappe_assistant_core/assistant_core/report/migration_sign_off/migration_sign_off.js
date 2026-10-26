@@ -15,6 +15,12 @@ frappe.query_reports["Migration Sign-off"] = {
 			fieldtype: "Date",
 		},
 		{
+			fieldname: "migration_plan",
+			label: __("Migration Plan"),
+			fieldtype: "Data",
+			description: __("A migration plan's id: its files only, whatever the dates."),
+		},
+		{
 			fieldname: "import_session",
 			label: __("Import Sessions"),
 			fieldtype: "Data",

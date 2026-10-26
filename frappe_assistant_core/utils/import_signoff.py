@@ -353,6 +353,17 @@ def session_summary(session) -> Dict[str, Any]:
 # -- the migration ----------------------------------------------------------------------------
 
 
+def plan_sessions(plan: str) -> List[str]:
+    """A migration plan's sessions, the plan's own first (#34549): a migration reported on its own,
+    whatever its dates, without earlier runs of the same files."""
+    names = frappe.get_list(
+        dry_run.SESSION_DOCTYPE, filters={"migration_plan": plan}, pluck="name", order_by="creation asc"
+    )
+    if not names:
+        raise frappe.DoesNotExistError(_("Migration plan {0} not found, or you can't read it.").format(plan))
+    return names
+
+
 def sessions_of(
     names: Optional[List[str]] = None,
     user: Optional[str] = None,
@@ -899,6 +910,8 @@ def execute(filters: Optional[Dict[str, Any]] = None):
     ``document`` filter, the message is the whole report as a document, for the PDF."""
     filters = frappe._dict(filters or {})
     names = [name.strip() for name in cstr(filters.get("import_session")).split(",") if name.strip()]
+    if not names and cstr(filters.get("migration_plan")).strip():
+        names = plan_sessions(cstr(filters.get("migration_plan")).strip())
     sessions = sessions_of(
         names or None, filters.get("user"), filters.get("from_date"), filters.get("to_date")
     )

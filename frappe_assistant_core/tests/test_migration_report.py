@@ -244,6 +244,18 @@ class TestDataImportSession(run_tests.ImportRunCase):
 
         self.assertEqual([row["item"] for row in section(result["data"], "Sessions")], [session])
 
+    def test_a_migration_plan_is_reported_on_its_own(self):
+        # #34549: the report could be narrowed by dates only, so earlier test runs came into it
+        session, _checked, _result = self._partly_imported()
+        other, _ = self._ready_session()  # another run of the user's, the same day
+        # what plan_migration does with the plan's files: the plan is its first file's session
+        frappe.db.set_value("FAC Import Session", session, "migration_plan", session)
+
+        result = self._report(migration_plan=session, from_date="2050-01-01", to_date="2050-12-31")
+
+        self.assertEqual([row["item"] for row in section(result["data"], "Sessions")], [session])
+        self.assertNotIn(other, frappe.as_json(result["data"]))
+
     def test_a_session_the_user_cannot_read_is_refused(self):
         session, _checked = self._ready_session()
         frappe.set_user(self.make_throwaway_user("signoff", roles=("Desk User",)))
