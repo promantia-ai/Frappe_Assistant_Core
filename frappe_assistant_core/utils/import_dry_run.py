@@ -194,13 +194,29 @@ def link_site_file(session, file_doc, sheet_url: Optional[str] = None) -> None:
     ``sheet_url`` was read into. Like a new session, the session reads its own copy of it (#34405)."""
     from frappe_assistant_core.utils.import_failures import own_columns
 
-    try:
-        read = read_spreadsheet(file_doc, session.sheet or None, keep_rows=True)
-    except FileProblem:
-        # A corrected file saved from the CSV FACO gave has its own sheet name: its columns decide.
-        read = read_spreadsheet(file_doc, keep_rows=True)
+    def read_with(header_row=None):
+        try:
+            return read_spreadsheet(file_doc, session.sheet or None, header_row=header_row, keep_rows=True)
+        except FileProblem:
+            # A corrected file saved from the CSV FACO gave has its own sheet name: its columns decide.
+            return read_spreadsheet(file_doc, header_row=header_row, keep_rows=True)
+
+    read = read_with()
     # Older sessions stored their headings as written; the copy's are unique (#34405).
     expected = unique_headers(_session_columns(session))
+    stored = next(
+        (s for s in frappe.parse_json(session.sheets or "[]") or [] if s.get("name") == session.sheet), {}
+    )
+    if (
+        expected
+        and own_columns(read.chosen.columns) != own_columns(expected)
+        and stored.get("header_row", 1) > 1
+    ):
+        # The guess missed the headings: the corrected file has the title rows the first one had (#34541)
+        try:
+            read = read_with(stored["header_row"])
+        except FileProblem:
+            pass
     columns = read.chosen.columns
     if expected and own_columns(columns) != own_columns(expected):
         raise FileProblem(
@@ -1579,10 +1595,13 @@ def message_pattern(message: str, values: Iterable[Any]) -> Tuple[str, List[str]
     with 400 bad values would be 400 groups. The row's own values of three characters or more,
     and row numbers, read as QUOTED instead."""
     text, found = cstr(message), []
-    for value in sorted(
-        {cstr(v).strip() for v in values if len(cstr(v).strip()) >= 3}, key=len, reverse=True
-    ):
-        pattern = re.compile(rf"(?<!\w){re.escape(value)}(?!\w)")
+    for value in sorted({cstr(v).strip() for v in values if cstr(v).strip()}, key=len, reverse=True):
+        if frappe.db.exists("DocType", value):
+            continue  # "Customer" in a row is also ERPNext's own word in its message (#34541)
+        if len(value) >= 3:
+            pattern = re.compile(rf"(?<!\w){re.escape(value)}(?!\w)")
+        else:  # a short value only where the message quotes it, or it matches inside words
+            pattern = re.compile(rf"(?<=['\"‘“]){re.escape(value)}(?=['\"’”])")
         if pattern.search(text):
             text = pattern.sub(QUOTED, text)
             found.append(value)

@@ -672,8 +672,9 @@ def _currency_precision() -> int:
 
 
 def rounding_allowed(precision: int) -> float:
-    """How far a row's posted value may be from the file's, as rounding, at ``precision``."""
-    return flt(ROUNDING_UNITS * 10**-precision, precision)
+    """How far a row's posted value may be from the file's, as rounding, at ``precision``: never
+    more than one whole unit, so a currency without decimals isn't allowed 100 (#34541)."""
+    return flt(min(ROUNDING_UNITS * 10**-precision, 1), precision)
 
 
 def _totals(ready: List[Ready]) -> Dict[str, Any]:

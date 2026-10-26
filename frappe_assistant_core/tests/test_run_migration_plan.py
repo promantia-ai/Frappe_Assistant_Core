@@ -562,6 +562,20 @@ class TestAPlanWithALargeFile(ImportRunCase):
         self.assertEqual(self._brands(), [])
         self.assertTrue(kept and all(kept), kept)
 
+    def test_a_plan_checks_a_costly_file_in_the_background_as_dry_run_import_does(self):
+        # #34541: the plan decided by the row count, so 300 rows of a submittable DocType (costing
+        # 600, check_cost) were checked in the request, past its time limit
+        plan, session = self._brands_plan(3)
+        answers = [{"id": "plan:failure_rule", "rule": "leave_out"}]
+
+        with patch.object(
+            import_dry_run, "check_cost", return_value=import_dry_run.BACKGROUND_ROWS + 1
+        ), patch.object(import_dry_run, "enqueue") as queued:
+            asked = self._run("plan_questions", {"plan": plan, "answers": answers})["result"]
+
+        queued.assert_called_once()
+        self.assertIn("checking", [q["kind"] for q in asked["questions"]])
+
     def test_a_large_file_is_still_refused_outside_a_plan(self):
         plan, session = self._brands_plan(import_dry_run.BACKGROUND_ROWS + 1)
 

@@ -118,6 +118,18 @@ def read_documents(arguments: Dict[str, Any], single_inputs: tuple, with_name: b
     return documents
 
 
+def internal_keys_refusal(doctype: Any, data: Any) -> Optional[Dict[str, Any]]:
+    """The reply refusing one record (create_document or update_document without documents)
+    whose data sets Frappe's own keys, as a list's records are refused; else None (#34541)."""
+    if not isinstance(data, dict):
+        return None
+    try:
+        _refuse_internal_keys([{"doctype": doctype, "data": data}])
+    except BatchProblem as e:
+        return e.as_result()
+    return None
+
+
 def _refuse_internal_keys(documents: List[Dict[str, Any]]) -> None:
     """A key that starts with "_" is Frappe's own (_assign, _comments, _liked_by, _user_tags)
     and is set on the document like any field: refused for every role, before anything is

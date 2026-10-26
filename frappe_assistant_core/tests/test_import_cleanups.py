@@ -340,6 +340,17 @@ class TestSessionReuse(ImportToolTestCase):
         self.assertTrue(again["reused"])
         self.assertEqual(frappe.db.count("FAC Import Session", {"original_file": self.file_doc.name}), 1)
 
+    def test_the_target_a_second_call_names_is_kept(self):
+        # #34541: a session opened without a target, carried on with by a call that names one,
+        # kept no target
+        first = self._start("chat-1")
+        again = self._start("chat-1", target_doctype="Customer")
+
+        self.assertEqual(again["session_id"], first["session_id"])
+        self.assertEqual(
+            frappe.db.get_value("FAC Import Session", first["session_id"], "target_doctype"), "Customer"
+        )
+
     def test_another_chat_or_another_import_opens_its_own(self):
         first = self._start("chat-1")
 
@@ -350,3 +361,40 @@ class TestSessionReuse(ImportToolTestCase):
 
     def test_outside_fac_chat_each_call_opens_its_own(self):
         self.assertNotEqual(self._start(None)["session_id"], self._start(None)["session_id"])
+
+
+class TestThirdReview(unittest.TestCase):
+    """Paul's third review of 49da112 (#34541): the small defects with no database to set up."""
+
+    def test_a_western_european_csv_is_read_as_windows_1252(self):
+        from frappe_assistant_core.utils.import_session import decode_csv
+
+        western = "Crème brûlée,Señor,£5\n"
+        central = "Łódź,Gdańsk,Žižkov\n"
+        self.assertEqual(decode_csv(western.encode("cp1252")), western)  # was "Crčme brűlée,Seńor,Ł5"
+        self.assertEqual(decode_csv(central.encode("cp1250")), central)
+
+    def test_rounding_is_at_most_one_unit_of_the_currency(self):
+        from frappe_assistant_core.utils.import_opening_stock import rounding_allowed
+
+        self.assertEqual([rounding_allowed(p) for p in (0, 2, 3)], [1, 1.0, 0.1])  # 0 decimals: was 100
+
+    def test_a_refusal_groups_short_values_where_quoted_and_never_masks_a_doctype(self):
+        from frappe_assistant_core.utils.import_dry_run import QUOTED, message_pattern
+
+        text, found = message_pattern("Value 'xy' isn't allowed for Customer Type", ["xy", "Customer"])
+        self.assertEqual((text, found), (f"Value '{QUOTED}' isn't allowed for Customer Type", ["xy"]))
+        # a short value the message doesn't quote is a part of other words, not the value
+        self.assertEqual(message_pattern("A row is in ERPNext", ["in"]), ("A row is in ERPNext", []))
+
+    def test_an_invoice_files_parties_are_looked_up_once(self):
+        from frappe_assistant_core.utils import import_opening_invoices
+
+        frappe.local.fac_found_parties = None
+        with patch.object(
+            import_opening_invoices, "find_party", return_value=frappe._dict(name="Acme")
+        ) as find:
+            for _ in range(3):
+                import_opening_invoices._found_party("Customer", "acme")
+        self.assertEqual(find.call_count, 1)
+        frappe.local.fac_found_parties = None

@@ -175,6 +175,9 @@ class DocumentCreate(BaseTool):
                 "success": False,
                 "error": _("Pass doctype and data for one record, or documents for several."),
             }
+        refused = document_batch.internal_keys_refusal(doctype, data)
+        if refused:
+            return refused
         submit = arguments.get("submit", False)
         validate_only = arguments.get("validate_only", False)
 

@@ -270,6 +270,9 @@ class DocumentUpdate(BaseTool):
                 "success": False,
                 "error": _("Pass doctype, name and data for one record, or documents for several."),
             }
+        refused = document_batch.internal_keys_refusal(doctype, data)
+        if refused:
+            return refused
 
         data, rename_requested = _split_rename(name, data, arguments)
         if rename_requested and not data:

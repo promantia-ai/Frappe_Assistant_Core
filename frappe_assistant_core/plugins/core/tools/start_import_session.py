@@ -185,6 +185,11 @@ class StartImportSession(BaseTool):
         reused = None if sheet_url else self._open_session(file_doc, chosen, target_doctype, import_type)
         if reused:
             # the same file again in the same chat: carry on with its session, not a second one
+            if target_doctype and not reused.target_doctype:
+                # with the target this call names, which it hadn't had yet (#34541)
+                reused = engine_write(reused)
+                reused.target_doctype = target_doctype
+                reused.save()
             return {
                 "success": True,
                 "session_id": reused.name,

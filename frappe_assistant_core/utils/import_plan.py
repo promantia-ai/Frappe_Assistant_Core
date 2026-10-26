@@ -527,7 +527,7 @@ def _bring_up_to_date(plan, session) -> Optional[Dict[str, Any]]:
         return {"kind": "blocked", "message": str(e)}
     digests[session.name] = digest
     plan.progress = frappe.as_json({**_progress(plan), "digests": digests})
-    if dry_run.row_count(session) > dry_run.BACKGROUND_ROWS:
+    if dry_run.check_cost(session) > dry_run.BACKGROUND_ROWS:  # as dry_run_import decides (#34407)
         dry_run.enqueue(session)
         return {"kind": "checking", "message": _("Being checked in the background. Ask again in a moment.")}
     import_fixes.check(session.name)  # never commits: the plan's row stays locked (#34431)

@@ -264,6 +264,21 @@ def is_totals_row(cells: Dict[str, str]) -> bool:
     return has_amount and (not party or bool(opening_stock.TOTALS.match(party)))
 
 
+def _found_party(party_type: str, value: str):
+    """find_party, once per request for a party found: invoice_key asks for every unnumbered row,
+    several times a check (#34541). A party not found is asked again, as one may be created."""
+    found = getattr(frappe.local, "fac_found_parties", None)
+    if found is None:
+        found = frappe.local.fac_found_parties = {}
+    key = (party_type, value.casefold())
+    if key not in found:
+        party = find_party(party_type, value)
+        if not party:
+            return None
+        found[key] = party
+    return found[key]
+
+
 def invoice_key(invoices: Dict[str, Any], cells: Dict[str, str]) -> str:
     """What says a row is in, matched against the invoices earlier imports made: the invoice
     number (with the supplier for purchases, as suppliers reuse numbers), or, without one, the
@@ -276,7 +291,7 @@ def invoice_key(invoices: Dict[str, Any], cells: Dict[str, str]) -> str:
         return f"{party}|{number}" if invoices.get("invoice_type") == "Purchase" else number
     kind = "Purchase" if invoices.get("invoice_type") == "Purchase" else "Sales"
     party_type = invoices.get("party_type") or ("Supplier" if kind == "Purchase" else "Customer")
-    found = find_party(party_type, cstr(cells.get("party")).strip())
+    found = _found_party(party_type, cstr(cells.get("party")).strip())
     if found:
         party = found.name.casefold()
     date, amount = cstr(cells.get("posting_date")).strip(), cstr(cells.get("outstanding_amount")).strip()

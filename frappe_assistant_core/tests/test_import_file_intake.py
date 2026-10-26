@@ -377,6 +377,19 @@ class TestFileIntake(BaseAssistantTest):
         self.assertTrue(self._files_of(recent))
         self.assertTrue(self._files_of(still_open))  # not ended: the user may carry on with it
 
+    def test_retention_cancels_an_abandoned_failed_session(self):
+        # #34541: a Failed session is held for a retry, but nothing ended one nobody came back to
+        from frappe_assistant_core.utils import import_retention
+
+        session_id = self._ended_session(days_ago=400)
+        frappe.set_user("Administrator")
+        frappe.db.set_value("FAC Import Session", session_id, "status", "Failed", update_modified=False)
+
+        import_retention.purge_old_sessions()
+
+        self.assertEqual(frappe.db.get_value("FAC Import Session", session_id, "status"), "Cancelled")
+        self.assertFalse(self._files_of(session_id))
+
     def test_a_personal_data_deletion_deletes_the_users_session_files(self):
         from frappe_assistant_core.utils import import_retention
 
@@ -391,6 +404,25 @@ class TestFileIntake(BaseAssistantTest):
         import_retention.purge_user_sessions(request, "on_update")
 
         self.assertFalse(self._files_of(session_id))
+
+    def test_a_corrected_file_is_read_on_the_sessions_header_row_when_the_guess_misses(self):
+        # #34541: link_site_file guessed the headings again, and a corrected file whose title row
+        # holds several values was read from that row ("columns don't match")
+        from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import (
+            engine_session,
+        )
+        from frappe_assistant_core.utils import import_dry_run
+
+        session_id = self._start(
+            file_id=self._upload("customers.xlsx", _xlsx(_tally_rows(3)), XLSX_MIME).name
+        )["session_id"]
+        corrected_rows = _tally_rows(3)
+        corrected_rows[0] = ["Customer Master", "exported", "from", "Tally Prime", "on", "26-10-2026"]
+        corrected = self._upload("customers-fixed.xlsx", _xlsx(corrected_rows), XLSX_MIME)
+
+        import_dry_run.link_site_file(engine_session(session_id), frappe.get_doc("File", corrected.name))
+
+        self.assertEqual(self._session_rows(session_id)[0], HEADINGS)
 
     def test_a_copy_is_never_named_like_a_file_the_session_writes(self):
         # The failed-rows CSV (#33994) is replaced by its name, and it comes back corrected.

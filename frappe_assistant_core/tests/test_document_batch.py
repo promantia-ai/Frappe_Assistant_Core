@@ -871,6 +871,22 @@ class TestDocumentBatch(BaseAssistantTest):
         self._assert_refused_for_internal_keys(response)
         self.assertEqual(self._todos(), set())
 
+    def test_an_underscore_key_on_one_record_is_refused_too(self):
+        # #34541: only a list's records were checked; one record still set _assign and the like
+        response = self._run(
+            "create_document",
+            {"doctype": "ToDo", "data": {"description": f"Assigned {self.tag}", "_assign": '["a@x.com"]'}},
+        )
+        self._assert_refused_for_internal_keys(response)
+        self.assertEqual(self._todos(), set())
+
+        (todo,) = self._make_todos("Keep me")
+        response = self._run(
+            "update_document", {"doctype": "ToDo", "name": todo, "data": {"_liked_by": '["a@x.com"]'}}
+        )
+        self._assert_refused_for_internal_keys(response)
+        self.assertFalse(frappe.db.get_value("ToDo", todo, "_liked_by"))
+
     def test_an_underscore_key_in_an_update_list_is_refused(self):
         first, second = self._make_todos("Keep one", "Keep two")
 

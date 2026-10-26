@@ -314,11 +314,28 @@ def file_bytes(file_doc) -> bytes:
     return content.encode("utf-8") if isinstance(content, str) else content
 
 
+# Letters only Central European text has, and those only Western European text has: windows-1250
+# reads almost every byte, so à, è, ñ and £ of a Western file came out as ŕ, č, ń and Ł (#34541).
+CENTRAL_EUROPEAN = set("ąćęłńśźżčďěňřšťůžőűĺľŕĄĆĘŁŃŚŹŻČĎĚŇŘŠŤŮŽŐŰĹĽŔ")
+WESTERN_EUROPEAN = set("àâãäåæçèêëìîïñòôõöøùûüýÿÀÂÃÄÅÆÇÈÊËÌÎÏÑÒÔÕÖØÙÛÜÝ£")
+
+
 def decode_csv(content: bytes, fallbacks: Tuple[str, ...] = ("windows-1250", "windows-1252")) -> str:
     """A CSV's text (#34404). A byte-order mark names UTF-16, as Excel's "Unicode Text" writes
-    it, or UTF-8; else UTF-8, then each fallback in turn, the last of which never fails."""
+    it, or UTF-8; else UTF-8, then each fallback in turn, the last of which never fails. Of
+    windows-1250 and windows-1252, the one whose text reads as its own languages is taken."""
     if content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return content.decode("utf-16")
+    if set(fallbacks) == {"windows-1250", "windows-1252"}:
+        try:
+            return content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            pass
+        central = content.decode("windows-1250", errors="replace")
+        western = content.decode("windows-1252", errors="replace")
+        central_letters = sum(1 for c in central if c in CENTRAL_EUROPEAN)
+        western_letters = sum(1 for c in western if c in WESTERN_EUROPEAN)
+        return central if central_letters > western_letters else western
     for encoding in ("utf-8-sig", *fallbacks[:-1]):
         try:
             return content.decode(encoding)
