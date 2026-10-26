@@ -368,12 +368,17 @@ def save_session_copy(file_name: str, chosen: SheetSummary):
     except MaxFileSizeReachedError:
         # a workbook grows several times over as CSV: the copy, not the file, passed the limit
         frappe.clear_messages()
-        raise FileProblem(
-            _(
-                "The sheet is {0} MB as text, more than the {1} MB this site takes for a file. Split it "
-                "into smaller files, or ask an administrator to raise Max File Size in System Settings."
-            ).format(f"{len(content) / (1024 * 1024):.1f}", f"{max_file_size() / (1024 * 1024):g}")
-        ) from None
+        raise too_large_as_text(len(content)) from None
+
+
+def too_large_as_text(size: int) -> "FileProblem":
+    """The refusal of a sheet whose text (``size`` bytes, at least) passes the site's Max File Size."""
+    return FileProblem(
+        _(
+            "The sheet is over {0} MB as text, more than the {1} MB this site takes for a file. Split "
+            "it into smaller files, or ask an administrator to raise Max File Size in System Settings."
+        ).format(f"{size / (1024 * 1024):.1f}", f"{max_file_size() / (1024 * 1024):g}")
+    )
 
 
 def attach_session_copy(copy, session_name: str) -> None:
@@ -514,6 +519,9 @@ def _summarise(
             [shown_cell(cell) for cell in _trimmed(row)] for row in top[: max(FIRST_ROWS_SHOWN, index + 2)]
         ]
     kept: Optional[List[List[str]]] = [] if keep else None
+    # Kept rows become the session's CSV copy, which can't pass the site's Max File Size: stop
+    # once they do, before a small compressed workbook fills the memory (#34405)
+    budget, used = (max_file_size(), 0) if keep else (None, 0)
 
     width = None
     for values in itertools.chain(top[index:], ([_as_text(v) for v in raw] for raw in rows)):
@@ -526,6 +534,9 @@ def _summarise(
         row = values[:width]
         row += [""] * (width - len(row))
         if kept is not None:
+            used += sum(len(cell) for cell in row) + len(row)
+            if used > budget:
+                raise too_large_as_text(used)
             kept.append(row)
         if not any(values):
             continue

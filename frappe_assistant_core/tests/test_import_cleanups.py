@@ -189,3 +189,17 @@ class TestReviewFindings(ImportToolTestCase):
             import_opening_stock._draft_error({}, [])
 
         self.assertEqual(frappe.local.future_sle, {})
+
+    def test_a_sheet_is_not_kept_in_memory_past_the_sites_max_file_size(self):
+        # security review: a small compressed workbook can hold far more text than the copy may be
+        from frappe_assistant_core.utils import import_session
+
+        rows = [["Name"]] + [["x" * 50] for _ in range(1000)]  # about 50 KB of text
+        with patch.object(import_session, "max_file_size", return_value=10_000), self.assertRaises(
+            import_session.FileProblem
+        ) as raised:
+            import_session._summarise("Sheet1", iter(rows), keep=True)
+
+        self.assertIn("Max File Size", str(raised.exception))
+        # counting a sheet without keeping it has no such limit
+        self.assertEqual(import_session._summarise("Sheet1", iter(rows)).row_count, 1000)
