@@ -804,8 +804,7 @@ def _erpnext_check(
                     dry_run._progress("running", done, total),
                     update_modified=False,
                 )
-            # In every mode, to release the naming series locks the rows took (#34401)
-            frappe.db.commit()  # nosemgrep: frappe-manual-commit — each row is already rolled back
+            dry_run.release_series_locks()
     return passed
 
 

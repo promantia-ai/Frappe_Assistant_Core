@@ -384,13 +384,31 @@ def run(session_name: str, commit_progress: bool = False, in_background: bool = 
                     _progress("running", done, total),
                     update_modified=False,
                 )
-            # Ends the transaction in every mode: a row's SELECT ... FOR UPDATE on a naming series
-            # survives its savepoint's rollback, and keeps real users' documents waiting until the
-            # next commit (#34401). Each row is already rolled back, so only what the request wrote
-            # before the check (and the progress) is kept.
-            frappe.db.commit()  # nosemgrep: frappe-manual-commit — each row is already rolled back
+            release_series_locks()
 
     return _store(session_name, file_doc, checker, total)
+
+
+def release_series_locks() -> None:
+    """End the transaction, every PROGRESS_EVERY rows of a check: a row's SELECT ... FOR UPDATE on
+    a naming series survives its savepoint's rollback, and keeps real users' documents waiting
+    until the next commit (#34401). Each row is already rolled back, so only what the request wrote
+    before the check (and the progress) is kept. Not while a migration plan holds work of its own
+    in the transaction: a plan step's savepoint, or the plan row its questions locked (#34431)."""
+    if getattr(frappe.local, "fac_plan_running", None) or getattr(frappe.local, "fac_plan_locked", None):
+        return
+    frappe.db.commit()  # nosemgrep: frappe-manual-commit — each row is already rolled back
+
+
+@contextmanager
+def plan_locked():
+    """The plan's own transaction holds while a check runs inside (release_series_locks)."""
+    before = getattr(frappe.local, "fac_plan_locked", None)
+    frappe.local.fac_plan_locked = True
+    try:
+        yield
+    finally:
+        frappe.local.fac_plan_locked = before
 
 
 def only_mapped(column_map: Dict[str, str], width: int) -> Dict[str, str]:

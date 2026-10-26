@@ -203,3 +203,22 @@ class TestReviewFindings(ImportToolTestCase):
         self.assertIn("Max File Size", str(raised.exception))
         # counting a sheet without keeping it has no such limit
         self.assertEqual(import_session._summarise("Sheet1", iter(rows)).row_count, 1000)
+
+
+class TestSeriesLockCommits(unittest.TestCase):
+    def test_the_check_commits_except_inside_a_plans_own_transaction(self):
+        # #34401 commits every hundred rows to free the series locks; a plan step's savepoint and
+        # the plan row its questions lock (#34431) must outlive the check
+        from frappe_assistant_core.utils import import_dry_run
+
+        with patch.object(import_dry_run.frappe.db, "commit") as commit:
+            import_dry_run.release_series_locks()  # a check on its own: commits
+            with import_dry_run.plan_locked():
+                import_dry_run.release_series_locks()
+            frappe.local.fac_plan_running = "PLAN-TEST"
+            try:
+                import_dry_run.release_series_locks()
+            finally:
+                frappe.local.fac_plan_running = None
+
+        self.assertEqual(commit.call_count, 1)
