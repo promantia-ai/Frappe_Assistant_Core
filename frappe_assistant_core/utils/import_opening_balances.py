@@ -110,19 +110,22 @@ def setup_problem(
             "once a period is closed."
         ).format(company)
     own = set((settings(session).get("created") or {}) if session else ())
+    # On any date: a second opening entry, on another cut-off, would count the balances twice (#34433)
     existing = [
-        name
-        for name in frappe.get_all(
+        entry
+        for entry in frappe.get_all(
             "Journal Entry",
-            filters={"company": company, "posting_date": date, "is_opening": "Yes", "docstatus": 1},
-            pluck="name",
+            filters={"company": company, "is_opening": "Yes", "docstatus": 1},
+            fields=["name", "posting_date"],
+            order_by="posting_date",
         )
-        if name not in own
+        if entry.name not in own
     ]
     if existing:
-        return _("{0} already has an opening Journal Entry on {1}: {2}.").format(
-            company, date, ", ".join(existing)
-        )
+        return _(
+            "{0} already has an opening Journal Entry: {1}. Opening balances are entered once: "
+            "cancel it first to enter them again."
+        ).format(company, ", ".join(f"{entry.name} ({entry.posting_date})" for entry in existing))
     if cstr(profit_and_loss) not in PL_MODES:
         return _(
             "profit_and_loss is stop (leave Profit and Loss rows out until the user decides) or "

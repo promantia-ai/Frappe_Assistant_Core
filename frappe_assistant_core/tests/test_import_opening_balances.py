@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import frappe
-from frappe.utils import nowdate
+from frappe.utils import add_days, nowdate
 
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.core.tool_registry import get_tool_registry
@@ -272,13 +272,13 @@ class TestSetup(OpeningBalancesCase):
         self.assertFalse(reply["success"])
         self.assertIn("Period Closing Voucher", frappe.as_json(reply))
 
-    def _opening_entry(self):
+    def _opening_entry(self, posting_date=None):
         entry = frappe.get_doc(
             {
                 "doctype": "Journal Entry",
                 "voucher_type": "Opening Entry",
                 "company": self.company,
-                "posting_date": self.date,
+                "posting_date": posting_date or self.date,
                 "accounts": [
                     {"account": self.bank, "debit_in_account_currency": 5},
                     {"account": self.capital, "credit_in_account_currency": 5},
@@ -297,6 +297,26 @@ class TestSetup(OpeningBalancesCase):
         error = frappe.as_json(reply)
         self.assertIn("already", error)
         self.assertIn(entry.name, error)
+
+    def test_refuses_a_company_with_an_opening_entry_on_another_date(self):
+        # #34433, Paul's review of 49da112: only one on the same date was found, so a second
+        # opening entry, on another cut-off, doubled the opening balances
+        earlier = add_days(self.date, -1)
+        if not opening_invoices.in_fiscal_year(earlier, self.company):
+            self.skipTest("yesterday is in no fiscal year of the test company")
+        entry = self._opening_entry(posting_date=earlier)
+
+        reply = self._setup(self._session())
+
+        self.assertFalse(reply["success"])
+        self.assertIn(entry.name, frappe.as_json(reply))
+
+    def test_the_companys_own_temporary_account_is_taken_of_several(self):
+        # #34433: with two Temporary accounts, either one could be posted to; the chart's own, the
+        # oldest, is taken, never one that sorts first
+        self._account("AAA Temporary", "Asset", "Temporary")
+
+        self.assertEqual(opening_invoices.temporary_account(self.company), self.temporary)
 
     def test_the_dry_run_refuses_a_company_with_a_submitted_period_closing_voucher(self):
         session = self._session()

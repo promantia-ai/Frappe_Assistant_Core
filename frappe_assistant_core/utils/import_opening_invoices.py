@@ -66,7 +66,11 @@ def is_party(session, doctype: str) -> bool:
 
 
 def temporary_account(company: str) -> Optional[str]:
-    return frappe.db.get_value("Account", {"company": company, "account_type": "Temporary", "is_group": 0})
+    """The account the openings balance on: of several Temporary accounts, the company's own, the
+    oldest (its chart's "Temporary Opening"), never whichever the database returns first (#34433)."""
+    return frappe.db.get_value(
+        "Account", {"company": company, "account_type": "Temporary", "is_group": 0}, order_by="creation asc"
+    )
 
 
 def in_fiscal_year(date, company: str) -> bool:
