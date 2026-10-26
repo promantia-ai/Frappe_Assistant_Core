@@ -143,6 +143,22 @@ class TestFileIntake(BaseAssistantTest):
 
         self.assertEqual((result["columns"], result["row_count"], result["header_row"]), (HEADINGS, 3, 3))
 
+    def test_a_one_column_file_with_semicolons_in_its_cells_is_one_column(self):
+        # #34536, Paul's live file: "Steel rod; 12mm" is a name, not two columns. Read with ";",
+        # the heading "Cust Name" was taken for a title row and the first name became the heading.
+        content = "Cust Name\r\nMIGTEST Semi; One\r\nMIGTEST Semi; Two\r\nSharma & Sons; Pune\r\n"
+        original = self._upload("migtest_onecol.csv", content.encode())
+
+        result = self._start(file_id=original.name)
+
+        self.assertEqual((result["columns"], result["row_count"]), (["Cust Name"], 3))
+        self.assertNotIn("header_row", result)
+        # every later step reads the session's copy, written with commas: read as written
+        rows = self._session_rows(result["session_id"])
+        self.assertEqual(
+            rows, [["Cust Name"], ["MIGTEST Semi; One"], ["MIGTEST Semi; Two"], ["Sharma & Sons; Pune"]]
+        )
+
     def test_headings_on_row_1_are_read_as_before(self):
         original = self._upload("customers.csv", _csv([HEADINGS, ["A", "Retail", "India"]]).encode())
 

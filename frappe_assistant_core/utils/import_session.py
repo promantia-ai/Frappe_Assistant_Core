@@ -33,7 +33,7 @@ import frappe
 import requests
 from frappe import _
 from frappe.core.api.file import get_max_file_size
-from frappe.utils import cint
+from frappe.utils import cint, cstr
 
 from frappe_assistant_core.chat.api.settings.uploads import CHAT_UPLOAD_MAX_BYTES
 
@@ -243,7 +243,7 @@ def read_spreadsheet(
         # Sheets stream past, so a large workbook is never held in memory as rows: only the
         # sheet the session may work on is kept.
         sheets: List[SheetSummary] = []
-        for name, rows in _iter_sheets(content, extension):
+        for name, rows in _iter_sheets(content, extension, "," if is_session_copy(file_doc) else None):
             found = any(s.columns and s.row_count for s in sheets)
             mine = extension == "csv" or (name == sheet if sheet else not found)
             sheets.append(_summarise(name, rows, header_row if mine else None, keep_rows and mine))
@@ -289,7 +289,7 @@ def read_sheet_rows(file_doc, sheet: Optional[str] = None) -> List[List[str]]:
     try:
         content = file_bytes(file_doc)
         names = []
-        for name, rows in _iter_sheets(content, extension):
+        for name, rows in _iter_sheets(content, extension, "," if is_session_copy(file_doc) else None):
             names.append(name)
             if extension == "csv" or not sheet or name == sheet:
                 return _all_text_rows(rows)
@@ -334,15 +334,37 @@ def csv_delimiter(text: str) -> str:
     one. csv.Sniffer gives up on a title row above the table, which has no delimiter at all.
     """
     sample = text[:65536].splitlines()[:50]
+    first = next((line for line in sample if line.strip()), "")
     best, best_rows = ",", 0
     for delimiter in DELIMITERS:
         counts = [len(row) for row in csv.reader(sample, delimiter=delimiter) if any(c.strip() for c in row)]
         if not counts:
             continue
         width = max(set(counts), key=lambda n: (counts.count(n), n))
-        if width > 1 and counts.count(width) > best_rows:
+        if width > 1 and counts.count(width) > best_rows and not _in_text(sample, first, delimiter):
             best, best_rows = delimiter, counts.count(width)
     return best
+
+
+def _in_text(sample: List[str], first: str, delimiter: str) -> bool:
+    """Whether ``delimiter`` is punctuation inside the cells, not what separates them (#34536): it
+    isn't in the first row, so splitting on it would take that row for a title, and most of the
+    times it occurs a space follows ("Steel rod; 12mm", "Sharma & Sons; Pune"), which an export's
+    delimiter never has. Such a file is one column."""
+    if delimiter in first:
+        return False
+    rest = "\n".join(sample[1:])
+    return rest.count(delimiter + " ") * 2 > rest.count(delimiter)
+
+
+#: The name of the copy a session makes of its sheet (save_session_copy), always comma-delimited.
+SESSION_COPY_SUFFIX = " - session copy.csv"
+
+
+def is_session_copy(file_doc) -> bool:
+    """Whether ``file_doc`` is a session's own copy, read with the comma it was written with: the
+    file the user gave is sniffed once, never the copy again (#34536)."""
+    return cstr(file_doc.file_name).endswith(SESSION_COPY_SUFFIX)
 
 
 def save_session_copy(file_name: str, chosen: SheetSummary):
@@ -360,7 +382,7 @@ def save_session_copy(file_name: str, chosen: SheetSummary):
                 "doctype": "File",
                 # never the name of a file the session writes itself, which is replaced by name:
                 # a corrected failed-rows file, uploaded again, is called the same as the next one
-                "file_name": f"{os.path.splitext(file_name or '')[0] or 'import'} - session copy.csv",
+                "file_name": f"{os.path.splitext(file_name or '')[0] or 'import'}{SESSION_COPY_SUFFIX}",
                 "content": content,
                 "is_private": 1,
             }
@@ -430,10 +452,13 @@ def _describe_read_error(e: Exception) -> str:
     return str(e) or type(e).__name__
 
 
-def _iter_sheets(content: bytes, extension: str) -> Iterator[Tuple[Optional[str], Iterable]]:
-    """Yield (sheet name, rows) pairs. Rows hold raw cell values."""
+def _iter_sheets(
+    content: bytes, extension: str, delimiter: Optional[str] = None
+) -> Iterator[Tuple[Optional[str], Iterable]]:
+    """Yield (sheet name, rows) pairs. Rows hold raw cell values. A CSV is split on ``delimiter``,
+    else on the one it is found to have."""
     if extension == "csv":
-        yield None, _csv_cells(content)
+        yield None, _csv_cells(content, delimiter)
     elif extension == "xlsx":
         from openpyxl import load_workbook
 
@@ -451,10 +476,10 @@ def _iter_sheets(content: bytes, extension: str) -> Iterator[Tuple[Optional[str]
             yield xls_sheet.name, (_xls_row(book, xls_sheet, i) for i in range(xls_sheet.nrows))
 
 
-def _csv_cells(content: bytes) -> Iterator[List[str]]:
-    """A CSV's rows, decoded and split on its own delimiter, cells trimmed as Frappe trims them."""
+def _csv_cells(content: bytes, delimiter: Optional[str] = None) -> Iterator[List[str]]:
+    """A CSV's rows, decoded and split on ``delimiter`` or its own, cells trimmed as Frappe trims them."""
     text = decode_csv(content)
-    for row in csv.reader(io.StringIO(text, newline=""), delimiter=csv_delimiter(text)):
+    for row in csv.reader(io.StringIO(text, newline=""), delimiter=delimiter or csv_delimiter(text)):
         yield [cell.strip() for cell in row]
 
 
