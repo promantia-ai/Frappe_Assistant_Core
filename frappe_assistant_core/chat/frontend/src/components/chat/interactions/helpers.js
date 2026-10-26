@@ -68,6 +68,17 @@ export function isChildTable(value) {
  * actual changes the user is being asked to authorize. A nested key that collides with a
  * record identity key (`data.name` on an update) is kept as `new_<key>`.
  */
+// A value the server fenced as file content (untrusted_output.py), passed back by the model as it
+// read it: the card shows the file's text, not the fence's tags and preamble (#34438).
+const FENCED = /^\s*<import_file_content>\n[^\n]*\n([\s\S]*)\n<\/import_file_content>\s*$/;
+
+function unfenced(value) {
+	if (Array.isArray(value)) return value.map(unfenced);
+	if (typeof value !== "string") return value;
+	const match = FENCED.exec(value);
+	return match ? match[1] : value;
+}
+
 export function flattenInput(input) {
 	const result = {};
 	const metaKeys = ["doctype", "name", "docname", "title", "status"];
@@ -98,6 +109,7 @@ export function flattenInput(input) {
 		if (!isPlainObject(value)) result[key] = value;
 	}
 
+	for (const [key, value] of Object.entries(result)) result[key] = unfenced(value);
 	return result;
 }
 
