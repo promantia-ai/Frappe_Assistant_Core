@@ -10,6 +10,9 @@
 				}"
 			>
 				<ConditionValue v-if="isCondition(key)" :expression="value" />
+				<span v-else-if="tableReplacement(block.tool_name, value)" class="table-replaced">
+					{{ tableReplacement(block.tool_name, value) }}
+				</span>
 				<LongValue v-else-if="isLongValue(value)" :value="value" />
 				<template v-else>{{ formatValue(value) }}</template>
 			</span>
@@ -33,7 +36,12 @@
 			:language="codeLanguage(key, doctype)"
 			:previous="previousCode(key)"
 		/>
-		<ChildTable v-for="[key, rows] in tableRows" :key="key" :label="key" :rows="rows" />
+		<template v-for="[key, rows] in tableRows" :key="key">
+			<p v-if="tableReplacement(block.tool_name, rows)" class="table-replaced">
+				{{ formatKey(key) }}: {{ tableReplacement(block.tool_name, rows) }}
+			</p>
+			<ChildTable :label="key" :rows="rows" />
+		</template>
 		<ApprovalNotes :block="block" />
 	</div>
 </template>
@@ -56,6 +64,7 @@ import {
 	isMoneyKey,
 	isCodeKey,
 	isChildTable,
+	tableReplacement,
 	isLongValue,
 	codeLanguage,
 	splitDetailFields,
@@ -108,6 +117,11 @@ function previousCode(key) {
 </script>
 
 <style scoped>
+.table-replaced {
+	color: var(--ql-danger);
+	font-weight: 600;
+}
+
 .approval-table {
 	display: grid;
 	grid-template-columns: auto 1fr;
