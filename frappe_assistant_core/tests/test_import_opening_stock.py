@@ -1397,7 +1397,8 @@ class TestSignoffReviewFixes(OpeningStockCase):
         summary = opening_stock.summary(self._doc(session))
 
         self.assertEqual(
-            summary["rows"], {"source": 4, "imported": 0, "excluded": 1, "failed": 1, "not_imported": 2}
+            summary["rows"],
+            {"source": 4, "imported": 0, "unchanged": 0, "excluded": 1, "failed": 1, "not_imported": 2},
         )
         self.assertEqual(summary["excluded"], [{"reason": "Totals", "count": 1, "rows": "5"}])
         self.assertEqual(summary["value"]["source"], 66)  # the totals row isn't a row of stock
