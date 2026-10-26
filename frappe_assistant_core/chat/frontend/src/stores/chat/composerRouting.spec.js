@@ -31,6 +31,18 @@ describe("resolveComposerRoute", () => {
 		).toBe("answer");
 	});
 
+	it("queues the text once the pending card's answer is given and on its way", () => {
+		// #34548: text typed after a click answered the card again and stopped FACO mid-run
+		for (const regime of ["question", "approval"]) {
+			expect(
+				resolveComposerRoute({
+					isStreaming: false,
+					pendingInteraction: { regime, block: { decision: { resolution: "answered" } } },
+				})
+			).toBe("queue");
+		}
+	});
+
 	it("routes to queue while streaming with no pending card", () => {
 		expect(resolveComposerRoute({ isStreaming: true, pendingInteraction: null })).toBe("queue");
 	});
