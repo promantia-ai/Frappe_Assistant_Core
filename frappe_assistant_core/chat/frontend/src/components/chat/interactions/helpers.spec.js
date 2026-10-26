@@ -91,6 +91,21 @@ describe("flattenInput on a value the model passes back in its fence", () => {
 	});
 });
 
+describe("flattenInput on an import's approval", () => {
+	it("leaves out the check's fingerprint, which binds it on the server", () => {
+		// #34545: the card showed 64 hex characters, which mean nothing to the user
+		const flat = flattenInput({
+			session: "IMP-1",
+			doctype: "Customer",
+			rows: 29,
+			validated_fingerprint: "7dd83ca6ec4a",
+			file_name: "customers.csv",
+		});
+		expect(flat).not.toHaveProperty("validated_fingerprint");
+		expect(flat.rows).toBe(29);
+	});
+});
+
 describe("flattenInput on an update that renames", () => {
 	it("keeps a data key that collides with the record name as a new value", () => {
 		const flat = flattenInput({ doctype: "Server Script", name: "Old Script", data: { name: "New Script" } });
