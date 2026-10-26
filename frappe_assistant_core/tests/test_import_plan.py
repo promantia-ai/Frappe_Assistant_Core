@@ -396,11 +396,12 @@ class TestPlanMigration(ImportPlanCase):
 
         self.assertFalse(response["success"], response)
 
-    def test_the_tool_is_registered_as_write(self):
-        from frappe_assistant_core.utils.tool_category_detector import WRITE_TOOLS
+    def test_the_tool_is_registered_as_read_only(self):
+        # it writes the plan's own settings only, so it raises no approval card (#34547)
+        from frappe_assistant_core.utils.tool_category_detector import READ_ONLY_TOOLS
 
         self.assertIsNotNone(self.registry.get_tool("plan_migration"))
-        self.assertIn("plan_migration", WRITE_TOOLS)
+        self.assertIn("plan_migration", READ_ONLY_TOOLS)
 
 
 class TestRecordsEarlierFilesCreate(ImportPlanCase):
@@ -583,6 +584,52 @@ class TestPlanQuestions(ImportPlanCase):
         self.assertTrue(result["ready"])
         self.assertEqual(import_plan.get_plan(plan).status, "Ready to Run")
         self.assertFalse(frappe.db.exists("Customer Group", self.group))
+
+    # -- #34547: a plan's questions cost no approvals, and a wrong answer key costs nothing --------
+
+    def test_gathering_and_answering_the_questions_need_no_approval(self):
+        # Five cards before the run card: these write only the plan and its sessions' settings (a
+        # create answer plans the record, run_migration_plan creates it, on its one approval card)
+        from frappe_assistant_core.core.tool_registry import get_tool_registry
+        from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
+
+        registry = get_tool_registry()
+        for name in ("plan_migration", "plan_questions"):
+            self.assertEqual(detect_tool_category(registry.get_tool(name)), "read_only", name)
+        self.assertEqual(detect_tool_category(registry.get_tool("run_migration_plan")), "privileged")
+
+    def test_the_failure_rule_is_taken_by_its_own_name_too(self):
+        # FACO sent the rule as failure_rule, the name the plan uses for it
+        plan, _customers = self._plan_with_a_missing_group()
+        self._run("plan_questions", {"plan": plan})
+
+        answers = [{"id": "plan:failure_rule", "failure_rule": "stop"}]
+        response = self._run("plan_questions", {"plan": plan, "answers": answers})
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(import_plan.get_plan(plan).failure_rule, "stop")
+
+    def test_an_answer_with_a_key_it_doesnt_take_is_refused_naming_the_right_ones(self):
+        plan, _customers = self._plan_with_a_missing_group()
+        fix = next(
+            q
+            for q in self._run("plan_questions", {"plan": plan})["result"]["questions"]
+            if q["kind"] == "fix"
+        )
+
+        for answer, named in (
+            ({"id": "plan:failure_rule", "value": "stop"}, "rule"),
+            ({"id": fix["id"], "action": "create", "fix": "x"}, "action"),
+        ):
+            with self.subTest(answer=answer):
+                response = self._run("plan_questions", {"plan": plan, "answers": [answer]})
+                self.assertFalse(response["success"], response)
+                self.assertIn(named, frappe.as_json(response))
+
+        # a suggested fix sent back whole, with the keys that describe it, is taken
+        create = next(f for f in fix["fixes"] if f["action"] == "create")
+        response = self._run("plan_questions", {"plan": plan, "answers": [{"id": fix["id"], **create}]})
+        self.assertTrue(response["success"], response)
 
     def test_a_wrong_answer_changes_nothing(self):
         plan, _customers = self._plan_with_a_missing_group()

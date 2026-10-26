@@ -684,6 +684,24 @@ def _add_needed_by(questions: List[Dict[str, Any]], files: List[Any]) -> None:
             question["needed_by"] = needed
 
 
+#: What a fix answer takes, as dry_run_import's fixes do; and what describes a suggested fix,
+#: which FACO may send back with it and which is let be (#34547).
+FIX_KEYS = ("action", "to", "reason", "data", "parent")
+FIX_DESCRIPTION_KEYS = ("doctype", "name", "closest", "rows", "use", "note", "cause", "label")
+
+
+def _check_keys(question: str, answer: Dict[str, Any], keys, described=()) -> None:
+    """Refuse an answer with a key it doesn't take, naming the ones it does: a wrong key was taken
+    for no answer, and asked again (#34547)."""
+    unknown = sorted(set(answer) - {"id", *keys, *described})
+    if unknown:
+        raise PlanProblem(
+            _("Answer {0} doesn't take {1}. It takes: {2}.").format(
+                question, ", ".join(unknown), ", ".join(keys)
+            )
+        )
+
+
 def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
     """Apply the user's answers, each to the question it names, all or none. Returns what was done.
     Raises PlanProblem, or import_fixes.FixProblem(s) for a fix the session refuses."""
@@ -697,18 +715,25 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
             raise PlanProblem(_("Each answer is an object with the id of its question."))
         question = cstr(answer.get("id"))
         if question == CUT_OFF_ID:
+            _check_keys(question, answer, ("date",))
             cut_off = as_date(answer.get("date"))
             continue
         if question == FAILURE_RULE_ID:
-            rule = answer.get("rule")
+            # failure_rule is the plan's own name for it, which FACO sends too (#34547)
+            _check_keys(question, answer, ("rule", "failure_rule"))
+            rule = answer.get("rule") or answer.get("failure_rule")
             if rule not in ("leave_out", "stop"):
                 raise PlanProblem(_("The failure rule is leave_out or stop."))
             continue
         session_name, _sep, group = question.rpartition(":")
         if session_name not in files or not group.startswith("G"):
             raise PlanProblem(_("There is no question {0} in this plan.").format(question))
+        _check_keys(question, answer, FIX_KEYS, FIX_DESCRIPTION_KEYS)
         fixes.setdefault(session_name, []).append(
-            {"group": group, **{k: v for k, v in answer.items() if k != "id"}}
+            {
+                "group": group,
+                **{k: v for k, v in answer.items() if k != "id" and k not in FIX_DESCRIPTION_KEYS},
+            }
         )
 
     if cut_off:
