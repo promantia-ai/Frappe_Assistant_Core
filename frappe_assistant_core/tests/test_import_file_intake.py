@@ -328,6 +328,69 @@ class TestFileIntake(BaseAssistantTest):
         self.assertNotIn(doc.source_file, (first_copy, corrected.name))
         self.assertEqual(frappe.db.get_value("File", doc.source_file, "attached_to_name"), session_id)
         self.assertEqual(self._session_rows(session_id), [HEADINGS] + _tally_rows(4)[3:])
+        # the copy it replaced, which no Data Import read, doesn't stay on disk (#34539)
+        self.assertFalse(frappe.db.exists("File", first_copy))
+
+    # -- #34539: a session's copies don't outlive retention ------------------------------------
+
+    def _ended_session(self, days_ago=0):
+        """A session whose import ended ``days_ago`` days ago, with its copy attached."""
+        session_id = self._start(
+            file_id=self._upload("customers.csv", _csv([HEADINGS[:3], ["A", "B", "C"]]).encode()).name
+        )["session_id"]
+        frappe.db.set_value(
+            "FAC Import Session",
+            session_id,
+            {
+                "status": "Completed",
+                "modified": frappe.utils.add_days(frappe.utils.now_datetime(), -days_ago),
+            },
+            update_modified=False,
+        )
+        return session_id
+
+    def _files_of(self, session_id):
+        return frappe.get_all(
+            "File", filters={"attached_to_doctype": "FAC Import Session", "attached_to_name": session_id}
+        )
+
+    def test_retention_deletes_an_ended_sessions_files_and_keeps_the_session(self):
+        from frappe_assistant_core.utils import import_retention
+
+        old, recent = self._ended_session(days_ago=400), self._ended_session()
+        still_open = self._start(
+            file_id=self._upload("open.csv", _csv([HEADINGS[:3], ["D", "E", "F"]]).encode()).name
+        )["session_id"]
+        frappe.set_user("Administrator")
+        frappe.db.set_value(
+            "FAC Import Session",
+            still_open,
+            "modified",
+            frappe.utils.add_days(frappe.utils.now_datetime(), -400),
+            update_modified=False,
+        )
+
+        import_retention.purge_old_sessions()
+
+        self.assertFalse(self._files_of(old))
+        self.assertEqual(frappe.get_doc("FAC Import Session", old).steps[-1].step, "Retention")
+        self.assertTrue(self._files_of(recent))
+        self.assertTrue(self._files_of(still_open))  # not ended: the user may carry on with it
+
+    def test_a_personal_data_deletion_deletes_the_users_session_files(self):
+        from frappe_assistant_core.utils import import_retention
+
+        session_id = self._ended_session()
+        frappe.set_user("Administrator")
+        # What Frappe's Personal Data Deletion Request is when it ends: it only redacts text, so
+        # the files with the user's customers in them would stay.
+        request = frappe._dict(
+            doctype="Personal Data Deletion Request", status="Deleted", email=self.user, name="anon"
+        )
+
+        import_retention.purge_user_sessions(request, "on_update")
+
+        self.assertFalse(self._files_of(session_id))
 
     def test_a_copy_is_never_named_like_a_file_the_session_writes(self):
         # The failed-rows CSV (#33994) is replaced by its name, and it comes back corrected.

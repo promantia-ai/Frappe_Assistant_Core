@@ -414,6 +414,10 @@ after_migrate.append("frappe_assistant_core.chat.cloud_url.sync_cloud_url_mirror
 # FAC Bot in Raven: create the bot on migrate once switched on; the cached on/off state follows
 # FAC Chat Settings.
 after_migrate.append("frappe_assistant_core.integrations.raven.bot.ensure_bot_after_migrate")
+# A personal data deletion only redacts text: an import session's files go with it too (#34539)
+doc_events.setdefault("Personal Data Deletion Request", {})["on_update"] = (
+    "frappe_assistant_core.utils.import_retention.purge_user_sessions"
+)
 doc_events.setdefault("FAC Chat Settings", {})["on_update"] = (
     "frappe_assistant_core.integrations.raven.bot.clear_state_cache"
 )
@@ -525,6 +529,7 @@ scheduler_events.setdefault("daily", [])
 scheduler_events["daily"].extend(
     [
         "frappe_assistant_core.chat.scheduler.retention.cleanup_old_messages",
+        "frappe_assistant_core.utils.import_retention.purge_old_sessions",
         "frappe_assistant_core.chat.scheduler.attachment_sweep.sweep_orphan_chat_attachments",
         "frappe_assistant_core.chat.workflows.triggers.cleanup.prune_trigger_logs",
     ]

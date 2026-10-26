@@ -51,6 +51,7 @@ from frappe_assistant_core.utils.import_session import (
     attach_session_copy,
     discard_session_copy,
     import_target_problem,
+    is_session_copy,
     read_sheet_rows,
     read_spreadsheet,
     readable_session_file,
@@ -224,6 +225,7 @@ def link_site_file(session, file_doc, sheet_url: Optional[str] = None) -> None:
         # A Data Import recorded before source_file was kept is of the file the session had.
         link.source_file = link.source_file or session.source_file
     copy = save_session_copy(file_doc.file_name, read.chosen)
+    replaced = session.source_file
     session.source_file = copy.name
     session.original_file = None if sheet_url else file_doc.name
     session.file_source = "Google Sheet" if sheet_url else "Site File"
@@ -241,6 +243,20 @@ def link_site_file(session, file_doc, sheet_url: Optional[str] = None) -> None:
         discard_session_copy(copy)  # the session kept its file
         raise
     attach_session_copy(copy, session.name)
+    # The copy it replaced, unless a Data Import still names it, doesn't stay on disk (#34539).
+    # Only the session's own copy: an older session's source_file was the user's own file.
+    old = (
+        frappe.db.get_value("File", replaced, ["file_name", "attached_to_name"], as_dict=True)
+        if replaced
+        else None
+    )
+    if (
+        old
+        and old.attached_to_name == session.name
+        and is_session_copy(old)
+        and not any(link.source_file == replaced for link in session.data_imports)
+    ):
+        discard_session_copy(frappe._dict(name=replaced))
 
 
 def check_cost(session) -> int:

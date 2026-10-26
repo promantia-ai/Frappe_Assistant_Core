@@ -328,12 +328,19 @@ def session_summary(session) -> Dict[str, Any]:
     try:
         body = engine.summary(session) if engine else _data_import_summary(session)
     except FileProblem as e:
+        from frappe_assistant_core.utils.import_retention import was_purged
+
+        problem = (
+            _("Its files were deleted after it ended (retention), so its rows can't be counted again.")
+            if was_purged(session)
+            else _("The file can't be read, so its rows can't be counted: {0}").format(str(e))
+        )
         return {
             **head,
             "kind": "unreadable",
             "doctype": session.target_doctype,
             "label": _(session.target_doctype or "") or _("Unknown"),
-            "problem": _("The file can't be read, so its rows can't be counted: {0}").format(str(e)),
+            "problem": problem,
         }
     if body.get("erpnext") is not None:
         ledger = LEDGERS.get(body["kind"]) or body["doctype"]
