@@ -153,6 +153,31 @@ class TestSurvey(XmlCase):
 
         self.assertEqual(seen, [0])
 
+    def test_a_message_nested_in_a_message_still_lets_later_elements_go(self):
+        # #34438 (Paul's review of 49da112): a nested TALLYMESSAGE never counted itself out, so
+        # every element after it was held in memory to the end of the file
+        nested = "<TALLYMESSAGE>" + group("Debtors") + "</TALLYMESSAGE>"
+        noise = "<NOISE>" + "<X/>" * 5 + "</NOISE>"
+        text = export(nested, noise, ledger("A", "Sundry Debtors"), encoding="utf-8")
+        held = []
+
+        for tag, element in tally._walk(text, []):
+            if tag == "LEDGER":
+                held.append(len(element.getroottree().getroot().find(".//NOISE")))
+
+        self.assertEqual(held, [0])
+
+    def test_a_record_of_too_many_elements_is_refused(self):
+        # #34438: a record is held whole until it ends, so one huge record inside a message could
+        # fill memory up to MAX_ELEMENTS
+        lists = "<NOTES.LIST>" + "<NOTE>x</NOTE>" * 30 + "</NOTES.LIST>"
+        doc = self._upload(export(ledger("A", "Sundry Debtors", **{"NOTES.LIST": lists})))
+
+        with patch.object(tally, "MAX_RECORD_ELEMENTS", 20), self.assertRaises(FileProblem) as raised:
+            tally.survey(doc)
+
+        self.assertIn("more than 20 elements", str(raised.exception))
+
     def test_not_a_tally_export_is_refused(self):
         for content in (
             b"<customers><customer><name>A</name></customer></customers>",

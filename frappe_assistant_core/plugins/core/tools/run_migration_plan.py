@@ -21,7 +21,7 @@ from frappe.utils import cstr
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.utils import import_plan
-from frappe_assistant_core.utils.untrusted_output import unfenced
+from frappe_assistant_core.utils.untrusted_output import as_fenced, unfenced
 
 
 class RunMigrationPlan(BaseTool):
@@ -101,8 +101,11 @@ class RunMigrationPlan(BaseTool):
         if not problem:
             figures = import_plan.card_figures(plan)
             asked = {key: arguments.get(key) for key in figures}
-            asked["decisions"] = [unfenced(cstr(line)).strip() for line in asked["decisions"] or []]
-            if asked != figures:
+            # A line comes back as the model read it: in its fence, a closing tag in it escaped
+            asked["decisions"] = [
+                as_fenced(unfenced(cstr(line)).strip()) for line in asked["decisions"] or []
+            ]
+            if asked != {**figures, "decisions": [as_fenced(line) for line in figures["decisions"]]}:
                 return {
                     "success": False,
                     "error": _(

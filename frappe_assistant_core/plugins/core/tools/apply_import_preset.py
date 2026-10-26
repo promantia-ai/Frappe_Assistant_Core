@@ -230,12 +230,13 @@ class ApplyImportPreset(BaseTool):
 
     def _tally_xml(self, file_doc, arguments) -> Dict[str, Any]:
         """A Tally XML export: list its parts, or open the sessions of the parts asked for."""
+        parts = list(dict.fromkeys(arguments.get("parts") or []))
         try:
-            found = tally_xml.survey(file_doc)
+            # the parts asked for are read with the survey: the file is parsed once (#34438)
+            found, sheets = tally_xml.read(file_doc, parts)
         except FileProblem as e:
             return {"success": False, "error": str(e)}
         source = {"file_name": file_doc.file_name, "company": found.company}
-        parts = list(dict.fromkeys(arguments.get("parts") or []))
         if arguments.get("parts") is None:
             return self._tally_xml_parts(found, source)
         problem = tally_xml.parts_problem(parts, found)
@@ -255,10 +256,9 @@ class ApplyImportPreset(BaseTool):
             if wanted is not None and not [t for t in wanted if t in names[part]]:
                 results.append({"part": part, "skipped": _("none of the requested targets is in this part")})
                 continue
-            try:
-                sheet = tally_xml.part_sheet(file_doc, part)
-            except FileProblem as e:
-                results.append({"part": part, "error": str(e)})
+            sheet = sheets[part]
+            if isinstance(sheet, FileProblem):
+                results.append({"part": part, "error": str(sheet)})
                 continue
             preset = by_id[tally_xml.IMPORTABLE[part]]
             matches = presets.match_sheet(sheet.rows, [preset])

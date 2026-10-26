@@ -66,6 +66,13 @@ class TallyXmlToolCase(XmlCase):
 
 
 class TestListing(TallyXmlToolCase):
+    def test_opening_parts_reads_the_file_once(self):
+        # #34438: the survey and each part's sheet parsed the file again, in the same request
+        with patch.object(tally_xml, "_walk", wraps=tally_xml._walk) as walk:
+            self._ok({"file_id": self._file().name, "parts": ["ledgers", "stock_items"]})
+
+        self.assertEqual(walk.call_count, 1)
+
     def test_parts_are_listed_with_counts_and_nothing_is_written(self):
         doc = self._file()
         before = self._counts()

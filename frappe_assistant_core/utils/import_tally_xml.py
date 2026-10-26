@@ -21,7 +21,7 @@ import io
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from frappe import _
 from lxml import etree
@@ -145,6 +145,8 @@ def _value(element, path: str) -> str:
 
 # A Tally masters export of 10,000 ledgers has about 300,000 elements; a file of far more is not one.
 MAX_ELEMENTS = 2_000_000
+# A record is held whole until it ends; a ledger or stock item has a few hundred elements.
+MAX_RECORD_ELEMENTS = 100_000
 
 
 def _walk(content: bytes, company: List[str]) -> Iterator[Tuple[str, Any]]:
@@ -159,9 +161,12 @@ def _walk(content: bytes, company: List[str]) -> Iterator[Tuple[str, Any]]:
         no_network=True,
     )
     started, in_message, elements = False, 0, 0
+    in_record = None  # the elements read into the record being read, None between records
     try:
         for event, element in events:
             name = _local(element.tag)
+            parent = element.getparent()
+            in_a_message = parent is not None and _local(parent.tag) == "TALLYMESSAGE"
             if event == "start":
                 elements += 1
                 if elements > MAX_ELEMENTS:
@@ -175,17 +180,28 @@ def _walk(content: bytes, company: List[str]) -> Iterator[Tuple[str, Any]]:
                     if name != "ENVELOPE":
                         raise FileProblem(_(NOT_TALLY))
                 in_message += name == "TALLYMESSAGE"
+                if in_a_message:
+                    in_record = 0
+                elif in_record is not None:
+                    in_record += 1
+                    if in_record > MAX_RECORD_ELEMENTS:
+                        raise FileProblem(
+                            _(
+                                "A record in the XML has more than {0} elements, more than a Tally master has."
+                            ).format(MAX_RECORD_ELEMENTS)
+                        )
                 continue
             if name == "SVCURRENTCOMPANY" and not company and _text(element.text):
                 company.append(_text(element.text))
-            parent = element.getparent()
-            if parent is not None and _local(parent.tag) == "TALLYMESSAGE":
+            # A message nested in a message counts itself out too (#34438)
+            in_message -= name == "TALLYMESSAGE"
+            if in_a_message:
+                in_record = None
                 yield name, element
                 element.clear()
             elif name == "TALLYMESSAGE" or not in_message:
                 # Nothing reads a finished element again: outside a message too, so a file of
                 # other elements isn't held in memory whole (#34438).
-                in_message -= name == "TALLYMESSAGE"
                 element.clear()
                 while element.getprevious() is not None:
                     del element.getparent()[0]
@@ -200,9 +216,27 @@ def _walk(content: bytes, company: List[str]) -> Iterator[Tuple[str, Any]]:
 def survey(file_doc) -> Survey:
     """Every part of the export, counted, with up to 10 names each and the parents of ledgers
     and groups. Raises FileProblem when the file is not a Tally masters export."""
+    return read(file_doc)[0]
+
+
+def part_sheet(file_doc, part: str) -> Sheet:
+    """One importable part as a Sheet: a header row the part's Tally preset matches, then one row
+    per record."""
+    sheet = read(file_doc, [part])[1][part]
+    if isinstance(sheet, FileProblem):
+        raise sheet
+    return sheet
+
+
+def read(file_doc, wanted: Iterable[str] = ()) -> Tuple[Survey, Dict[str, Any]]:
+    """The survey, and the sheet of each ``wanted`` part read in the same pass, so a file of up to
+    the site's size limit is parsed once (#34438). A part too large to import has its FileProblem
+    in place of its sheet. Raises FileProblem when the file is not a Tally masters export."""
     company: List[str] = []
     parts: Dict[str, Part] = {}
     other: Counter = Counter()
+    rows = {part: [[column for column, _paths in COLUMNS[part]]] for part in wanted if part in COLUMNS}
+    too_large: Dict[str, FileProblem] = {}
     for tag, element in _walk(_content(file_doc), company):
         part = PARTS.get(tag)
         if not part:
@@ -215,6 +249,18 @@ def survey(file_doc) -> Survey:
             found.sample.append(name)
         if part in ("ledgers", "groups"):
             found.by_parent[_value(element, "PARENT")] += 1
+        if part not in rows or part in too_large:
+            continue
+        # The limit counts records, not the header: exactly MAX_PRESET_ROWS records are allowed and
+        # the next one is refused (rows holds the header plus the records read so far).
+        if len(rows[part]) > MAX_PRESET_ROWS:
+            too_large[part] = FileProblem(
+                _("This export has more than {0:,} {1}. Export them from Tally in parts.").format(
+                    MAX_PRESET_ROWS, LABELS[part]
+                )
+            )
+            continue
+        rows[part].append(_row(part, element))
     if not parts:
         if other:
             ranked = other.most_common()
@@ -223,36 +269,25 @@ def survey(file_doc) -> Survey:
                 held += " " + _("and {0} more").format(len(ranked) - MAX_NAMED)
             raise FileProblem(_(NO_MASTERS).format(held))
         raise FileProblem(_(NOT_TALLY))
-    return Survey(company[0] if company else None, parts, dict(other))
+    sheets = {
+        part: too_large.get(part) or Sheet(f"{part} (Tally XML)", part_rows)
+        for part, part_rows in rows.items()
+    }
+    return Survey(company[0] if company else None, parts, dict(other)), sheets
 
 
-def part_sheet(file_doc, part: str) -> Sheet:
-    """One importable part as a Sheet: a header row the part's Tally preset matches, then one row
-    per record."""
-    columns = COLUMNS[part]
-    rows: List[List[str]] = [[column for column, _paths in columns]]
-    for tag, element in _walk(_content(file_doc), []):
-        if tag != TAGS[part]:
-            continue
-        # The limit counts records, not the header: exactly MAX_PRESET_ROWS records are allowed and
-        # the next one is refused (rows holds the header plus the records read so far).
-        if len(rows) > MAX_PRESET_ROWS:
-            raise FileProblem(
-                _("This export has more than {0:,} {1}. Export them from Tally in parts.").format(
-                    MAX_PRESET_ROWS, LABELS[part]
-                )
-            )
-        row = []
-        for column, paths in columns:
-            value = next((v for v in (_value(element, path) for path in paths) if v), "")
-            if column in FLIP_SIGN and value:
-                number = _number(value)
-                # Hostile values (1E999999999, NaN, Infinity) are kept as written, never expanded.
-                if number is not None and number.is_finite() and abs(number.adjusted()) < 30:
-                    value = _plain(-number)
-            row.append(value)
-        rows.append(row)
-    return Sheet(f"{part} (Tally XML)", rows)
+def _row(part: str, element) -> List[str]:
+    """A record as a row of its part's columns."""
+    row = []
+    for column, paths in COLUMNS[part]:
+        value = next((v for v in (_value(element, path) for path in paths) if v), "")
+        if column in FLIP_SIGN and value:
+            number = _number(value)
+            # Hostile values (1E999999999, NaN, Infinity) are kept as written, never expanded.
+            if number is not None and number.is_finite() and abs(number.adjusted()) < 30:
+                value = _plain(-number)
+        row.append(value)
+    return row
 
 
 def parts_problem(parts: List[str], found: Survey) -> Optional[str]:

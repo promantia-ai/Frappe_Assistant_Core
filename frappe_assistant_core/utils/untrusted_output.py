@@ -99,6 +99,13 @@ def _fence(node: Dict[str, Any], parts: List[str], kind: str) -> None:
     node[head] = wrap_untrusted(text, kind=kind)
 
 
+def as_fenced(text: str, kind: str = FENCE) -> str:
+    """``text`` as it reads inside the fence: wrap_untrusted escapes a closing tag in it."""
+    return re.sub(
+        re.escape(f"</{kind}>"), lambda m: m.group(0).replace("</", "< /"), text, flags=re.IGNORECASE
+    )
+
+
 def unfenced(text: str, kind: str = FENCE) -> str:
     """``text`` without the fence wrap_untrusted put round it: a fenced value the model passes back."""
     match = re.fullmatch(rf"\s*<{kind}>\n[^\n]*\n(.*)\n</{kind}>\s*", text, flags=re.DOTALL)
