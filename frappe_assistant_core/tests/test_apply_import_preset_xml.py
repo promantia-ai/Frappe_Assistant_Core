@@ -9,7 +9,10 @@ import frappe
 from frappe.core.doctype.file.file import File
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.tests.test_apply_import_preset import assert_gstin_and_email_follow_the_site
+from frappe_assistant_core.tests.test_apply_import_preset import (
+    assert_gstin_and_email_follow_the_site,
+    mapped_columns,
+)
 from frappe_assistant_core.tests.test_import_tally_xml import (
     GSTIN_NEW,
     VOUCHER,
@@ -148,7 +151,7 @@ class TestImport(TallyXmlToolCase):
         self.assertEqual(set(by_target), {"Customers", "Suppliers"})
         self.assertEqual(ledgers["needs"][0]["name"], "company")
         customers = by_target["Customers"]
-        mapped = {row["column"]: row["field"] for row in customers["mapping"]["mapping"]}
+        mapped = mapped_columns(customers["mapping"])
         self.assertEqual(mapped["Name"], "customer_name")
         assert_gstin_and_email_follow_the_site(self, mapped, ledgers)
         session = frappe.get_doc("FAC Import Session", customers["session_id"])

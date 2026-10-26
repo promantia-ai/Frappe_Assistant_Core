@@ -105,6 +105,25 @@ class TestGetImportSchema(ImportToolTestCase):
             self.assertNotIn(df.fieldtype, ("Section Break", "Column Break", "Tab Break", "HTML", "Table"))
 
     @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext")
+    def test_a_customers_phone_and_email_are_offered_as_importable(self):
+        # Frappe 15: on the party itself, typed "Read Only" (fetched from the primary contact);
+        # listed as that, the model took them for locked fields and left a file's phone and email
+        # out. Frappe 16: ERPNext's import provider takes them in a contacts table instead.
+        for doctype in ("Customer", "Supplier"):
+            schema = self._schema(doctype)
+            fields = {f["fieldname"]: f for f in schema["fields"]}
+            contacts = next((t for t in schema.get("child_tables", []) if t["fieldname"] == "contacts"), None)
+            if contacts:
+                self.assertEqual(contacts["doctype"], "Contact")
+                self.assertTrue({"mobile_no", "email_id"} <= {f["fieldname"] for f in contacts["fields"]})
+                self.assertFalse({"mobile_no", "email_id"} & set(fields), doctype)
+            else:
+                for fieldname in ("mobile_no", "email_id"):
+                    self.assertEqual(fields[fieldname]["type"], "Data", (doctype, fieldname))
+                    self.assertIn("primary contact", fields[fieldname]["note"], (doctype, fieldname))
+            self.assertNotIn("Read Only", json.dumps(schema), doctype)
+
+    @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext")
     def test_delivery_note_includes_po_no_and_stays_short(self):
         schema = self._schema("Delivery Note")
 

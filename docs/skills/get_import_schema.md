@@ -42,7 +42,8 @@ Use this, not `get_doctype_info`, for imports. `get_doctype_info` returns a DocT
 - **Named by the user** (`naming.rule` says "typed by the user"): an insert needs a column mapped to `name` (ID).
 - **`link`**: the value must be an existing record of that DocType (e.g. an Item Group that exists).
 - **`options`**: a Select field accepts only these values. Very long lists are cut to 25, with `options_total`.
-- **`child_tables`**: rows inside the record, such as an Item's barcodes. Map their columns as `barcodes.barcode`.
+- **`note`**: what to know about the field. A field Frappe types "Read Only" is listed as `Data` with a note: it is importable, and the note says what becomes of the value (e.g. Customer's `mobile_no`: "On a new Customer, ERPNext creates the primary contact from this.").
+- **`child_tables`**: rows inside the record, such as an Item's barcodes. Map their columns as `barcodes.barcode`. A table with a `note` (Frappe 16's `contacts` and `addresses` on Customer and Supplier) holds other records the import creates and links to the record.
 
 ## When it fails
 
@@ -56,7 +57,8 @@ It fails up front, with the reason in `error`, when the import can't happen. It 
 1. **Work out the DocType from the file first.** Look at the headers and sample rows of the attached file. Tell the user what you think it is and why, e.g. "These look like **Customers**: there's a name, a GSTIN and a customer group." Then call this tool.
 2. **Match columns by meaning, not exact label.** "Cust Name" → `customer_name`, "Party" → the customer or supplier name, "GSTIN No." → the GSTIN field. Use labels, types and options to decide.
 3. **Check the child tables.** A column like "Barcode" on an item list belongs in `barcodes`, not on the Item itself.
-4. **Some data is its own DocType in ERPNext.** A customer's addresses and contacts are separate **Address** and **Contact** records, not fields on Customer. Say so, and import them as a separate step.
+4. **Map a customer's or supplier's phone and email** by default; leave them out only when the user says so. When the schema has a `contacts` table (Frappe 16), map a Mobile / Phone / Contact No column to `contacts.mobile_no` and an Email column to `contacts.email_id`, and address columns to the `addresses` table: each row then gets its own linked Contact and Address. Otherwise map them to `mobile_no` and `email_id`: on a new Customer or Supplier, ERPNext creates the primary contact from them.
+5. **Some data is its own DocType in ERPNext.** Without those tables, addresses, and contacts beyond the first, are separate **Address** and **Contact** records, not fields on Customer. Say so, and import them as a separate step.
 
 ## Related
 

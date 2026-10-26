@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import frappe
 from frappe import _
 from frappe.model import display_fieldtypes, no_value_fields, table_fields
+from frappe.model.base_document import get_controller
 from frappe.utils import cint, flt
 
 DONT_IMPORT = "Don't Import"
@@ -49,10 +50,17 @@ def build_import_schema(doctype: str) -> Dict[str, Any]:
     leaves out hidden and read-only fields, which an import does not set.
     """
     meta = frappe.get_meta(doctype)
+    provided = _provided_fields(doctype)
+    fields = _importable_fields(meta)
+    if provided:
+        # what the import provider leaves out of the record itself (a party's phone and email,
+        # which its contacts table imports) isn't offered on it
+        own = {df.get("fieldname") for df in provided.get("fields") or []}
+        fields = [field for field in fields if field["fieldname"] in own]
     schema: Dict[str, Any] = {
         "doctype": doctype,
         "naming": _naming(meta),
-        "fields": _importable_fields(meta),
+        "fields": fields,
     }
 
     child_tables = []
@@ -68,6 +76,7 @@ def build_import_schema(doctype: str) -> Dict[str, Any]:
             table["required"] = True
         table["fields"] = _importable_fields(frappe.get_meta(table_df.options))
         child_tables.append(table)
+    child_tables += _linked_tables(meta, provided)
     if child_tables:
         schema["child_tables"] = child_tables
 
@@ -78,9 +87,49 @@ def build_import_schema(doctype: str) -> Dict[str, Any]:
     return schema
 
 
-def _importable_fields(meta) -> List[Dict[str, Any]]:
+def _provided_fields(doctype: str) -> Optional[Dict[str, Any]]:
+    """The fields and tables the DocType's import provider takes (Frappe 16; ERPNext has one for
+    Customer and Supplier), or None. Data Import maps the columns against these."""
+    try:
+        from frappe.core.doctype.data_import.import_provider import get_import_provider
+    except ImportError:  # Frappe 15
+        return None
+    provider = get_import_provider(doctype)
+    return (provider.get_import_fields() or None) if provider else None
+
+
+def _linked_tables(meta, provided: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The import provider's tables that aren't the DocType's own: other records it creates and
+    links to each one, as ERPNext's party provider does with Contacts and Addresses."""
+    own = {table_df.fieldname for table_df in meta.get_table_fields()}
+    tables = []
+    for table in (provided or {}).get("child_tables") or []:
+        docfields = [frappe._dict(df) for df in table.get("fields") or []]
+        linked = docfields[0].get("parent") if docfields else None
+        if table["fieldname"] in own or not linked:
+            continue
+        for df in docfields:
+            if df.get("in_import_template"):
+                # set by the provider though the DocType's form keeps it (Contact email and mobile)
+                df.read_only = 0
+        tables.append(
+            {
+                "fieldname": table["fieldname"],
+                "label": table.get("label") or table["fieldname"],
+                "doctype": linked,
+                "linked": True,
+                "note": _("Each row creates a {0} linked to the {1}; the first row is its primary.").format(
+                    _(linked), _(meta.name)
+                ),
+                "fields": _importable_fields(frappe.get_meta(linked), docfields),
+            }
+        )
+    return tables
+
+
+def _importable_fields(meta, docfields=None) -> List[Dict[str, Any]]:
     fields = []
-    for df in meta.fields:
+    for df in meta.fields if docfields is None else docfields:
         if df.fieldtype in display_fieldtypes + no_value_fields or df.hidden or df.read_only:
             continue
         field: Dict[str, Any] = {
@@ -88,6 +137,11 @@ def _importable_fields(meta) -> List[Dict[str, Any]]:
             "label": df.label or df.fieldname,
             "type": df.fieldtype,
         }
+        if df.fieldtype == "Read Only":
+            # The field's type, not a lock (read_only is unset, so an import sets it). Shown as
+            # "Read Only", it read as one, and a Customer's phone and email were left out.
+            field["type"] = "Data"
+            field["note"] = _read_only_type_note(meta, df)
         if df.reqd:
             field["required"] = True
             if df.default:
@@ -109,6 +163,34 @@ def _importable_fields(meta) -> List[Dict[str, Any]]:
                 field["options_total"] = len(options)
         fields.append(field)
     return fields
+
+
+def _makes_primary_contact(meta, df) -> bool:
+    """Whether a new record makes its primary Contact from ``df``: a Customer's or Supplier's
+    phone and email on ERPNext 15, read by its create_primary_contact. (ERPNext 16 hides them, and
+    its import provider takes them in a contacts table instead.)"""
+    if df.fieldtype != "Read Only" or not df.fetch_from:
+        return False
+    link = meta.get_field(df.fetch_from.partition(".")[0])
+    if not (link and link.fieldtype == "Link" and link.options == "Contact"):
+        return False
+    try:
+        return hasattr(get_controller(meta.name), "create_primary_contact")
+    except Exception:
+        return False
+
+
+def _read_only_type_note(meta, df) -> str:
+    """What becomes of a value imported into a field of type Read Only, which shows a value
+    fetched through a link (``fetch_from``) or set by the DocType's own code."""
+    if _makes_primary_contact(meta, df):
+        return _("On a new {0}, ERPNext creates the primary contact from this.").format(_(meta.name))
+    link = meta.get_field(df.fetch_from.partition(".")[0]) if df.fetch_from else None
+    if link:
+        return _("Filled from {0} when that is set, so the file's value is kept only without it.").format(
+            _(link.label or link.fieldname)
+        )
+    return _("ERPNext may set this itself when the record is saved.")
 
 
 def _hsn_validated(doctype: str, fieldname: str) -> bool:

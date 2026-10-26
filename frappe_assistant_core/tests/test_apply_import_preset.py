@@ -22,6 +22,7 @@ from frappe_assistant_core.tests.test_import_presets import LEDGERS, TB
 from frappe_assistant_core.utils import import_opening_invoices as opening_invoices
 from frappe_assistant_core.utils import import_opening_stock as opening_stock
 from frappe_assistant_core.utils import import_presets as presets
+from frappe_assistant_core.utils.import_mapping import build_import_schema
 from frappe_assistant_core.utils.import_session import import_target_problem
 
 
@@ -36,16 +37,35 @@ def xlsx(rows, sheet="Sheet1") -> bytes:
     return buffer.getvalue()
 
 
+def has_contacts_table():
+    """Whether Customer's import takes contacts in a table of their own (Frappe 16's provider)."""
+    schema = build_import_schema("Customer")
+    return any(t["fieldname"] == "contacts" for t in schema.get("child_tables", []))
+
+
+def mapped_columns(described):
+    """Column → field of a described mapping, the record's and its tables' (contacts.email_id)."""
+    rows = [
+        *described["mapping"],
+        *(row for table in described.get("child_tables", {}).values() for row in table),
+    ]
+    return {row["column"]: row["field"] for row in rows}
+
+
 def assert_gstin_and_email_follow_the_site(test, mapped, result):
     """The shipped ledgers preset's GSTIN and Email columns, as this site's Customer takes them.
 
     GSTIN goes to the first of ["gstin", "tax_id"] the site has: India Compliance adds gstin.
-    ERPNext 16 hides Customer's email_id (it shows the primary contact's), and a hidden field is
-    not imported, so there Email is reported as not on this site instead.
+    Email goes to the Customer's email_id; on ERPNext 16, whose import provider takes a party's
+    contacts in a table of their own, to contacts.email_id. Where an administrator hid email_id
+    (Frappe 15), it is reported as not on this site.
     """
     customer = frappe.get_meta("Customer")
     test.assertEqual(mapped["GSTIN"], "gstin" if customer.has_field("gstin") else "tax_id")
-    if customer.get_field("email_id").hidden:
+    if has_contacts_table():
+        test.assertEqual(mapped["Email"], "contacts.email_id")
+        test.assertNotIn("Email (email_id)", result.get("not_on_this_site", []))
+    elif customer.get_field("email_id").hidden:
         test.assertNotIn("Email", mapped)
         test.assertIn("Email (email_id)", result["not_on_this_site"])
     else:
@@ -979,12 +999,14 @@ class TestShippedPresets(PresetToolCase):
         self.assertIn("Tally Prime", result["message"])
         self.assertFalse(result["preset"]["verified"])
         customers = next(s for s in result["sessions"] if s["target"] == "Customers")
-        mapped = {row["column"]: row["field"] for row in customers["mapping"]["mapping"]}
+        mapped = mapped_columns(customers["mapping"])
         self.assertEqual(mapped["Name"], "customer_name")
         assert_gstin_and_email_follow_the_site(self, mapped, result)
         self.assertEqual(result["needs"][0]["name"], "company")
 
     def test_a_hidden_email_field_is_listed_as_not_on_this_site(self):
+        if has_contacts_table():
+            self.skipTest("Frappe 16 imports the email through the contacts table, hidden or not")
         if not frappe.get_meta("Customer").get_field("email_id").hidden:
             # ERPNext 16 ships it hidden; on v15 an administrator hides it in Customize Form
             from frappe.custom.doctype.property_setter.property_setter import make_property_setter

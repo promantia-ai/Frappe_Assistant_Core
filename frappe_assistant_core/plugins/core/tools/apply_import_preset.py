@@ -530,11 +530,21 @@ class ApplyImportPreset(BaseTool):
         fields |= {
             f"{t['fieldname']}.{f['fieldname']}" for t in schema.get("child_tables", []) for f in t["fields"]
         }
+        # A field the import provider takes in a linked table instead (Frappe 16: a party's email_id
+        # is contacts.email_id), so a preset written for the record itself still finds it.
+        linked = {}
+        for table in schema.get("child_tables", []):
+            if table.get("linked"):
+                for field in table["fields"]:
+                    linked.setdefault(field["fieldname"], f"{table['fieldname']}.{field['fieldname']}")
         chosen = {}
         taken = set()
         for column in header:
             wanted = mapping.get(column, DONT_IMPORT)
-            candidates = wanted if isinstance(wanted, list) else [wanted]
+            candidates = [
+                c if c in fields or c == DONT_IMPORT else linked.get(c, c)
+                for c in (wanted if isinstance(wanted, list) else [wanted])
+            ]
             pick = next((c for c in candidates if c == DONT_IMPORT or (c in fields and c not in taken)), None)
             if pick is not None:
                 taken.add(pick)

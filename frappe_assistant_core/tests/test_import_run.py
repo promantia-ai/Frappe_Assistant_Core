@@ -261,6 +261,34 @@ class TestImportRun(ImportRunCase):
         )
         self.assertEqual(doc.steps[-1].step, "Import")
 
+    def test_a_customers_phone_and_email_become_its_primary_contact(self):
+        name = f"Phone {self.tag}"
+        email = f"phone-{self.tag}@example.com".lower()
+        lines = [",".join([*MAPPING, "Mobile", "Email"]), f"{name},{self.group},Company,9845012345,{email}"]
+        file_doc = self._file("customers.csv", ("\n".join(lines) + "\n").encode())
+        session = self._run("start_import_session", {"file_url": file_doc.file_url})["result"]["session_id"]
+        # where the schema offers them: on the Customer (Frappe 15) or its contacts table (16)
+        schema = self._run("get_import_schema", {"doctype": "Customer"})["result"]
+        table = (
+            "contacts." if any(t["fieldname"] == "contacts" for t in schema.get("child_tables", [])) else ""
+        )
+        mapping = {**MAPPING, "Mobile": f"{table}mobile_no", "Email": f"{table}email_id"}
+        mapped = self._run(
+            "set_column_mapping", {"session": session, "mapping": mapping, "doctype": "Customer"}
+        )
+        self.assertTrue(mapped["success"], mapped)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+
+        response = self._import(session, checked)
+
+        self.assertTrue(response["success"], response)
+        customer = frappe.get_doc("Customer", {"customer_name": name})
+        self.assertEqual((customer.mobile_no, customer.email_id), ("9845012345", email))
+        self.assertTrue(customer.customer_primary_contact)
+        contact = frappe.get_doc("Contact", customer.customer_primary_contact)
+        self.assertEqual((contact.mobile_no, contact.email_id), ("9845012345", email))
+
     def test_the_data_import_is_like_any_other_in_desk(self):
         session, checked = self._ready_session()
 
