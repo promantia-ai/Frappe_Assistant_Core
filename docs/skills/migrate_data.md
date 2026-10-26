@@ -149,6 +149,8 @@ import tool yourself, in this conversation, one step after another.
   `closest`, or one the user gave. A value from the user's file is never replaced by a different
   value (for example "Retail" with "Commercial") unless the user chose that in a fix group. Close
   matches are offered, never applied unasked.
+- **Explaining only in your thinking.** The user doesn't see it. What the files hold, the plan, the
+  questions and what you suggest go in your message's text, before any card that asks about them.
 - **Adding up numbers yourself.** Row counts, totals and differences come from the tools. Quote
   them as they are.
 

@@ -32,8 +32,9 @@ Ask once, with one card. The user is touched twice in a whole migration: the cut
 start (`plan_migration`'s `opening_setup`; the company only when the site has more than one), then
 this card. `next` in the result says which of the steps below comes now.
 
-1. Show **every** question in **one table, in your message** (not inside the card: a card shows
-   no tables): file, the problem in plain words, and the answer you suggest (the first of its
+1. Show **every** question in **one table, in your message's text** (not inside the card: a card
+   shows no tables; and never only in your thinking, which the user doesn't see, so a card asking
+   "how should I proceed?" would have nothing above it): file, the problem in plain words, and the answer you suggest (the first of its
    `fixes`). Every one: typos, missing records, duplicates, rows left out, values with no match.
    Put the cut-off date in it, and the failure rule (`leave_out`). A question with `needed_by`
    says so in its row: "leaving it out also leaves out <needed_by>"; prefer a fix that keeps it.
