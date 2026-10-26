@@ -65,8 +65,12 @@ class SheetSummary:
     rows: Optional[List[List[str]]] = None  # the headings and every row under them, when kept
 
     def as_dict(self) -> Dict[str, Any]:
-        """What the session stores: no sample rows, so no data from the file."""
-        return {"name": self.name, "columns": self.columns, "row_count": self.row_count}
+        """What the session stores: no sample rows, so no data from the file. The headings' row
+        when it isn't the first: a corrected file is read on it when the guess misses (#34541)."""
+        out = {"name": self.name, "columns": self.columns, "row_count": self.row_count}
+        if self.header_row > 1:
+            out["header_row"] = self.header_row
+        return out
 
 
 @dataclass
