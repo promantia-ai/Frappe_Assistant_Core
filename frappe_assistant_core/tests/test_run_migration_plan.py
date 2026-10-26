@@ -505,21 +505,30 @@ class TestAPlanWithALargeFile(ImportRunCase):
         self.assertEqual(len(self._brands()), rows)
 
     def test_a_plan_file_over_a_hundred_rows_keeps_the_steps_rollback(self):
-        # The check commits every PROGRESS_EVERY rows (#34401), also inside the plan's step. A
-        # failure after it still ends the plan, saying why, and the file isn't left half imported.
+        # The check frees its series locks every PROGRESS_EVERY rows (#34401), but not inside the
+        # plan's step, whose savepoint must survive it. A failure after it still ends the plan,
+        # saying why, and the file isn't left half imported.
         rows = import_dry_run.PROGRESS_EVERY + 1
         plan, session = self._brands_plan(rows)
         self._ready(plan, rows)
         figures = {"plan": plan, **import_plan.card_figures(import_plan.get_plan(plan))}
+        kept, real = [], import_dry_run.release_series_locks
+
+        def release():
+            # whether the check left the transaction alone (commit is _each_row_commits' mock)
+            before = frappe.db.commit.call_count
+            real()
+            kept.append(frappe.db.commit.call_count == before)
 
         with patch.object(import_plan, "_file_done", side_effect=RuntimeError("the disk is full")):
-            with self._each_row_commits():
+            with self._each_row_commits(), patch.object(import_dry_run, "release_series_locks", release):
                 self._run("run_migration_plan", figures)
 
         doc = import_plan.get_plan(plan)
         self.assertEqual(doc.status, "Stopped")
         self.assertIn("the disk is full", doc.steps[-1].message)
         self.assertEqual(self._brands(), [])
+        self.assertTrue(kept and all(kept), kept)
 
     def test_a_large_file_is_still_refused_outside_a_plan(self):
         plan, session = self._brands_plan(import_dry_run.BACKGROUND_ROWS + 1)
