@@ -530,8 +530,7 @@ def _bring_up_to_date(plan, session) -> Optional[Dict[str, Any]]:
     if dry_run.row_count(session) > dry_run.BACKGROUND_ROWS:
         dry_run.enqueue(session)
         return {"kind": "checking", "message": _("Being checked in the background. Ask again in a moment.")}
-    with dry_run.plan_locked():  # the plan's row stays locked until the questions are answered
-        import_fixes.check(session.name)
+    import_fixes.check(session.name)  # never commits: the plan's row stays locked (#34431)
     return None
 
 

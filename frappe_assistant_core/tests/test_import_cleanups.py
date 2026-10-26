@@ -14,6 +14,8 @@ import unittest
 from unittest.mock import patch
 
 import frappe
+from frappe.database import get_db
+from frappe.query_builder import DocType
 
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
 from frappe_assistant_core.tests.test_import_mapping import ImportToolTestCase
@@ -205,23 +207,64 @@ class TestReviewFindings(ImportToolTestCase):
         self.assertEqual(import_session._summarise("Sheet1", iter(rows)).row_count, 1000)
 
 
-class TestSeriesLockCommits(unittest.TestCase):
-    def test_the_check_commits_except_inside_a_plans_own_transaction(self):
-        # #34401 commits every hundred rows to free the series locks; a plan step's savepoint and
-        # the plan row its questions lock (#34431) must outlive the check
+class TestSeriesLocks(unittest.TestCase):
+    """#34401: a row a check tries never locks its naming series, so no commit is needed to free
+    it, and a migration plan's transaction stays whole."""
+
+    def setUp(self):
+        self.key = f"FACLOCK{frappe.generate_hash(length=6).upper()}-"
+        series = DocType("Series")
+        # A series users already number documents in: committed, as theirs is.
+        frappe.qb.into(series).columns(series.name, series.current).insert(self.key, 7).run()
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit — the other connection must see the row
+
+    def tearDown(self):
+        frappe.db.rollback()
+        series = DocType("Series")
+        frappe.qb.from_(series).delete().where(series.name == self.key).run()
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit — setUp committed the row
+
+    def _current(self):
+        series = DocType("Series")
+        return frappe.qb.from_(series).select(series.current).where(series.name == self.key).run()[0][0]
+
+    def _locked_elsewhere(self) -> bool:
+        """Whether another user's save would have to wait for the series row."""
+        conf = frappe.conf
+        other = get_db(
+            host=conf.db_host,
+            port=conf.db_port,
+            user=conf.db_user or conf.db_name,
+            password=conf.db_password,
+            cur_db_name=conf.db_name,
+            socket=conf.db_socket,
+        )
+        other.connect()
+        try:
+            other.sql("select `current` from `tabSeries` where `name`=%s for update nowait", self.key)
+            return False
+        except Exception:
+            return True
+        finally:
+            other.rollback()
+            other.close()
+
+    def test_a_tried_row_neither_locks_nor_moves_a_naming_series(self):
+        # make_autoname is how a row's insert reaches getseries (an "ABC-.#####" naming series)
+        from frappe.model.naming import make_autoname
+
         from frappe_assistant_core.utils import import_dry_run
 
-        with patch.object(import_dry_run.frappe.db, "commit") as commit:
-            import_dry_run.release_series_locks()  # a check on its own: commits
-            with import_dry_run.plan_locked():
-                import_dry_run.release_series_locks()
-            frappe.local.fac_plan_running = "PLAN-TEST"
-            try:
-                import_dry_run.release_series_locks()
-            finally:
-                frappe.local.fac_plan_running = None
+        with import_dry_run.held_back():
+            names = [make_autoname(f"{self.key}.#####"), make_autoname(f"{self.key}.#####")]
+            locked = self._locked_elsewhere()
 
-        self.assertEqual(commit.call_count, 1)
+        self.assertFalse(locked)
+        # each name the row takes is the next one, as the import will give it
+        self.assertEqual(names, [f"{self.key}00008", f"{self.key}00009"])
+        self.assertEqual(self._current(), 7)
+        # outside a check, the series moves as before
+        self.assertEqual(make_autoname(f"{self.key}.#####"), f"{self.key}00008")
 
 
 class TestPlanFencing(unittest.TestCase):

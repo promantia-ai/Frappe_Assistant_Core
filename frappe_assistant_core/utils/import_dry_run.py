@@ -41,7 +41,8 @@ from frappe.core.doctype.data_import.importer import (
     df_as_json,
     get_autoname_field,
 )
-from frappe.utils import cstr, now_datetime, strip_html
+from frappe.query_builder import DocType
+from frappe.utils import cint, cstr, now_datetime, strip_html
 from rq import Queue
 
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_session
@@ -375,40 +376,25 @@ def run(session_name: str, commit_progress: bool = False, in_background: bool = 
     total = len(payloads)
     for done, payload in enumerate(payloads, start=1):
         checker.check(payload, excluded, imported)
-        if done % PROGRESS_EVERY == 0:
-            if commit_progress:
-                frappe.db.set_value(
-                    SESSION_DOCTYPE,
-                    session_name,
-                    "progress",
-                    _progress("running", done, total),
-                    update_modified=False,
-                )
-            release_series_locks()
+        if commit_progress and done % PROGRESS_EVERY == 0:
+            frappe.db.set_value(
+                SESSION_DOCTYPE,
+                session_name,
+                "progress",
+                _progress("running", done, total),
+                update_modified=False,
+            )
+            commit_progress_now()
 
     return _store(session_name, file_doc, checker, total)
 
 
-def release_series_locks() -> None:
-    """End the transaction, every PROGRESS_EVERY rows of a check: a row's SELECT ... FOR UPDATE on
-    a naming series survives its savepoint's rollback, and keeps real users' documents waiting
-    until the next commit (#34401). Each row is already rolled back, so only what the request wrote
-    before the check (and the progress) is kept. Not while a migration plan holds work of its own
-    in the transaction: a plan step's savepoint, or the plan row its questions locked (#34431)."""
-    if getattr(frappe.local, "fac_plan_running", None) or getattr(frappe.local, "fac_plan_locked", None):
-        return
-    frappe.db.commit()  # nosemgrep: frappe-manual-commit — each row is already rolled back
-
-
-@contextmanager
-def plan_locked():
-    """The plan's own transaction holds while a check runs inside (release_series_locks)."""
-    before = getattr(frappe.local, "fac_plan_locked", None)
-    frappe.local.fac_plan_locked = True
-    try:
-        yield
-    finally:
-        frappe.local.fac_plan_locked = before
+def commit_progress_now() -> None:
+    """The check job's progress, committed so the session shows it (run_job: the job's transaction
+    holds nothing else). A check inside a request or a migration plan never commits: the caller's
+    transaction, a plan step's savepoint included, stays whole. No commit is needed to free a
+    naming series either: a row being tried never locks one (_held_series, #34401)."""
+    frappe.db.commit()  # nosemgrep: frappe-manual-commit — the check job's own transaction
 
 
 def only_mapped(column_map: Dict[str, str], width: int) -> Dict[str, str]:
@@ -1270,6 +1256,8 @@ _HELD_FUNCTIONS = (
     (Queue, "enqueue_job"),
     (frappe, "publish_realtime"),
     (frappe.realtime, "publish_realtime"),
+    # A naming series: its SELECT ... FOR UPDATE outlives the row's savepoint (#34401)
+    ("frappe.model.naming", "getseries"),
 )
 #: Doc-event handlers that reach an outside service while the row is tried, held back with it:
 #: the Google Calendar and Google Contacts sync call Google at once, not at commit, and would change
@@ -1322,7 +1310,20 @@ def _held_queue_job(queue, job, *args, **kwargs):
 
 
 #: What a held function gives back instead of None, by name
-_HELD_RESULTS = {"enqueue": _held_enqueue, "enqueue_job": _held_queue_job}
+def _held_series(key: str, digits: int) -> str:
+    """getseries while a row is tried: the next number, read without a lock and never written.
+    getseries locks the series row until the transaction ends, which a savepoint's rollback
+    doesn't do, so real users numbering documents in that series would wait for the whole check
+    (#34401). The row is rolled back, so the series mustn't move anyway. The numbers this row
+    takes count, so a row that names two documents in a series gets two names."""
+    taken = frappe.local.fac_held_series
+    series = DocType("Series")
+    current = frappe.qb.from_(series).select(series.current).where(series.name == key).run()
+    taken[key] = taken.get(key, cint(current[0][0]) if current and current[0][0] is not None else 0) + 1
+    return ("%0" + str(digits) + "d") % taken[key]
+
+
+_HELD_RESULTS = {"enqueue": _held_enqueue, "enqueue_job": _held_queue_job, "getseries": _held_series}
 
 
 def _hold_aware(original, held=None):
@@ -1375,6 +1376,8 @@ def held_back():
     # once: they are held back for this request only, never swapped out for the whole process.
     _install_hold_aware()
     frappe.local.fac_holding_back = getattr(frappe.local, "fac_holding_back", 0) + 1
+    if frappe.local.fac_holding_back == 1:
+        frappe.local.fac_held_series = {}  # the series numbers this row has taken
     # A controller that commits must not keep the row (frappe.db is this request's own). What was
     # in place before goes back after: the class's commit, or a stand-in set around this check.
     before = frappe.db.__dict__.get("commit")
@@ -1402,6 +1405,8 @@ def held_back():
         else:
             frappe.db.rollback = before_rollback
         frappe.local.fac_holding_back -= 1
+        if not frappe.local.fac_holding_back:
+            frappe.local.fac_held_series = None
         rolled_back = list(frappe.db.after_rollback._functions)[len(callbacks["after_rollback"]) :]
         for name, functions in callbacks.items():
             manager = getattr(frappe.db, name)

@@ -795,16 +795,15 @@ def _erpnext_check(
                 (dry_run.CAUSE_REJECTED, kind, message),
                 {"cause": dry_run.CAUSE_REJECTED, "error": kind, "message": message},
             )
-        if done % dry_run.PROGRESS_EVERY == 0:
-            if commit_progress:
-                frappe.db.set_value(
-                    dry_run.SESSION_DOCTYPE,
-                    session.name,
-                    "progress",
-                    dry_run._progress("running", done, total),
-                    update_modified=False,
-                )
-            dry_run.release_series_locks()
+        if commit_progress and done % dry_run.PROGRESS_EVERY == 0:
+            frappe.db.set_value(
+                dry_run.SESSION_DOCTYPE,
+                session.name,
+                "progress",
+                dry_run._progress("running", done, total),
+                update_modified=False,
+            )
+            dry_run.commit_progress_now()
     return passed
 
 
