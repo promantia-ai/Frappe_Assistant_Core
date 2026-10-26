@@ -8,8 +8,8 @@
 
 """FAC Import Session Data Import: a Data Import an import session created."""
 
-from frappe.model.document import Document
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import SessionRow
 
 
-class FACImportSessionDataImport(Document):
+class FACImportSessionDataImport(SessionRow):
     pass

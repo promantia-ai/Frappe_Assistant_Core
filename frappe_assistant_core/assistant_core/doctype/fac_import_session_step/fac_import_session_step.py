@@ -8,8 +8,8 @@
 
 """FAC Import Session Step: one row of an import session's audit log."""
 
-from frappe.model.document import Document
+from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import SessionRow
 
 
-class FACImportSessionStep(Document):
+class FACImportSessionStep(SessionRow):
     pass

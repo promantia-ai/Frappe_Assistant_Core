@@ -238,6 +238,46 @@ class TestWritesToAnExistingSession(SessionGuardCase):
 
                 self.assertEqual(self._rows(session, "steps"), before)
 
+    # -- a row on its own (Paul's review of 49da112) -------------------------------------------
+
+    def test_a_row_cannot_be_written_on_its_own(self):
+        # PUT /api/resource/FAC Import Session Step/<row> saved the row alone, past the session's
+        # guard: the session was loaded from the database and saw no change (#34400). Production
+        # reaches each case below over REST: PUT and POST on the row's DocType, and a delete.
+        session, _checked = self._failed_session()
+        tables = ("steps", "created_records", "data_imports")
+        before = {table: self._rows(session, table) for table in tables}
+        step = before["steps"][-1].name
+
+        def edit_a_step():
+            row = frappe.get_doc("FAC Import Session Step", step)
+            row.message = "FORGED by the owner over REST"
+            row.save()
+
+        def add_a_record():
+            frappe.get_doc(
+                {
+                    "doctype": "FAC Import Session Record",
+                    "parent": session,
+                    "parenttype": SESSION,
+                    "parentfield": "created_records",
+                    "record_doctype": "Customer Group",
+                    "record_name": self.group,
+                }
+            ).insert()
+
+        for name, write in (("edit a step", edit_a_step), ("add a record", add_a_record)):
+            with self.subTest(write=name), self.assertRaises(frappe.PermissionError):
+                write()
+
+        # A System Manager may delete a session, but not rewrite its audit log a row at a time.
+        frappe.set_user(self.make_throwaway_user("manager", roles=("System Manager",)))
+        with self.assertRaises(frappe.PermissionError):
+            frappe.delete_doc("FAC Import Session Step", step)
+
+        frappe.set_user("Administrator")
+        self.assertEqual({table: self._rows(session, table) for table in tables}, before)
+
     # -- criterion 5 and 6: REST and the document tools -------------------------------------
 
     def test_frappe_client_set_value_cannot_change_the_status(self):

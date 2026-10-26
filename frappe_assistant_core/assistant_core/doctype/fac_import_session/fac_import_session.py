@@ -64,6 +64,27 @@ def engine_session(name: str):
     return engine_write(frappe.get_doc(SESSION_DOCTYPE, name))
 
 
+class SessionRow(Document):
+    """A row of an import session's tables: its audit steps, created records and Data Imports. The
+    engine writes rows only with their session, whose save writes them without their own
+    validate, so a row saved, added or deleted on its own (PUT or POST on its DocType,
+    frappe.client, bulk_update, a delete) is never the engine's (#34400)."""
+
+    def validate(self):
+        self._refuse()
+
+    def on_trash(self):
+        self._refuse()
+
+    def _refuse(self):
+        frappe.throw(
+            _(
+                "Only the import tools can change an import session: its {0} rows aren't changed one by one."
+            ).format(_(self.doctype)),
+            frappe.PermissionError,
+        )
+
+
 class FACImportSession(Document):
     def validate(self):
         # Every field is the engine's state: the dry run's verdict, the mapping, the file, the
