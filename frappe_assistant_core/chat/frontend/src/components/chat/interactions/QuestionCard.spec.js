@@ -86,6 +86,23 @@ describe("QuestionCard once answered", () => {
 	});
 });
 
+describe("QuestionCard while its answer is sent", () => {
+	// #34548: a click gave no sign it was taken, so users typed the answer too, which stopped FACO
+	it("marks the chosen option and says the answer is being sent", () => {
+		const option = singleSelectBlock.options[0];
+		const block = { ...singleSelectBlock, decision: { resolution: "answered", userResponse: option } };
+		const w = mountSingleSelect(block);
+
+		const chosen = w.findAll("button.pill").filter((b) => b.classes("chosen"));
+		expect(chosen.map((b) => b.text())).toEqual([option]);
+		expect(w.text()).toContain("Sending your answer");
+	});
+
+	it("says nothing of sending before an answer is chosen", () => {
+		expect(mountSingleSelect().text()).not.toContain("Sending your answer");
+	});
+});
+
 describe("QuestionCard markdown", () => {
 	it("question text renders markdown", () => {
 		const block = { question: "Use **bold** here?<script>alert(1)</script>", description: "See `code`" };

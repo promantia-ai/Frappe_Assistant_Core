@@ -8,6 +8,7 @@
 				v-for="option in block.options"
 				:key="option"
 				class="pill"
+				:class="{ chosen: sentAnswer === option }"
 				:disabled="locked"
 				@click="emit('respond', option)"
 			>
@@ -110,6 +111,8 @@
 			</button>
 		</div>
 	</div>
+	<!-- the answer is taken: say so while it is sent, or the user answers again (#34548) -->
+	<p v-if="block.decision" class="sending-answer">Sending your answer: {{ shownAnswer }}…</p>
 </template>
 
 <script setup>
@@ -125,6 +128,10 @@ const emit = defineEmits(["respond"]);
 
 // Answered (a decision is recorded) or being sent: the card takes no more input.
 const locked = computed(() => props.submitting || Boolean(props.block.decision));
+const sentAnswer = computed(() => props.block.decision?.userResponse ?? props.block.decision?.response);
+const shownAnswer = computed(() =>
+	Array.isArray(sentAnswer.value) ? sentAnswer.value.join(", ") : String(sentAnswer.value ?? ""),
+);
 
 // The agent writes questions in markdown; renderMarkdown sanitises the HTML.
 const questionHtml = computed(() => renderMarkdown(String(props.block.question ?? "")));
@@ -142,6 +149,18 @@ watch(showCustom, (open) => {
 </script>
 
 <style scoped>
+.pill.chosen {
+	border-color: var(--ql-accent);
+	color: var(--ql-accent);
+	font-weight: 600;
+}
+
+.sending-answer {
+	margin: 0.375rem 0 0;
+	font-size: 0.75rem;
+	color: var(--ql-text-secondary);
+}
+
 .question-block {
 	margin: 6px 0;
 	padding: 4px 0;
