@@ -26,6 +26,7 @@ are listed in ``created_records``.
 """
 
 import difflib
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -823,6 +824,7 @@ def check_masters(session, documents: List[Dict[str, Any]]) -> List[Dict[str, An
     for number, entry in enumerate(documents, start=1):
         try:
             item = _planned_master(session, plan, entry, listed, named)
+            _as_sent(entry, item)
         except FixProblem as e:
             problems.append({"document": number, "doctype": entry.get("doctype"), "error": str(e)})
             continue
@@ -833,6 +835,21 @@ def check_masters(session, documents: List[Dict[str, Any]]) -> List[Dict[str, An
     if problems:
         raise FixProblems(problems, _("Nothing was created. Correct these and call again."))
     return parents_first(planned)
+
+
+def _as_sent(entry: Dict[str, Any], item: Dict[str, Any]) -> None:
+    """Raise FixProblem unless ``entry`` was sent as ``item`` is created. The approval card shows
+    what was sent, so a parent or a group added here would be created unseen (#34409)."""
+
+    def given(data):
+        return {k: cstr(v).strip() for k, v in (data or {}).items() if cstr(v).strip() not in ("", "0")}
+
+    if given(entry.get("data")) != given(item["data"]):
+        raise FixProblem(
+            _("{0} '{1}' is created as {2}: send it so, so the approval card shows what is created.").format(
+                _(item["doctype"]), _planned_name(item), json.dumps(item["data"])
+            )
+        )
 
 
 def _listed_tree(documents) -> Tuple[set, set]:

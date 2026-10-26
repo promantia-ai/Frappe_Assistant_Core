@@ -215,12 +215,9 @@ class TestImportMasters(BaseAssistantTest):
         records = self._records(result, **{"Customer Group": chain[-1]})
         parent = "All Customer Groups"
         for name in chain:
-            records.append(
-                {
-                    "doctype": "Customer Group",
-                    "data": {"customer_group_name": name, "parent_customer_group": parent},
-                }
-            )
+            # sent as it is created, a group, so the approval card shows it (Paul's review of 49da112)
+            data = {"customer_group_name": name, "parent_customer_group": parent, "is_group": 1}
+            records.append({"doctype": "Customer Group", "data": data})
             parent = name
         return records
 
@@ -259,13 +256,28 @@ class TestImportMasters(BaseAssistantTest):
             self.assertEqual(frappe.db.get_value("Customer Group", child, "parent_customer_group"), parent)
         self.assertEqual([frappe.db.get_value("Customer Group", n, "is_group") for n in chain], [1, 1, 1])
 
-    def test_a_parent_can_be_sent_as_a_group(self):
+    def test_a_record_not_sent_as_it_is_created_is_refused(self):
+        # The approval card shows what FACO sends: a group or a root parent added here was created
+        # unseen (#34409, Paul's review of 49da112). The refusal says what to send instead.
         session, result = self._session()
         retail = f"Retail {self.tag}"
-        records = self._under(result, retail)
-        records[-1]["data"]["is_group"] = 1  # Retail, which Online goes under
+        cases = {
+            "a parent without is_group": lambda records: records[-1]["data"].pop("is_group"),
+            "no parent": lambda records: records[-1]["data"].pop("parent_customer_group"),
+        }
+        for case, change in cases.items():
+            with self.subTest(case=case):
+                records = self._under(result, retail)
+                change(records)
 
-        self.assertTrue(self._create(session, records)["success"])
+                response = self._create(session, records)
+
+                self.assertFalse(response["success"], response)
+                error = response["result"]["problems"][0]["error"]
+                self.assertIn(f"Customer Group '{retail}' is created as", error)
+                self.assertIn('"is_group": 1', error)
+                self.assertIn('"parent_customer_group": "All Customer Groups"', error)
+                self.assertFalse(frappe.db.exists("Customer Group", retail))
 
     def test_a_record_nothing_goes_under_cannot_be_made_a_group(self):
         session, result = self._session()
