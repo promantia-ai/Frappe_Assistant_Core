@@ -121,3 +121,7 @@ hold a file: another user's upload of the same file is theirs to read.
 One import may have at most Max Rows per Import rows (Assistant Core Settings; 50,000 by default).
 A larger file is refused with the limit: ask the user to split it into files of at most that many
 rows, then start a session for each, one after another.
+
+**The same file again in the same FAC Chat conversation** (same sheet, headings and import type)
+carries on with its open session: the reply has `reused: true` and that session's `session_id` and
+`status`. Continue from where it is; a different sheet or `header_row` starts a new session.

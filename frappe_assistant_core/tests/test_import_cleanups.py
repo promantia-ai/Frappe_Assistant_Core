@@ -257,3 +257,44 @@ class TestPlanFencing(unittest.TestCase):
         self.assertEqual(cut_off["message"], "The cut-off date: never guess it.")
         self.assertNotEqual(cut_off["dates"], {"stock.csv": "2026-03-31"})
         self.assertEqual(fenced["approval"], result["approval"])
+
+
+class TestSessionReuse(ImportToolTestCase):
+    """#34413: the same file sent again in the same chat carries on with its open session."""
+
+    def setUp(self):
+        super().setUp()
+        self.file_doc = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "reuse.csv",
+                "content": b"Name,City\nAcme,Pune\n",
+                "is_private": 1,
+            }
+        ).insert()
+        self.addCleanup(setattr, frappe.local, "ar_session_id", None)
+
+    def _start(self, chat, **arguments):
+        frappe.local.ar_session_id = chat
+        reply = self._run("start_import_session", {"file_id": self.file_doc.name, **arguments})
+        self.assertTrue(reply["success"], reply)
+        return reply["result"]
+
+    def test_the_same_file_in_the_same_chat_carries_on_with_its_session(self):
+        first = self._start("chat-1")
+        again = self._start("chat-1")
+
+        self.assertEqual(again["session_id"], first["session_id"])
+        self.assertTrue(again["reused"])
+        self.assertEqual(frappe.db.count("FAC Import Session", {"original_file": self.file_doc.name}), 1)
+
+    def test_another_chat_or_another_import_opens_its_own(self):
+        first = self._start("chat-1")
+
+        self.assertNotEqual(self._start("chat-2")["session_id"], first["session_id"])
+        update = self._start("chat-1", import_type="Update Existing Records")
+        self.assertNotEqual(update["session_id"], first["session_id"])
+        self.assertNotIn("reused", update)
+
+    def test_outside_fac_chat_each_call_opens_its_own(self):
+        self.assertNotEqual(self._start(None)["session_id"], self._start(None)["session_id"])

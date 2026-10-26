@@ -26,6 +26,7 @@ from frappe.utils import cint
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import engine_write
 from frappe_assistant_core.core.base_tool import BaseTool
 from frappe_assistant_core.utils.import_session import (
+    HOLDING_STATUSES,
     FileProblem,
     attach_session_copy,
     discard_session_copy,
@@ -181,6 +182,27 @@ class StartImportSession(BaseTool):
             discard_sheet_copy(download)
             return {"success": False, "error": problem, "row_count": chosen.row_count}
 
+        reused = None if sheet_url else self._open_session(file_doc, chosen, target_doctype, import_type)
+        if reused:
+            # the same file again in the same chat: carry on with its session, not a second one
+            return {
+                "success": True,
+                "session_id": reused.name,
+                "reused": True,
+                "file_name": file_doc.file_name,
+                "sheet": chosen.name,
+                "columns": chosen.columns,
+                "row_count": chosen.row_count,
+                "sample_rows": chosen.sample_rows,
+                "sheets": [s.as_dict() for s in sheets],
+                "target_doctype": reused.target_doctype,
+                "status": reused.status,
+                "note": _(
+                    "This file already has an open import session in this chat, {0} ({1}): carry on "
+                    "with it. To start over, give another sheet or header_row."
+                ).format(reused.name, _(reused.status)),
+            }
+
         copy = None
         try:
             copy = save_session_copy(file_doc.file_name, chosen)
@@ -232,6 +254,37 @@ class StartImportSession(BaseTool):
         if notes:
             result["note"] = " ".join(notes)
         return result
+
+    def _open_session(self, file_doc, chosen, target_doctype, import_type):
+        """The user's open session in this FAC Chat conversation for the same file, sheet,
+        headings and import, which a second call carries on with rather than open another
+        (#34413). Outside FAC Chat (no conversation to tell them apart), none."""
+        chat = getattr(frappe.local, "ar_session_id", None)
+        if not chat:
+            return None
+        for name in frappe.get_all(
+            "FAC Import Session",
+            filters={
+                "user": frappe.session.user,
+                "chat_session_id": chat,
+                "original_file": file_doc.name,
+                "status": ["in", HOLDING_STATUSES],
+            },
+            pluck="name",
+            order_by="creation desc",
+        ):
+            doc = frappe.get_doc("FAC Import Session", name)
+            stored = next(
+                (s for s in frappe.parse_json(doc.sheets or "[]") or [] if s.get("name") == doc.sheet), {}
+            )
+            if (
+                (doc.sheet or None) == (chosen.name or None)
+                and stored.get("columns") == chosen.columns
+                and (doc.import_type or "Insert New Records") == import_type
+                and (not target_doctype or not doc.target_doctype or doc.target_doctype == target_doctype)
+            ):
+                return doc
+        return None
 
     def _create_session(self, file_doc, copy, sheets, chosen, target_doctype, import_type, sheet_url):
         session = frappe.get_doc(
