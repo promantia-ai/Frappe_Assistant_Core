@@ -70,10 +70,20 @@ export function isDryRun(block) {
 }
 
 /** One short sentence saying why a step failed, or "" when there is nothing safe to show. */
+// An error a tool fenced as file content (untrusted_output.py): its text is the reason, not the
+// fence's tag and preamble (#34550).
+const FENCED = /^\s*<([a-z_]+)>\n[^\n]*\n([\s\S]*?)\n<\/\1>\s*$/;
+
+function unfenced(text) {
+	const match = FENCED.exec(text);
+	return match ? match[2] : text;
+}
+
 export function failureReason(block, maxLength = REASON_MAX) {
 	if (!toolFailed(block)) return "";
 	const result = toolResult(block);
-	const raw = [result.error, result.message].find((v) => typeof v === "string" && v.trim());
+	const found = [result.error, result.message].find((v) => typeof v === "string" && v.trim());
+	const raw = found && unfenced(found);
 	if (!raw || /Traceback \(most recent call last\)/i.test(raw)) return "";
 	const sentence = raw.trim().split(/\n|(?<=[.!?])\s/)[0].trim();
 	return sentence.length > maxLength ? `${sentence.slice(0, maxLength - 1)}…` : sentence;
