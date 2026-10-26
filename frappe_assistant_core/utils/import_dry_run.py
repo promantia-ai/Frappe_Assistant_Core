@@ -749,9 +749,11 @@ class _Checker:
         ERPNext can fail on it before Frappe says it is required: naming a Customer strips its
         Customer Name, so a blank one failed as "'NoneType' object has no attribute 'strip'"."""
         problems = []
-        for df in self.required:
-            # A value the parse dropped for a problem of its own (a missing link) is that problem
-            if df.fieldname in flagged or cstr(payload.doc.get(df.fieldname)).strip():
+        cells = payload.rows[0].data
+        for df, index in self.required:
+            # The file's own cell: the parse leaves out a link it can't find yet (a missing record,
+            # or one an earlier file of the plan creates), which isn't an empty value
+            if df.fieldname in flagged or (index < len(cells) and cstr(cells[index]).strip()):
                 continue
             label = _(df.label)
             info = {
@@ -1218,14 +1220,17 @@ def _name_field(doctype: str) -> Optional[str]:
     return None
 
 
-def _required_fields(session, header) -> List[Any]:
-    """The mapped fields a new record can't be saved without: required with no default, and the
-    one it is named by (#34537)."""
+def _required_fields(session, header) -> List[Tuple[Any, int]]:
+    """The mapped fields a new record can't be saved without, each with its column: required with
+    no default, and the one it is named by (#34537)."""
     named = _name_field(session.target_doctype)
     return [
-        df
-        for fieldname, df in _mapped_fields(session, header).items()
-        if fieldname == named or (df.reqd and not df.default)
+        (column.df, column.index)
+        for column in header.columns
+        if column.df
+        and not column.skip_import
+        and column.df.parent == session.target_doctype
+        and (column.df.fieldname == named or (column.df.reqd and not column.df.default))
     ]
 
 

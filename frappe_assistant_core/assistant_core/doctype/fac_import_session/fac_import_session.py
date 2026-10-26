@@ -218,7 +218,9 @@ def release(session: str) -> None:
     """End a session no tool moves on any more, for a System Manager (#34538): an import whose
     worker died, say. It is Cancelled, so it stops holding the user's file; nothing it imported is
     undone. The engine writes it, as only it may (validate refuses a hand edit)."""
-    frappe.only_for("System Manager")
+    # Not frappe.only_for, which lets anyone through while tests run (Frappe 15)
+    if "System Manager" not in frappe.get_roles():
+        frappe.throw(_("Only a System Manager can release an import session."), frappe.PermissionError)
     doc = engine_session(session)
     if doc.status in ENDED:
         frappe.throw(_("Import session {0} has ended already ({1}).").format(session, _(doc.status)))
