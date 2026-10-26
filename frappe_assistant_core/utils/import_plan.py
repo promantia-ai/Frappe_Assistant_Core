@@ -1272,7 +1272,10 @@ def _import(child) -> bool:
     from frappe_assistant_core.utils import import_run
 
     summary = frappe.parse_json(child.validation_summary or "{}") or {}
-    if child.status == "Completed" or not summary.get("ready"):
+    if child.status == "Completed":
+        return False
+    if not summary.get("ready"):
+        import_run.close_unchanged(child)  # an update with every row unchanged is done (#34436)
         return False  # nothing left to import in it
     engine = dry_run.special_engine(child)
     if engine:

@@ -158,6 +158,17 @@ def nothing_to_change(session) -> bool:
     return "unchanged" in statuses and "ready" not in statuses
 
 
+def close_unchanged(session) -> bool:
+    """Complete an update whose every row already holds the file's values (#34436): it is done
+    without a Data Import, and doesn't stay Ready to Import for good. True when it was one."""
+    if not nothing_to_change(session):
+        return False
+    session.status = "Completed"
+    session.log_step("Import", "Success", _(NOTHING_TO_CHANGE))
+    session.save()
+    return True
+
+
 def start(session) -> str:
     """Import a session that passed the dry run: the cleaned file, a Data Import, started. A
     session imported before gets only its rows not imported yet, in a new Data Import."""
@@ -178,12 +189,7 @@ def start(session) -> str:
                 "dry_run_import first: only a file that passed is imported."
             )
         )
-    if nothing_to_change(session):
-        # Every row already holds the file's values (#34436): the import is done without a Data
-        # Import, and the session doesn't stay Ready to Import for good.
-        session.status = "Completed"
-        session.log_step("Import", "Success", _(NOTHING_TO_CHANGE))
-        session.save()
+    if close_unchanged(session):
         raise NothingToChange(_(NOTHING_TO_CHANGE))
     earlier = import_failures.imports_of_this_file(session)
     # A tree's rows whose parent rows aren't in ERPNext yet wait for a later Data Import.

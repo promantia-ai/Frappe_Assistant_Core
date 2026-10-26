@@ -20,7 +20,7 @@ import frappe
 # The module, not its class: a test class imported here would run again with this module's tests.
 from frappe_assistant_core.tests import test_import_run as run_tests
 from frappe_assistant_core.tests.base_test import item_hsn_fields
-from frappe_assistant_core.utils import import_update
+from frappe_assistant_core.utils import import_plan, import_update
 
 INSERT = "Insert New Records"
 UPDATE = "Update Existing Records"
@@ -580,6 +580,28 @@ class TestUpdateRun(UpdateCase):
         self.assertIn("Nothing to change", response["result"]["message"])
         doc = self._doc(session)
         self.assertEqual((doc.status, len(doc.data_imports)), ("Completed", 0))
+
+
+class TestUpdateInAPlan(UpdateCase):
+    def test_an_all_unchanged_update_in_a_plan_is_completed(self):
+        # #34436, Paul's review of 49da112: the plan skipped a file with no row to send, so the
+        # session stayed Ready to Import, the plan ended Partially Completed and sign-off listed it
+        session, mapped = self._session([f"TAX-A-{self.tag},{self.group},https://a.example"])
+        self.assertTrue(mapped["success"], mapped)
+        plan = self._run("plan_migration", {"sessions": [session], "failure_rule": "leave_out"})["result"]
+        plan = plan["plan"]
+        answers = [{"id": "plan:failure_rule", "rule": "leave_out"}]
+        ready = self._run("plan_questions", {"plan": plan, "answers": answers})["result"]
+        self.assertTrue(ready["ready"], ready)
+        figures = {"plan": plan, **import_plan.card_figures(import_plan.get_plan(plan))}
+
+        with self._each_row_commits():
+            response = self._run("run_migration_plan", figures)
+
+        self.assertTrue(response["success"], response)
+        doc = self._doc(session)
+        self.assertEqual((doc.status, len(doc.data_imports)), ("Completed", 0))
+        self.assertEqual(import_plan.get_plan(plan).status, "Completed")
 
 
 class TestUpdateFetchedFields(UpdateCase):
