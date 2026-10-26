@@ -64,7 +64,8 @@ class TestDataImportSession(run_tests.ImportRunCase):
         summary = import_signoff.session_summary(self._doc(session))
 
         self.assertEqual(
-            summary["rows"], {"source": 4, "imported": 2, "excluded": 1, "failed": 1, "not_imported": 0}
+            summary["rows"],
+            {"source": 4, "imported": 2, "unchanged": 0, "excluded": 1, "failed": 1, "not_imported": 0},
         )
         self.assertEqual(summary["excluded"], [{"reason": "Closed shop", "count": 1, "rows": "3"}])
         [failed] = summary["failed"]
@@ -97,7 +98,8 @@ class TestDataImportSession(run_tests.ImportRunCase):
         summary = import_signoff.session_summary(self._doc(session))
 
         self.assertEqual(
-            summary["rows"], {"source": 4, "imported": 3, "excluded": 1, "failed": 0, "not_imported": 0}
+            summary["rows"],
+            {"source": 4, "imported": 3, "unchanged": 0, "excluded": 1, "failed": 0, "not_imported": 0},
         )
         self.assertEqual(summary["excluded"][0]["rows"], "3")
 
@@ -114,7 +116,8 @@ class TestDataImportSession(run_tests.ImportRunCase):
         )
         midway = import_signoff.session_summary(self._doc(session))
         self.assertEqual(
-            midway["rows"], {"source": 4, "imported": 3, "excluded": 0, "failed": 1, "not_imported": 0}
+            midway["rows"],
+            {"source": 4, "imported": 3, "unchanged": 0, "excluded": 0, "failed": 1, "not_imported": 0},
         )
         frappe.db.set_value("Customer Group", self.held, "is_group", 0)
         self._send_back(session, {1: self.held})
@@ -122,7 +125,8 @@ class TestDataImportSession(run_tests.ImportRunCase):
         summary = import_signoff.session_summary(self._doc(session))
 
         self.assertEqual(
-            summary["rows"], {"source": 4, "imported": 4, "excluded": 0, "failed": 0, "not_imported": 0}
+            summary["rows"],
+            {"source": 4, "imported": 4, "unchanged": 0, "excluded": 0, "failed": 0, "not_imported": 0},
         )
 
     def test_a_linked_data_import_of_someone_else_is_not_followed(self):
@@ -148,7 +152,8 @@ class TestDataImportSession(run_tests.ImportRunCase):
         summary = import_signoff.session_summary(self._doc(session))
 
         self.assertEqual(
-            summary["rows"], {"source": 4, "imported": 0, "excluded": 1, "failed": 0, "not_imported": 3}
+            summary["rows"],
+            {"source": 4, "imported": 0, "unchanged": 0, "excluded": 1, "failed": 0, "not_imported": 3},
         )
         self.assertFalse(summary["finished"])
 
@@ -189,8 +194,10 @@ class TestDataImportSession(run_tests.ImportRunCase):
 
         text = result["message"]
         self.assertIn("4 rows in the files, 2 imported, 1 left out, 1 failed", text)
-        self.assertIn("| Item | Rows in the Files | Imported | Left Out | Failed | Not Imported |", text)
-        self.assertIn("| Customer | 4 | 2 | 1 | 1 | 0 |", text)
+        self.assertIn(
+            "| Item | Rows in the Files | Imported | Unchanged | Left Out | Failed | Not Imported |", text
+        )
+        self.assertIn("| Customer | 4 | 2 | 0 | 1 | 1 | 0 |", text)
         self.assertIn("Closed shop (rows 3", text)
         self.assertIn(GROUP_NODE, text)
         self.assertIn("## Open Points", text)
@@ -393,7 +400,8 @@ class TestOpeningBalancesInTheReport(balances_tests.OpeningBalancesCase):
 
         summary = report["sessions"][0]
         self.assertEqual(
-            summary["rows"], {"source": 2, "imported": 2, "excluded": 0, "failed": 0, "not_imported": 0}
+            summary["rows"],
+            {"source": 2, "imported": 2, "unchanged": 0, "excluded": 0, "failed": 0, "not_imported": 0},
         )
         source = report["opening_balances"][self.company]["trial_balance"]["source"]
         self.assertEqual(

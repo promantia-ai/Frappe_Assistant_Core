@@ -488,6 +488,29 @@ class TestUpdateRun(UpdateCase):
         self.assertIn("Updated 1 Customer records", response["result"]["message"])
         self.assertEqual(self._doc(session).status, "Completed")
 
+    def test_the_sign_off_counts_unchanged_rows_as_done(self):
+        # #34436: rows already as the file has them were "not imported yet", and blocked sign-off
+        from frappe_assistant_core.utils import import_signoff
+
+        session, checked = self._ready(
+            [
+                f"TAX-A-{self.tag},{self.group},https://new-a.example",
+                f"TAX-B-{self.tag},{self.group},https://b.example",
+            ]
+        )
+        self.assertTrue(self._update(session, checked)["success"])
+
+        summary = import_signoff.session_summary(self._doc(session))
+
+        self.assertEqual(
+            {k: summary["rows"][k] for k in ("imported", "unchanged", "not_imported")},
+            {"imported": 1, "unchanged": 1, "not_imported": 0},
+        )
+        report = import_signoff.build([self._doc(session)])
+        self.assertFalse(
+            [p for p in report["open_points"] if "aren't imported yet" in p], report["open_points"]
+        )
+
     def test_a_file_with_its_own_id_column_updates_the_matched_record(self):
         # a file from another ERPNext site: its ID column names a different record here
         file_doc = self._csv(
@@ -550,9 +573,11 @@ class TestUpdateRun(UpdateCase):
         self.assertIn("Nothing to update", checked["message"])
         response = self._update(session, checked)
 
-        self.assertFalse(response["success"], response)
-        self.assertIn("Nothing to update", response["result"]["error"])
-        self.assertFalse(self._doc(session).data_imports)
+        # nothing to send: the import is done, Completed, so the sign-off can be ready (#34436)
+        self.assertTrue(response["success"], response)
+        self.assertIn("Nothing to change", response["result"]["message"])
+        doc = self._doc(session)
+        self.assertEqual((doc.status, len(doc.data_imports)), ("Completed", 0))
 
 
 class TestUpdateFetchedFields(UpdateCase):

@@ -33,7 +33,7 @@ from frappe_assistant_core.utils.import_session import (
     readable_session_file,
 )
 
-STATUSES = ("imported", "excluded", "failed", "not_imported")
+STATUSES = ("imported", "unchanged", "excluded", "failed", "not_imported")
 FINISHED = ("Completed", "Partially Completed", "Failed")
 MAX_SESSIONS = 200
 NOT_IMPORTED = "Checked, not imported yet"
@@ -45,8 +45,8 @@ NOT_IMPORTED = "Checked, not imported yet"
 def tally(outcomes: List[Dict[str, Any]], measures=(), precision: int = 2) -> Dict[str, Any]:
     """Rows per status, the reasons rows were left out or failed (grouped, with their row
     numbers), and each measure (amount, value) summed per status over the rows that are not a
-    file's own totals row. ``source`` is every row, so source = imported + excluded + failed +
-    not_imported."""
+    file's own totals row. ``source`` is every row, so source = imported + unchanged + excluded +
+    failed + not_imported. An unchanged row (an update's, already as the file has it) is done."""
     rows = {"source": len(outcomes), **{status: 0 for status in STATUSES}}
     reasons: Dict[str, Dict[str, List[int]]] = {"excluded": {}, "failed": {}, "not_imported": {}}
     sums = {m: {"source": 0.0, **{status: 0.0 for status in STATUSES}} for m in measures}
@@ -189,6 +189,7 @@ def _current_file_outcomes(session):
     refused = _refused_by(names[-1] if names else None)
     for row, reason in _check_failures(session).items():
         refused.setdefault(row, reason)
+    unchanged = _check_unchanged(session)
 
     out = []
     for number, values in enumerate(rows[1:], start=2):
@@ -196,6 +197,9 @@ def _current_file_outcomes(session):
             continue
         if number in imported:
             out.append({"row": number, "status": "imported"})
+        elif number in unchanged:
+            # an update's row whose record already holds its values: nothing to import (#34436)
+            out.append({"row": number, "status": "unchanged"})
         elif number in left:
             out.append(
                 {"row": number, "status": "excluded", "reason": left[number] or _("Left out by the user")}
@@ -248,6 +252,18 @@ def _earlier_rows(file_name: str, imported_file: List[List[str]]) -> List[List[s
     except FileProblem:
         pass
     return []
+
+
+def _check_unchanged(session) -> set:
+    """The rows the session's last check found already as the file has them (an update's)."""
+    results = dry_run._results_file(session)
+    if not results:
+        return set()
+    try:
+        content = frappe.parse_json(results.get_content()) or {}
+    except Exception:
+        return set()
+    return {int(row["row"]) for row in content.get("rows") or [] if row.get("status") == "unchanged"}
 
 
 def _check_failures(session) -> Dict[int, str]:
@@ -588,6 +604,8 @@ def _message(report: Dict[str, Any]) -> str:
         rows["failed"],
         rows["not_imported"],
     )
+    if rows["unchanged"]:
+        text += " " + _("{0} rows were already as the file has them.").format(rows["unchanged"])
     if report["ready_to_sign"]:
         return text + " " + _("Everything is in and matches: ready to sign off.")
     return text + " " + _("{0} open points before sign-off.").format(len(report["open_points"]))
@@ -617,6 +635,7 @@ def columns() -> List[Dict[str, Any]]:
         },
         {"fieldname": "source_rows", "label": _("Rows in the Files"), **count},
         {"fieldname": "imported_rows", "label": _("Imported"), **count},
+        {"fieldname": "unchanged_rows", "label": _("Unchanged"), **count},
         {"fieldname": "left_out_rows", "label": _("Left Out"), **count},
         {"fieldname": "failed_rows", "label": _("Failed"), **count},
         {"fieldname": "not_imported_rows", "label": _("Not Imported"), **count},
@@ -654,6 +673,7 @@ def _rows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "item": entry["label"],
                 "source_rows": counts["source"],
                 "imported_rows": counts["imported"],
+                "unchanged_rows": counts["unchanged"],
                 "left_out_rows": counts["excluded"],
                 "failed_rows": counts["failed"],
                 "not_imported_rows": counts["not_imported"],

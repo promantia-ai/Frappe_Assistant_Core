@@ -143,6 +143,21 @@ def _int(value) -> Optional[int]:
 # -- starting and continuing -------------------------------------------------------------------
 
 
+NOTHING_TO_CHANGE = "Nothing to change: every row already has the file's values in ERPNext."
+
+
+class NothingToChange(Exception):
+    """The update had nothing to send: the session is Completed (#34436)."""
+
+
+def nothing_to_change(session) -> bool:
+    """An update whose last check found no row to send and some already as the file has them."""
+    if not (import_update.is_update(session) and import_update.match_fields(session)):
+        return False
+    statuses = {row.get("status") for row in _checked_rows(session)}
+    return "unchanged" in statuses and "ready" not in statuses
+
+
 def start(session) -> str:
     """Import a session that passed the dry run: the cleaned file, a Data Import, started. A
     session imported before gets only its rows not imported yet, in a new Data Import."""
@@ -163,6 +178,13 @@ def start(session) -> str:
                 "dry_run_import first: only a file that passed is imported."
             )
         )
+    if nothing_to_change(session):
+        # Every row already holds the file's values (#34436): the import is done without a Data
+        # Import, and the session doesn't stay Ready to Import for good.
+        session.status = "Completed"
+        session.log_step("Import", "Success", _(NOTHING_TO_CHANGE))
+        session.save()
+        raise NothingToChange(_(NOTHING_TO_CHANGE))
     earlier = import_failures.imports_of_this_file(session)
     # A tree's rows whose parent rows aren't in ERPNext yet wait for a later Data Import.
     waiting = _waiting(_checked_rows(session), import_failures.imported_rows(session))

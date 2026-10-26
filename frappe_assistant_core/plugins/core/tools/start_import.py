@@ -128,6 +128,8 @@ class StartImport(BaseTool):
                 data_import, state = import_run.resume(session)
             else:
                 data_import, state = import_run.start(session), "started"
+        except import_run.NothingToChange as e:
+            return {"success": True, "session": session_name, "status": "Completed", "message": str(e)}
         except (import_run.ImportProblem, FileProblem) as e:
             return {"success": False, "error": str(e), "session": session_name}
         except Exception as e:
