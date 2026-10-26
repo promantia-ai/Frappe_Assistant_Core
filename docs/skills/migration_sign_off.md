@@ -16,6 +16,8 @@ report covers all of the user's sessions. Filters:
   every session. They don't narrow sessions named in `import_session`.
 - `migration_plan`: a migration plan's id, for a migration the user ran as a plan: the report
   covers its files only, whatever the dates, so earlier test runs of the same files stay out.
+  Always pass it for a plan, rather than dates. The report's message starts with its scope:
+  quote it, so the user sees what was counted.
 - `import_session`: session ids, comma separated. Only when the user names the sessions themselves.
   Never just the ones in this chat.
 - `user`: whose sessions; the user's own by default.

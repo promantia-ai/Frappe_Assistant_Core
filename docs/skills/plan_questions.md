@@ -32,6 +32,8 @@ Ask once, with one card. The user is touched twice in a whole migration: the cut
 start (`plan_migration`'s `opening_setup`; the company only when the site has more than one), then
 this card. `next` in the result says which of the steps below comes now.
 
+0. Show **the plan** first, as a table in your message's text: each file in its order, with what
+   it imports and its `reason` (the reply's `files`). The user approves the order too.
 1. Show **every** question in **one table, in your message's text** (not inside the card: a card
    shows no tables; and never only in your thinking, which the user doesn't see, so a card asking
    "how should I proceed?" would have nothing above it): file, the problem in plain words, and the answer you suggest (the first of its

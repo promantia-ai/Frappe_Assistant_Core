@@ -255,6 +255,9 @@ class TestDataImportSession(run_tests.ImportRunCase):
 
         self.assertEqual([row["item"] for row in section(result["data"], "Sessions")], [session])
         self.assertNotIn(other, frappe.as_json(result["data"]))
+        self.assertTrue(
+            result["message"].startswith(f"Scope: migration plan {session}, 1 file."), result["message"]
+        )
 
     def test_a_session_the_user_cannot_read_is_refused(self):
         session, _checked = self._ready_session()
@@ -269,7 +272,7 @@ class TestDataImportSession(run_tests.ImportRunCase):
         reply = self._run("generate_report", {"report_name": REPORT, "filters": {}})
 
         self.assertTrue(reply["success"], reply)
-        self.assertEqual(reply["result"]["message"], "No import sessions to report on.")
+        self.assertTrue(reply["result"]["message"].endswith("No import sessions to report on."), reply)
 
 
 class TestOpeningInvoicesInTheReport(invoices_tests.OpeningInvoicesCase):

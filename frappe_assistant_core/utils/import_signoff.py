@@ -905,16 +905,34 @@ def document(report: Dict[str, Any]) -> str:
     return "\n".join(out) + "\n"
 
 
+def scope(filters, plan: str, names: List[str], count: int) -> str:
+    """The sentence that says what the report covers."""
+    files = _("1 file") if count == 1 else _("{0} files").format(count)
+    if plan:
+        return _("Scope: migration plan {0}, {1}.").format(plan, files)
+    if names:
+        return _("Scope: the sessions {0}.").format(", ".join(names))
+    return _("Scope: {0}'s sessions started from {1} to {2}, {3}.").format(
+        filters.get("user") or frappe.session.user,
+        filters.get("from_date") or _("the first"),
+        filters.get("to_date") or _("today"),
+        files,
+    )
+
+
 def execute(filters: Optional[Dict[str, Any]] = None):
     """The Migration Sign-off report: columns, rows, the headline and the summary cards. With the
     ``document`` filter, the message is the whole report as a document, for the PDF."""
     filters = frappe._dict(filters or {})
     names = [name.strip() for name in cstr(filters.get("import_session")).split(",") if name.strip()]
-    if not names and cstr(filters.get("migration_plan")).strip():
-        names = plan_sessions(cstr(filters.get("migration_plan")).strip())
+    plan = cstr(filters.get("migration_plan")).strip() if not names else ""
+    if plan:
+        names = plan_sessions(plan)
     sessions = sessions_of(
         names or None, filters.get("user"), filters.get("from_date"), filters.get("to_date")
     )
     report = build(sessions)
+    # What the report covers, first: a date range takes in earlier test runs, a plan doesn't (#34549)
+    report["message"] = scope(filters, plan, names, len(sessions)) + " " + report["message"]
     message = document(report) if cint(filters.get("document")) else report["message"]
     return columns(), rows(report), message, None, summary_cards(report)
