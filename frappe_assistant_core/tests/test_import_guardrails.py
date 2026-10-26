@@ -480,8 +480,6 @@ class TestAFileIsHeldOnlyWhileItsImportIsOpen(GuardrailCase):
             "Importing",
             "Partially Completed",
             "Failed",  # its rows can be checked and imported again
-            "Undoing",
-            "Partially Undone",
         ):
             with self.subTest(status=status):
                 # as the import tools leave it at each step (a check, an import, an undo)

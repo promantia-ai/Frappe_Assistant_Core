@@ -652,7 +652,7 @@ class _Checker:
             # otherwise show only once the typo is fixed, a second round of questions.
             problems += self._duplicate_problems(payload)
             problems += self._fetched_problems(payload)
-            problems += self._required_problems(payload)
+            problems += self._required_problems(payload, {info.get("field") for _key, info in problems})
         record, changed = self._record(payload), []
         if not problems and record:
             from frappe_assistant_core.utils import import_update
@@ -744,13 +744,14 @@ class _Checker:
             self.preview["samples"].append({"row": row, "record": record, "changes": changed})
 
     # Data Import's own value checks, made while it parsed the rows.
-    def _required_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
+    def _required_problems(self, payload, flagged=frozenset()) -> List[Tuple[Tuple, Dict]]:
         """A required field, or the one the record is named by, that the row leaves blank (#34537).
         ERPNext can fail on it before Frappe says it is required: naming a Customer strips its
         Customer Name, so a blank one failed as "'NoneType' object has no attribute 'strip'"."""
         problems = []
         for df in self.required:
-            if cstr(payload.doc.get(df.fieldname)).strip():
+            # A value the parse dropped for a problem of its own (a missing link) is that problem
+            if df.fieldname in flagged or cstr(payload.doc.get(df.fieldname)).strip():
                 continue
             label = _(df.label)
             info = {
