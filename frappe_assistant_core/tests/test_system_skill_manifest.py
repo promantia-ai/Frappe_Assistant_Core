@@ -78,6 +78,7 @@ NOT_TOOLS = {
     "status",
 }
 TOOL_FAILURE_HEADING = "## When an import tool fails"
+DELEGATION_HEADING = "## Keep the migration in this conversation"
 
 
 def _load_manifest(name: str) -> list:
@@ -321,6 +322,14 @@ class TestSystemSkillManifest(BaseAssistantTest):
         self.assertIn("Never import the file's records another way", rule)
         for words in ("`create_document`", "`update_document`", "one record at a time", "`documents` list"):
             self.assertIn(words, rule, words)
+
+    def test_migrate_data_keeps_a_migration_out_of_helpers(self):
+        # #34410: in Auto mode FACO handed the migration to helper tasks, which have no import tools
+        content = _skill_content("migrate_data.md")
+        self.assertIn(DELEGATION_HEADING, content)
+        rule = _one_line(content.split(DELEGATION_HEADING)[1].split("\n## ")[0])
+        self.assertIn("Never hand a migration, or any step of it, to a helper task (`delegate`)", rule)
+        self.assertIn("helpers don't have the import tools", rule)
 
     def test_migrate_data_never_replaces_a_users_value_unasked(self):
         content = _one_line(_skill_content("migrate_data.md"))

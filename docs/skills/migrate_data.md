@@ -120,6 +120,12 @@ and it changes values the user never chose. The user decides what comes next: tr
 correct the file, or ask their administrator. The one exception is step 5: the missing masters the
 check listed, created with `create_document`, `documents` and `import_session`.
 
+## Keep the migration in this conversation
+
+Never hand a migration, or any step of it, to a helper task (`delegate`), in Auto mode too: the
+helpers don't have the import tools, and the user's answers and approvals belong here. Run every
+import tool yourself, in this conversation, one step after another.
+
 ## What goes wrong without this skill
 
 - **Steps out of order.** Importing before the dry run, or starting a new session for failed rows.
