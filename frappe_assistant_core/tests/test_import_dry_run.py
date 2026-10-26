@@ -1047,12 +1047,37 @@ class TestDryRunImport(BaseAssistantTest):
         from frappe.database.database import Database
 
         gone = {"force": True, "ignore_permissions": True, "delete_permanently": True}
+        doc = frappe.get_doc("FAC Import Session", session)
+        # its files: the upload, the session's own copy and the check's results (#34412)
+        files = set(
+            frappe.get_all(
+                "File",
+                filters={"attached_to_doctype": "FAC Import Session", "attached_to_name": session},
+                pluck="name",
+            )
+        )
+        for ref in (doc.get("original_file"), doc.get("source_file")):
+            if ref:
+                files.update(frappe.get_all("File", or_filters={"name": ref, "file_url": ref}, pluck="name"))
+        deleted = [session, self.existing_record, *files]
         frappe.delete_doc("FAC Import Session", session, **gone)
         frappe.delete_doc("Customer", self.existing_record, **gone)
         if self.made_group:  # this test's setUp made it, and the commit made it permanent
             frappe.delete_doc("Customer Group", GROUP, **gone)
+            deleted.append(GROUP)
+        for name in files:
+            frappe.delete_doc("File", name, **gone)
         frappe.db.delete("Series", {"name": prefix})
-        frappe.db.delete("Deleted Document", {"creation": (">=", started)})
+        # only this test's: other users' deletions in the same minutes stay (#34412)
+        frappe.db.delete("Deleted Document", {"creation": (">=", started), "deleted_name": ("in", deleted)})
+        # the audit rows of the tool calls this test made, which name its session
+        log = frappe.qb.DocType("Assistant Audit Log")
+        (
+            frappe.qb.from_(log)
+            .delete()
+            .where(log.creation >= started)
+            .where(log.input_data.like(f"%{session}%") | log.output_data.like(f"%{session}%"))
+        ).run()
         Database.commit(frappe.db)
 
     def test_a_check_lets_go_of_the_series_it_locked_every_hundred_rows(self):
@@ -1093,12 +1118,28 @@ class TestDryRunImport(BaseAssistantTest):
         # setUp's customer is named by a series (CUST-.), so its record name isn't its customer
         # name: the cleanup missed it, and the commit made it and its group permanent (#34412).
         # The commit is held here only so this test's rows stay in its own transaction.
+        started = frappe.utils.now_datetime()
         session = self._session([[f"Row {self.tag}", GROUP, "Company", ""]])
+        self._check(session)  # its results file, and the tool calls' audit rows
+        # someone else's deletion at the same time is theirs to keep (#34412)
+        other = frappe.get_doc(
+            {
+                "doctype": "Deleted Document",
+                "deleted_doctype": "ToDo",
+                "deleted_name": f"Other {self.tag}",
+                "data": "{}",
+            }
+        ).insert(ignore_permissions=True)
         with patch("frappe.database.database.Database.commit"):
-            self._remove_committed(session, f"FACLOCK-{self.tag}-", frappe.utils.now_datetime())
+            self._remove_committed(session, f"FACLOCK-{self.tag}-", started)
         self.assertFalse(frappe.db.exists("Customer", {"customer_name": self.existing}))
         if self.made_group:  # on a site that already holds the group, the test must leave it
             self.assertFalse(frappe.db.exists("Customer Group", GROUP))
+        self.assertTrue(frappe.db.exists("Deleted Document", other.name))
+        self.assertFalse(frappe.get_all("File", filters={"attached_to_name": session}))
+        log = frappe.qb.DocType("Assistant Audit Log")
+        left = frappe.qb.from_(log).select(log.name).where(log.input_data.like(f"%{session}%")).run()
+        self.assertEqual(left, ())
 
     # -- when it can't run ---------------------------------------------------------------------------
 
