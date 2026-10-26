@@ -227,6 +227,42 @@ class TestImportFixes(BaseAssistantTest):
         for name in import_fixes.closest_names("Customer Group", self.missing):
             self.assertTrue(frappe.db.exists("Customer Group", name))
 
+    def test_a_misspelt_name_is_marked_likely_and_creating_it_says_so(self):
+        # Offered as an equal choice, "create" made a misspelt Customer Group that stayed on the site.
+        t = self.tag
+        meant = f"Hospitals {t}"
+        frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": meant,
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+
+        _session, result = self._session([[f"Alpha {t}", f"Hospitls {t}", "Company", ""]])
+
+        group = self._group(result, "Missing link")
+        mapping, create = group["fixes"][0], group["fixes"][1]
+        self.assertEqual((mapping["closest"][0], mapping["likely"]), (meant, meant))
+        self.assertIn(f"'{meant}', misspelt", group["explanation"])
+        self.assertEqual(create["action"], "create")
+        self.assertIn(f"not a misspelt '{meant}'", create["note"])
+
+    def test_a_name_far_from_the_rest_is_not_marked_likely(self):
+        _session, result = self._session([[f"Alpha {self.tag}", f"Zymurgy {self.tag}", "Company", ""]])
+
+        group = self._group(result, "Missing link")
+        self.assertNotIn("likely", group["fixes"][0])
+        self.assertNotIn("note", group["fixes"][1])
+
+    def test_a_name_that_only_shares_letters_is_not_offered(self):
+        # "Kerala" got "Karnataka" as its closest: mapping to it would put customers in another state.
+        self.assertEqual(import_fixes.rank("Kerala", ["Karnataka", "Tamil Nadu"]), [])
+        self.assertEqual(import_fixes.rank("Hospitls", ["Hospitals", "Hotels"])[0], "Hospitals")
+        # and a longer name holding the value is a close match, not a misspelling
+        self.assertIsNone(import_fixes.likely("Retail", ["Retail Customers"]))
+        self.assertEqual(import_fixes.likely("Hospitls", ["Hospitals", "Hotels"]), "Hospitals")
+
     def test_a_value_outside_the_options_is_explained_with_the_choices(self):
         _session, result = self._session()
 

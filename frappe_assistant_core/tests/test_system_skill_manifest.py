@@ -71,6 +71,7 @@ NOT_TOOLS = {
     "fixes",
     "google_sheets_url",
     "import_session",
+    "likely",
     "migration_plan",
     "opening_setup",
     "plan_settings",

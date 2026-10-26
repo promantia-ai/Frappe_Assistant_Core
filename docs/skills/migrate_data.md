@@ -148,7 +148,8 @@ import tool yourself, in this conversation, one step after another.
   means, ask with a choice card (`ask_user`). A fix maps only to a name the tool listed in
   `closest`, or one the user gave. A value from the user's file is never replaced by a different
   value (for example "Retail" with "Commercial") unless the user chose that in a fix group. Close
-  matches are offered, never applied unasked.
+  matches are offered, never applied unasked. When a group's map fix has `likely`, recommend it;
+  never offer to create the misspelt value without saying it looks like a misspelling.
 - **Explaining only in your thinking.** The user doesn't see it. What the files hold, the plan, the
   questions and what you suggest go in your message's text, before any card that asks about them.
 - **Adding up numbers yourself.** Row counts, totals and differences come from the tools. Quote

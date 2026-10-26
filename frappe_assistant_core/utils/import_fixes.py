@@ -53,7 +53,9 @@ ACTIONS = (
 )  # applied by dry_run_import; create only in a migration plan, else create_document does it
 
 CLOSEST_LIMIT = 5
-MIN_SCORE = 0.5
+MIN_SCORE = 0.6  # below it a name only shares letters: "Kerala" isn't a misspelt "Karnataka" (0.53)
+LIKELY_SPELLING = 0.8  # a closest name spelt this alike, and LIKELY_LEAD ahead of the next, is the one meant
+LIKELY_LEAD = 0.1
 FULL_SCAN = 2000  # rank every record when a DocType has at most this many
 WORD_MATCHES = 200  # else only records sharing a word with the value, this many per word
 GROUPS_SHOWN = 30  # the dry run's reply lists this many groups; the results file keeps them all
@@ -295,6 +297,23 @@ def rank(value: str, candidates: List[str], limit: int = CLOSEST_LIMIT) -> List[
     return [c for _s, c in scored[:limit]]
 
 
+def likely(value: str, names: List[str]) -> Optional[str]:
+    """The name ``value`` is almost surely a misspelling of ("Hospitls" → "Hospitals"), well ahead
+    of the next: creating ``value`` as a new record would make a misspelt master. Spelling only: a
+    value inside a longer name ("Retail" → "Retail Customers") may well be a record of its own."""
+    spelt = sorted(((_spelling(value, name), name) for name in names), reverse=True)
+    if not spelt or spelt[0][0] < LIKELY_SPELLING:
+        return None
+    if len(spelt) > 1 and spelt[1][0] > spelt[0][0] - LIKELY_LEAD:
+        return None
+    return spelt[0][1]
+
+
+def _spelling(value: str, candidate: str) -> float:
+    v, c = " ".join(_words(value)).casefold(), " ".join(_words(candidate)).casefold()
+    return difflib.SequenceMatcher(None, v, c).ratio() if v and c else 0.0
+
+
 def score(value: str, candidate: str) -> float:
     """How likely ``candidate`` is the record ``value`` meant, from 0 to 1.
 
@@ -333,12 +352,21 @@ def advise(session, group: Dict[str, Any]) -> Dict[str, Any]:
     if cause == dry_run.CAUSE_MISSING_LINK and group.get("link_doctype"):
         doctype = group["link_doctype"]
         explanation = _("{0}: there is no {1} called '{2}' in ERPNext.").format(rows, _(doctype), value)
-        fixes = [{"action": MAP, "closest": closest_names(doctype, value)}]
+        closest = closest_names(doctype, value)
+        fixes = [{"action": MAP, "closest": closest}]
+        meant = likely(value, closest)
+        if meant:
+            fixes[0]["likely"] = meant
+            explanation += " " + _("It is most likely '{0}', misspelt.").format(meant)
         reason = _creating_problem(doctype, session)
         if not reason:
             create = {"action": CREATE, "doctype": doctype, "name": value, "parent": default_parent(doctype)}
             if not session.get("migration_plan"):  # in a plan, it is a fix: the plan creates it when it runs
                 create["use"] = "create_document"
+            if meant:
+                create["note"] = _("Only if '{0}' is really a new {1}, not a misspelt '{2}'.").format(
+                    value, _(doctype), meant
+                )
             fixes.append(create)
         fixes.append(leave_out)
         out = {"explanation": explanation, "fixes": fixes}

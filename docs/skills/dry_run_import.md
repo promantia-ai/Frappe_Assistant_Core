@@ -120,7 +120,9 @@ Each fix:
 
 ### Closest matches come from the engine
 
-A `map` fix on a missing link lists `closest`: existing names ranked by the engine (spelling, "Retail" inside "Retail Customers", shared words). Disabled records and group nodes are never listed, because a link to them fails.
+A `map` fix on a missing link lists `closest`: existing names ranked by the engine (spelling, "Retail" inside "Retail Customers", shared words). Disabled records and group nodes are never listed, because a link to them fails. A name that only shares some letters is not listed: "Kerala" gets no "Karnataka".
+
+**`likely`**: the closest name is almost surely the one meant ("Hospitls" → `likely: "Hospitals"`), and the `create` fix then has a `note` saying so. Recommend mapping to it. Offer to create the file's value only as the second choice, saying it looks like a misspelling of the likely name: creating it would add a misspelt master that stays on the site.
 
 **Never invent a name.** `to` must be one of `closest`, or a name the user gives you. The tool checks it exists; if not, nothing is saved and the error lists the closest names.
 

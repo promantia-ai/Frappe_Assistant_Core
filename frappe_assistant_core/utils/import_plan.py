@@ -687,7 +687,7 @@ def _add_needed_by(questions: List[Dict[str, Any]], files: List[Any]) -> None:
 #: What a fix answer takes, as dry_run_import's fixes do; and what describes a suggested fix,
 #: which FACO may send back with it and which is let be (#34547).
 FIX_KEYS = ("action", "to", "reason", "data", "parent")
-FIX_DESCRIPTION_KEYS = ("doctype", "name", "closest", "rows", "use", "note", "cause", "label")
+FIX_DESCRIPTION_KEYS = ("doctype", "name", "closest", "likely", "rows", "use", "note", "cause", "label")
 
 
 def _check_keys(question: str, answer: Dict[str, Any], keys, described=()) -> None:
