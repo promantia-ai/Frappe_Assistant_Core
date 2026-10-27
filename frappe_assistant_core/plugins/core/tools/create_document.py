@@ -192,7 +192,10 @@ class DocumentCreate(BaseTool):
             if "data" not in arguments:
                 return {
                     "success": False,
-                    "error": _("Pass 'data' for one record or 'records' for several."),
+                    "error": _(
+                        "Pass doctype and data for one record, records for several of one DocType, "
+                        "or documents for several."
+                    ),
                     "doctype": doctype,
                 }
             return self._create_one(doctype, arguments["data"], submit, validate_only)
