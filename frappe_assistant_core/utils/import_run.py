@@ -58,6 +58,15 @@ class ImportProblem(Exception):
     """The import can't start or continue. The message is shown to the user."""
 
 
+class StartCollided(ImportProblem):
+    """The start deadlocked with another import saving at the same moment, and the database undid
+    its whole transaction: nothing of it was saved, so it can simply run again (BT-17)."""
+
+
+#: How many times start_import runs a start that collided before it tells the model.
+START_ATTEMPTS = 3
+
+
 # -- can it run --------------------------------------------------------------------------
 
 
@@ -240,7 +249,7 @@ def _new_import(
         if file_doc:
             _remove_from_disk(file_doc)
         if isinstance(e, frappe.QueryDeadlockError):
-            raise ImportProblem(
+            raise StartCollided(
                 _(
                     "Another import was saving at the same time, so this one stopped. Nothing was "
                     "saved. Call again with the same values to try again."

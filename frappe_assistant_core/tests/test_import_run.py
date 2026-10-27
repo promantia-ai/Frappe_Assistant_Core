@@ -841,31 +841,63 @@ class TestTheApprovalNamesTheCheck(ImportRunCase):
         self.assertIn("submit_after_import true", reply["result"]["error"])
         self.assertFalse(self._imported())
 
-    def test_a_deadlock_while_starting_says_try_again_and_leaves_no_file(self):
-        # BT-17: six imports started at once deadlocked. The server undid the victim's whole
-        # transaction, so the rollback to the start's savepoint failed ("SAVEPOINT
-        # fac_start_import does not exist"), hid the deadlock, and left the cleaned file on disk.
-        session, checked = self._ready_session()
-        removed = []
-        real_remove = import_run._remove_from_disk
+    @contextmanager
+    def _starts_that_collide(self, times):
+        """The first ``times`` starts deadlock: the database undoes the victim's whole transaction
+        (here, all since the call began) and raises. Yields the cleaned files removed from disk."""
+        real_rollback, real_record, real_remove = (
+            frappe.db.rollback,
+            import_run._record_start,
+            import_run._remove_from_disk,
+        )
+        collided, removed = [], []
 
-        def deadlock(*args, **kwargs):
-            frappe.db.rollback()  # what the server does to a deadlock's victim
-            raise frappe.QueryDeadlockError("Deadlock found when trying to get lock")
+        def record(*args, **kwargs):
+            if len(collided) < times:
+                collided.append(1)
+                real_rollback(save_point="fac_test_row")  # what the server does to the victim
+                raise frappe.QueryDeadlockError("Deadlock found when trying to get lock")
+            return real_record(*args, **kwargs)
 
         def remove(file_doc):
             removed.append(file_doc.file_url)
             real_remove(file_doc)
 
-        with patch.object(import_run, "_record_start", side_effect=deadlock), patch.object(
-            import_run, "_remove_from_disk", side_effect=remove
+        with self._each_row_commits(), patch.object(
+            import_run, "_record_start", side_effect=record
+        ), patch.object(import_run, "_remove_from_disk", side_effect=remove), patch(
+            "frappe_assistant_core.plugins.core.tools.start_import.time.sleep"
         ):
+            yield removed
+
+    def test_a_start_that_collides_runs_again_by_itself(self):
+        # BT-17: six imports started at once, two deadlocked, and the user was asked to try again.
+        # The database had undone the start whole, so start_import runs it again itself.
+        session, checked = self._ready_session()
+
+        with self._starts_that_collide(1) as removed:
+            reply = self._import(session, checked)
+
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(
+            self._imported(), {self._names()["alpha"], self._names()["gamma"], self._names()["delta"]}
+        )
+        self.assertEqual(len(removed), 1, "the collided start's cleaned file stays on disk")
+        self.assertEqual(len(self._doc(session).data_imports), 1)
+
+    def test_a_start_that_keeps_colliding_says_try_again_and_leaves_no_file(self):
+        # Before: "SAVEPOINT fac_start_import does not exist" hid the deadlock, and the cleaned
+        # file stayed on disk.
+        session, checked = self._ready_session()
+
+        with self._starts_that_collide(import_run.START_ATTEMPTS) as removed:
             reply = self._import(session, checked)
 
         self.assertFalse(reply["success"], reply)
         self.assertIn("try again", reply["result"]["error"])
         self.assertNotIn("SAVEPOINT", reply["result"]["error"])
-        self.assertTrue(removed, "the cleaned file was left on disk")
+        self.assertEqual(len(removed), import_run.START_ATTEMPTS)
+        self.assertFalse(self._imported())
 
 
 class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
