@@ -93,6 +93,7 @@ def step_from_session(session, position: int) -> Dict[str, Any]:
         "target_doctype": session.target_doctype,
         "import_type": session.import_type,
         "preset_id": preset.get("id"),
+        "preset_target": preset.get("target"),
         "opening_engine": _engine(session) or "none",
         "is_transaction_step": int(session.target_doctype in TRANSACTION_DOCTYPES),
         "header_signature": _json(session_headers(session)),
@@ -181,3 +182,306 @@ def describe(doc) -> Dict[str, Any]:
             for step in doc.steps
         ],
     }
+
+
+# -- running a recipe on new files ----------------------------------------------------------------
+
+#: A file matches a step when at least this share of the step's headers is in it (RC-2).
+MATCH_OVERLAP = 0.8
+
+
+def _norm(header: Any) -> str:
+    return re.sub(r"\s+", " ", str(header or "").strip().lower())
+
+
+def _signature(step) -> List[str]:
+    return [str(h) for h in (frappe.parse_json(step.header_signature or "[]") or [])]
+
+
+def _overlap(step, headers: List[str]) -> float:
+    saved = {_norm(h) for h in _signature(step)}
+    return len(saved & {_norm(h) for h in headers}) / len(saved) if saved else 0.0
+
+
+def _preset_ref(session) -> Dict[str, Any]:
+    return (frappe.parse_json(session.template_options or "{}") or {}).get("preset") or {}
+
+
+def _sheet_of(session) -> str:
+    return _norm(session.sheet or os.path.splitext(session.file_name or "")[0])
+
+
+def match_files(doc, sessions: List[Any]) -> Dict[str, Any]:
+    """Each new file's session matched to a step of the recipe (RC-2): a preset step by its preset and
+    target, any other by at least MATCH_OVERLAP of its headers being in the file, the same sheet name
+    first. A file and a step are used once. What matched nothing is listed."""
+    pairs = []
+    for step in doc.steps:
+        for session in sessions:
+            ref = _preset_ref(session)
+            if step.preset_id:
+                if ref.get("id") != step.preset_id or ref.get("target") != step.preset_target:
+                    continue
+                score = 2.0
+            else:
+                if ref:  # a file a preset made is for a preset step
+                    continue
+                overlap = _overlap(step, session_headers(session))
+                if overlap < MATCH_OVERLAP:
+                    continue
+                score = overlap + (0.5 if _norm(step.sheet_name) == _sheet_of(session) else 0)
+                score += (
+                    0.25
+                    if _norm(os.path.splitext(step.original_file_name or "")[0])
+                    == _norm(os.path.splitext(session.file_name or "")[0])
+                    else 0
+                )
+            pairs.append((score, step.position, session.name))
+    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+    steps_used, sessions_used, matched = set(), set(), []
+    for score, position, name in pairs:
+        if position in steps_used or name in sessions_used:
+            continue
+        steps_used.add(position)
+        sessions_used.add(name)
+        matched.append({"step": position, "session": name, "score": round(score, 2)})
+    matched.sort(key=lambda m: m["step"])
+    return {
+        "matched": matched,
+        "unmatched_sessions": [s.name for s in sessions if s.name not in sessions_used],
+        "unmatched_steps": [
+            {"step": s.position, "file": s.original_file_name, "target": s.target_doctype}
+            for s in doc.steps
+            if s.position not in steps_used
+        ],
+    }
+
+
+def _missing_on_site(step, mapping: Dict[str, str]) -> Dict[str, Any]:
+    """What of the step isn't on this site (RC-9): its DocType, or the fields of its mapping."""
+    if not step.target_doctype or not frappe.db.exists("DocType", step.target_doctype):
+        return {"doctype": step.target_doctype, "fields": []}
+    meta = frappe.get_meta(step.target_doctype)
+    fields = []
+    for field in dict.fromkeys(mapping.values()):
+        if not field or field == "Don't Import":
+            continue
+        top = field.split(".", 1)[0]
+        if not meta.has_field(top) and top != "name":
+            fields.append(field)
+        elif "." in field:
+            table = meta.get_field(top)
+            if (
+                table
+                and table.options
+                and not frappe.get_meta(table.options).has_field(field.split(".", 1)[1])
+            ):
+                fields.append(field)
+    return {"doctype": None, "fields": fields}
+
+
+def _by_header(step) -> Dict[str, str]:
+    """The step's mapping as header -> field: the file's columns may come in another order or with new
+    ones between them."""
+    headers = _signature(step)
+    mapping = frappe.parse_json(step.column_map or "{}") or {}
+    return {
+        _norm(headers[int(position)]): field
+        for position, field in mapping.items()
+        if str(position).isdigit() and int(position) < len(headers)
+    }
+
+
+def _position_in(headers: List[str], header: str) -> Optional[int]:
+    wanted = _norm(header)
+    return next((i for i, h in enumerate(headers) if _norm(h) == wanted), None)
+
+
+def whats_new(step, session) -> List[Dict[str, Any]]:
+    """What differs between the step and the new file, as questions for the plan (RC-3): columns the
+    recipe never saw, columns it had that the file doesn't, and what isn't on this site (RC-9). The
+    rest isn't asked again: it is applied as it was."""
+    headers = session_headers(session)
+    saved = {_norm(h): h for h in _signature(step)}
+    here = {_norm(h): h for h in headers}
+    about = {"session": session.name, "file_name": session.file_name}
+    out: List[Dict[str, Any]] = []
+
+    def ask(kind: str, message: str, **extra) -> None:
+        out.append(
+            {
+                "id": f"{RECIPE_PREFIX}{session.name}:{kind}",
+                "kind": "recipe_new",
+                "what": kind,
+                **about,
+                "message": message,
+                **extra,
+            }
+        )
+
+    new = [here[h] for h in here if h not in saved]
+    if new:
+        ask(
+            "new_columns",
+            _(
+                "{0} has columns the recipe didn't know: {1}. They aren't imported. Map one with "
+                "set_column_mapping if it is wanted, then answer ok."
+            ).format(session.file_name, ", ".join(new)),
+            columns=new,
+        )
+    gone = [saved[h] for h in saved if h not in here]
+    if gone:
+        ask(
+            "gone_columns",
+            _("{0} no longer has: {1}. Those fields stay empty. Answer ok to go on.").format(
+                session.file_name, ", ".join(gone)
+            ),
+            columns=gone,
+        )
+    missing = _missing_on_site(step, _by_header(step))
+    if missing["doctype"]:
+        ask(
+            "not_on_site",
+            _(
+                "{0} isn't on this site, so this file can't be imported by the recipe. Nothing was guessed."
+            ).format(missing["doctype"]),
+        )
+    elif missing["fields"]:
+        ask(
+            "not_on_site",
+            _("These fields of {0} aren't on this site, so their columns are left unmapped: {1}.").format(
+                step.target_doctype, ", ".join(missing["fields"])
+            ),
+            fields=missing["fields"],
+        )
+    return out
+
+
+def apply_step(step, session_name: str) -> Dict[str, Any]:
+    """Write the step's mapping, value maps, source key and old ID translations onto the new file's
+    session, then report what was new (RC-3). An opening step is not mapped here: its settings are
+    handed back for set_opening_stock, set_opening_invoices or set_opening_balances, which ask for the
+    cut-off date again (M-D1 keeps none). A preset step's file was mapped by the preset already."""
+    from frappe_assistant_core.utils import import_mapping
+
+    session = import_mapping.load_session(session_name)
+    result: Dict[str, Any] = {"step": step.position, "session": session.name, "target": step.target_doctype}
+    questions = whats_new(step, session)
+    if step.opening_engine and step.opening_engine != "none":
+        result["opening"] = {
+            "engine": step.opening_engine,
+            "settings": frappe.parse_json(step.engine_settings or "{}") or {},
+        }
+        result["questions"] = questions
+        return result
+
+    headers = session_headers(session)
+    rules = frappe.parse_json(step.transformation_rules or "{}") or {}
+    saved = _signature(step)
+    if rules.get("value_maps"):
+        merged = frappe.parse_json(session.transformation_rules or "{}") or {}
+        merged["value_maps"] = rules["value_maps"]
+        session.transformation_rules = frappe.as_json(merged)
+
+    if not step.preset_id and step.target_doctype and not _missing_on_site(step, {})["doctype"]:
+        missing = set(_missing_on_site(step, _by_header(step))["fields"])
+        by_header = _by_header(step)
+        mapping = {
+            str(i): by_header[_norm(h)]
+            for i, h in enumerate(headers)
+            if _norm(h) in by_header and by_header[_norm(h)] not in missing
+        }
+        session.import_type = step.import_type or session.import_type
+        import_mapping.save_mapping(
+            session,
+            step.target_doctype,
+            mapping,
+            _("Mapped by recipe {0}, step {1}: {2} columns.").format(
+                step.parent, step.position, len(mapping)
+            ),
+        )
+        result["mapped_columns"] = len(mapping)
+
+    # the old ID column and its translations follow the header to its new position
+    key = rules.get(import_keys.SOURCE_KEY)
+    if isinstance(key, dict) and str(key.get("position", "")).isdigit() and int(key["position"]) < len(saved):
+        place = _position_in(headers, saved[int(key["position"])])
+        if place is not None and not step.preset_id:
+            import_keys.set_source_key(session, place, key["system"])
+    maps = {}
+    for position, spec in (rules.get(import_keys.KEY_MAPS) or {}).items():
+        if str(position).isdigit() and int(position) < len(saved):
+            place = _position_in(headers, saved[int(position)])
+            if place is not None:
+                maps[place] = spec
+    if maps:
+        import_keys.set_key_maps(session, maps)
+    session.save()
+    result["questions"] = questions
+    return result
+
+
+def run(recipe_name: str, session_names: List[str]) -> Dict[str, Any]:
+    """Match the new files to the recipe, write each step onto its file, and make the migration plan of
+    the matched files in the recipe's order and with its failure rule (RC-2 to RC-4). Nothing is
+    imported: the plan's questions, then its one approval, come next."""
+    from frappe_assistant_core.plugins.core.tools.plan_migration import PlanMigration
+    from frappe_assistant_core.utils import import_mapping
+
+    doc = frappe.get_doc(RECIPE, recipe_name)
+    doc.check_permission("read")
+    sessions = [import_mapping.load_session(name) for name in dict.fromkeys(session_names)]
+    found = match_files(doc, sessions)
+    if not found["matched"]:
+        raise RecipeProblem(
+            _(
+                "None of these files matches a step of this recipe (at least {0}% of a step's columns must be in the file)."
+            ).format(int(MATCH_OVERLAP * 100))
+        )
+    steps = {step.position: step for step in doc.steps}
+    applied = [apply_step(steps[m["step"]], m["session"]) for m in found["matched"]]
+    # An opening step is set up by its own tool, so it can't be planned yet: it joins when it is set.
+    planned = [a["session"] for a in applied if "opening" not in a]
+    out: Dict[str, Any] = {"recipe": doc.name, **found, "applied": applied}
+    if not planned:
+        return out
+    made = PlanMigration().execute(
+        {"sessions": planned, "order": planned, "failure_rule": doc.failure_rule or "leave_out"}
+    )
+    if not made.get("success"):
+        raise RecipeProblem(made.get("error") or _("The plan could not be made."))
+    plan = import_plan.get_plan(made["plan"])
+    progress = frappe.parse_json(plan.progress or "{}") or {}
+    progress["recipe"] = {
+        "name": doc.name,
+        "questions": [q for a in applied for q in a["questions"]],
+        "answered": [],
+    }
+    plan.progress = frappe.as_json(progress)
+    plan.log_step("Plan", "Success", _("From recipe {0}.").format(doc.name))
+    plan.save_open()
+    out["plan"] = plan.name
+    out["problems"] = made.get("problems") or []
+    return out
+
+
+def record_run(plan_name: str, status: str, message: str) -> None:
+    """A plan that came from a recipe ended: the recipe keeps when, where and how it went (RC-7)."""
+    try:
+        recipe = (frappe.parse_json(import_plan.get_plan(plan_name).progress or "{}") or {}).get("recipe")
+        if recipe and frappe.db.exists(RECIPE, recipe.get("name")):
+            frappe.db.set_value(
+                RECIPE,
+                recipe["name"],
+                {
+                    "last_run_on": frappe.utils.now_datetime(),
+                    "last_run_site": frappe.local.site,
+                    "last_run_result": f"{status}: {message}",
+                },
+                update_modified=False,
+            )
+    except Exception:
+        frappe.log_error(title="Recipe run record failed", message=frappe.get_traceback())
+
+
+RECIPE_PREFIX = import_plan.RECIPE_PREFIX

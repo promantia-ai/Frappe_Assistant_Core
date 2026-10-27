@@ -108,6 +108,8 @@ READ_ONLY_TOOLS = {
     "choose_old_id_storage",
     # Writes only a recipe, a record of FAC's own that holds how a migration was mapped (#34420).
     "save_migration_recipe",
+    # Maps the new files as the recipe did and makes the plan, as plan_migration does; imports nothing.
+    "run_migration_recipe",
     # Writes only the session's settings and mapping, as set_column_mapping does.
     "set_opening_stock",
     "set_opening_invoices",

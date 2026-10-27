@@ -623,6 +623,7 @@ def open_questions(plan) -> Dict[str, Any]:
             first_unchecked = session.file_name
         questions += asked
     progress = frappe.parse_json(plan.progress or "{}") or {}
+    questions += _recipe_questions(progress)
     dates = cut_offs(children(plan))
     said = name_dates(children(plan)) if dates else {}
     if dates and not (len(set(dates.values())) == 1 and progress.get("cut_off") in dates.values()):
@@ -677,6 +678,32 @@ def open_questions(plan) -> Dict[str, Any]:
     if ready:  # what run_migration_plan is given, so its approval card shows it
         result["approval"] = card_figures(plan)
     return result
+
+
+RECIPE_PREFIX = "recipe:new:"
+
+
+def _recipe_questions(progress: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """What a recipe run found new on its files (a column, a column gone, a field not on this site),
+    until the user answers each (#34420 RC-3). A plan that isn't from a recipe has none."""
+    recipe = progress.get("recipe") or {}
+    answered = set(recipe.get("answered") or [])
+    return [q for q in recipe.get("questions") or [] if q["id"] not in answered]
+
+
+def _answer_recipe(plan, ids: List[str]) -> List[str]:
+    """Mark the recipe questions in ``ids`` as answered. Raises PlanProblem for one the plan doesn't have."""
+    progress = _progress(plan)
+    recipe = progress.get("recipe") or {}
+    known = {q["id"] for q in recipe.get("questions") or []}
+    for question in ids:
+        if question not in known:
+            raise PlanProblem(_("There is no question {0} in this plan.").format(question))
+    recipe["answered"] = sorted({*(recipe.get("answered") or []), *ids})
+    progress["recipe"] = recipe
+    plan.progress = frappe.as_json(progress)
+    plan.log_step("Questions", "Success", _("Recipe: {0} answered.").format(len(ids)))
+    return [_("Recipe question answered: {0}.").format(question) for question in ids]
 
 
 def suggested_fix(question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -809,6 +836,7 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
     files = {session.name: session for session in children(plan)}
     fixes: Dict[str, List[Dict[str, Any]]] = {}
     rule = cut_off = None
+    recipe_answers: List[str] = []
     for answer in answers:
         if not isinstance(answer, dict):
             raise PlanProblem(_("Each answer is an object with the id of its question."))
@@ -816,6 +844,10 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
         if question == CUT_OFF_ID:
             _check_keys(question, answer, ("date",))
             cut_off = as_date(answer.get("date"))
+            continue
+        if question.startswith(RECIPE_PREFIX):
+            _check_keys(question, answer, ("ok",))
+            recipe_answers.append(question)
             continue
         if question == FAILURE_RULE_ID:
             # failure_rule is the plan's own name for it, which FACO sends too (#34547)
@@ -851,6 +883,10 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
             done += import_fixes.apply_fixes(session, import_fixes.last_groups(session), session_fixes)
             session.save()
         plan.require_open()  # not after the plan started: its files' fixes roll back with the savepoint
+        if recipe_answers:
+            plan.reload()
+            done += _answer_recipe(plan, recipe_answers)
+            plan.save_open()
         if rule or cut_off:
             plan.reload()
             progress = _progress(plan)
@@ -1455,6 +1491,9 @@ def _finish(plan_name: str) -> None:
 def _end(plan_name: str, status: str, message: str) -> None:
     outcome = {"Completed": "Success", "Partially Completed": "Warning"}.get(status, "Failed")
     _update(plan_name, status=status, step=(outcome, message), current=None)
+    from frappe_assistant_core.utils import migration_recipe
+
+    migration_recipe.record_run(plan_name, status, message)
 
 
 def result(plan) -> Dict[str, Any]:

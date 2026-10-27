@@ -150,6 +150,16 @@
     "content_file": "save_migration_recipe.md"
   },
   {
+    "skill_id": "run-migration-recipe-usage",
+    "title": "How to Use run_migration_recipe",
+    "description": "Run a saved migration recipe on new files: each file is matched to a step, mapped as before, and made into a migration plan that asks only what is new",
+    "skill_type": "Tool Usage",
+    "linked_tool": "run_migration_recipe",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "run_migration_recipe.md"
+  },
+  {
     "skill_id": "dry-run-import-usage",
     "title": "How to Use dry_run_import",
     "description": "Checking every row of a migration file before importing: the grouped failures explained in plain words, fixing them with the user, large files in the background, re-checking only the rows an import left, the failed rows as a file to correct",
