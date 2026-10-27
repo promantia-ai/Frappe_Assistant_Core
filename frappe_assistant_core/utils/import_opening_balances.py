@@ -256,7 +256,9 @@ def setup(
 
 def check_can_run(session) -> None:
     from frappe_assistant_core.utils import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_plan
 
+    import_plan.refuse_in_delta(session)
     dry_run.check_status(session)
     balances = settings(session)
     if balances.get("created"):

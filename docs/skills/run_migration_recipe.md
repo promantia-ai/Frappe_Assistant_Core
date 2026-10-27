@@ -30,6 +30,28 @@ on another site (rehearsal, then production).
    map covers, and references that don't resolve, come as the usual fix questions.
 6. When the plan is ready: `run_migration_plan`, as for any plan.
 
+## The cut-over gap: a delta run
+
+After the opening migration is posted, the old system keeps working until go-live. The consultant then
+uploads what happened after the cut-off (invoices, payments, stock movements, journals) and runs the same
+recipe again with `since`.
+
+- Ask the user for the cut-off date (the day the opening balances were taken). Never guess it.
+- `run_migration_recipe(recipe, sessions, since="YYYY-MM-DD")`. Only the recipe's transaction steps run:
+  Sales and Purchase Invoice, Payment Entry, Journal Entry, Stock Entry, Delivery Note, Purchase Receipt.
+- Rows dated on or before the cut-off are left out with the reason "Before the cut-off". The date is the
+  parent row's; the child rows under it go with it. A journal entry marked as an opening entry is left
+  out whatever its date.
+- Masters (customers, items) are skipped. If the user wants the new ones, ask, then pass the positions of
+  those steps in `masters`; they come in insert-only (nothing existing is changed).
+- Opening steps are never run in a delta run, and the opening engines refuse a file of one: no opening
+  entry is posted twice.
+- Everything is submitted. The files go in this order: new masters, stock movements, delivery notes and
+  purchase receipts, invoices, payments, journals.
+- References to the customers, items and accounts of the first run resolve through the kept old IDs
+  (choose_old_id_storage), so the file can use the old system's IDs.
+- The result lists `skipped_steps` with the reason. Tell the user what was skipped and why.
+
 ## Rules
 
 - Never guess a match. If a file matches no step, say so; don't map it by hand without telling the user.

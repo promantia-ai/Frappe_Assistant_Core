@@ -372,7 +372,9 @@ class Ready:
 
 def check_can_run(session) -> None:
     from frappe_assistant_core.utils import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_plan
 
+    import_plan.refuse_in_delta(session)
     dry_run.check_status(session)
     stock = settings(session)
     problem = setup_problem(stock.get("company"), stock.get("posting_date"), stock.get("difference_account"))

@@ -47,6 +47,19 @@ class RunMigrationRecipe(BaseTool):
                     "items": {"type": "string"},
                     "description": "The import sessions of the new files.",
                 },
+                "since": {
+                    "type": "string",
+                    "description": "The cut-off date, YYYY-MM-DD, for a delta run: the transactions made "
+                    "after it, uploaded after the opening migration. Ask the user; never guess it. Only "
+                    "the recipe's transaction steps run, rows dated on or before it are left out, "
+                    "everything is submitted, and no opening entry is posted.",
+                },
+                "masters": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "A delta run only: the positions of master steps (customers, items) "
+                    "the user ticked to bring in when new. Others are skipped.",
+                },
             },
             "required": ["recipe", "sessions"],
         }
@@ -57,7 +70,12 @@ class RunMigrationRecipe(BaseTool):
             return {"success": False, "error": _("Pass the recipe and a list of import session ids.")}
         try:
             try:
-                return {"success": True, **migration_recipe.run(recipe, sessions)}
+                return {
+                    "success": True,
+                    **migration_recipe.run(
+                        recipe, sessions, arguments.get("since"), arguments.get("masters")
+                    ),
+                }
             except frappe.DoesNotExistError as e:
                 return {"success": False, "error": exception_message(e)}
             except frappe.PermissionError as e:

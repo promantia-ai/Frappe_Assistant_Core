@@ -211,12 +211,14 @@ def _sheet_of(session) -> str:
     return _norm(session.sheet or os.path.splitext(session.file_name or "")[0])
 
 
-def match_files(doc, sessions: List[Any]) -> Dict[str, Any]:
+def match_files(doc, sessions: List[Any], steps: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Each new file's session matched to a step of the recipe (RC-2): a preset step by its preset and
     target, any other by at least MATCH_OVERLAP of its headers being in the file, the same sheet name
-    first. A file and a step are used once. What matched nothing is listed."""
+    first. A file and a step are used once. What matched nothing is listed. ``steps`` are the steps
+    to match, all of them when left out."""
+    steps = doc.steps if steps is None else steps
     pairs = []
-    for step in doc.steps:
+    for step in steps:
         for session in sessions:
             ref = _preset_ref(session)
             if step.preset_id:
@@ -251,7 +253,7 @@ def match_files(doc, sessions: List[Any]) -> Dict[str, Any]:
         "unmatched_sessions": [s.name for s in sessions if s.name not in sessions_used],
         "unmatched_steps": [
             {"step": s.position, "file": s.original_file_name, "target": s.target_doctype}
-            for s in doc.steps
+            for s in steps
             if s.position not in steps_used
         ],
     }
@@ -421,17 +423,102 @@ def apply_step(step, session_name: str) -> Dict[str, Any]:
     return result
 
 
-def run(recipe_name: str, session_names: List[str]) -> Dict[str, Any]:
+# -- a delta run: the transactions after the cut-off ---------------------------------------------
+
+LEFT_OUT_BEFORE = "Before the cut-off: the opening migration brought it in."
+LEFT_OUT_OPENING = "An opening journal entry: a delta run never posts an opening entry."
+YES = ("yes", "1", "true", "y")
+
+
+def _parse_date(value: Any):
+    try:
+        return frappe.utils.getdate(value) if str(value or "").strip() else None
+    except Exception:
+        return None  # a date nobody can read is the dry run's to report, not a reason to leave the row out
+
+
+def leave_out_before(session, since: str) -> Dict[str, int]:
+    """Leave out the rows of ``session``'s file dated on or before the cut-off, with the reason (RC-5,
+    M-D5). The date is the parent row's, and the child rows under it follow it (M-D6); a row whose date
+    can't be read stays for the dry run to report. A journal entry of the opening is left out too.
+    Raises RecipeProblem when the file's date column isn't mapped: nothing could be told apart."""
+    from frappe_assistant_core.utils import import_fixes
+
+    mapping = {int(p): f for p, f in dry_run.column_to_field_map(session).items() if str(p).isdigit()}
+    date_at = next((p for p, f in mapping.items() if f == "posting_date"), None)
+    if date_at is None:
+        raise RecipeProblem(
+            _(
+                "{0} has no column mapped to Posting Date, so the rows after the cut-off can't be told apart. "
+                "Map it with set_column_mapping."
+            ).format(session.file_name)
+        )
+    opening_at = next((p for p, f in mapping.items() if f == "is_opening"), None)
+    cut_off = frappe.utils.getdate(since)
+    rows = dry_run.read_sheet_rows(dry_run.readable_session_file(session), session.sheet or None)
+    reasons = {str(entry["row"]): entry["reason"] for entry in import_fixes.left_out(session)}
+    counts = {"before": 0, "opening": 0}
+    leaving = None  # the reason the current parent row's rows are left out for, or None
+    for index, row in enumerate(rows[1:], start=2):  # row 1 is the header
+        cell = row[date_at] if date_at < len(row) else ""
+        if str(cell or "").strip():  # a parent row: its date decides for it and the rows under it
+            date = _parse_date(cell)
+            opening = opening_at is not None and str(row[opening_at]).strip().lower() in YES
+            leaving = None
+            if opening:
+                leaving = LEFT_OUT_OPENING
+            elif date and date <= cut_off:
+                leaving = LEFT_OUT_BEFORE
+        if leaving:
+            reasons.setdefault(str(index), _(leaving))
+            counts["opening" if leaving == LEFT_OUT_OPENING else "before"] += 1
+    rules = frappe.parse_json(session.transformation_rules or "{}") or {}
+    if reasons:
+        rules["left_out"] = reasons
+        session.excluded_rows = frappe.as_json(sorted(int(row) for row in reasons))
+    session.transformation_rules = frappe.as_json(rules) if rules else None
+    session.submit_after_import = 1  # every delta document is submitted (M-D6)
+    session.save()
+    return counts
+
+
+def run(
+    recipe_name: str,
+    session_names: List[str],
+    since: Optional[str] = None,
+    masters: Optional[List[int]] = None,
+) -> Dict[str, Any]:
     """Match the new files to the recipe, write each step onto its file, and make the migration plan of
     the matched files in the recipe's order and with its failure rule (RC-2 to RC-4). Nothing is
-    imported: the plan's questions, then its one approval, come next."""
+    imported: the plan's questions, then its one approval, come next.
+
+    With ``since`` (the cut-off date) it is a delta run (RC-5): only the transaction steps are run, and
+    the masters at the positions in ``masters`` (insert only), rows dated on or before the cut-off are
+    left out, and no opening step is run. A file of a delta run goes in the order of M-D6."""
     from frappe_assistant_core.plugins.core.tools.plan_migration import PlanMigration
     from frappe_assistant_core.utils import import_mapping
 
     doc = frappe.get_doc(RECIPE, recipe_name)
     doc.check_permission("read")
     sessions = [import_mapping.load_session(name) for name in dict.fromkeys(session_names)]
-    found = match_files(doc, sessions)
+    skipped: List[Dict[str, Any]] = []
+    wanted = None
+    if since:
+        since = import_plan.as_date(since)
+        ticked = {int(p) for p in masters or []}
+        wanted = []
+        for step in doc.steps:
+            if step.opening_engine and step.opening_engine != "none":
+                reason = _("an opening step: a delta run never posts an opening entry")
+            elif step.is_transaction_step or step.position in ticked:
+                wanted.append(step)
+                continue
+            else:
+                reason = _(
+                    "a master: ask the user, and pass its position in masters to bring in the new ones"
+                )
+            skipped.append({"step": step.position, "file": step.original_file_name, "reason": reason})
+    found = match_files(doc, sessions, wanted)
     if not found["matched"]:
         raise RecipeProblem(
             _(
@@ -440,13 +527,30 @@ def run(recipe_name: str, session_names: List[str]) -> Dict[str, Any]:
         )
     steps = {step.position: step for step in doc.steps}
     applied = [apply_step(steps[m["step"]], m["session"]) for m in found["matched"]]
+    if since:
+        for entry in applied:
+            step = steps[entry["step"]]
+            session = import_mapping.load_session(entry["session"])
+            if step.target_doctype in TRANSACTION_DOCTYPES:
+                entry["left_out"] = leave_out_before(session, since)
+            else:  # a master: only the new ones, and nothing is submitted
+                session.import_type = "Insert New Records"
+                session.save()
     # An opening step is set up by its own tool, so it can't be planned yet: it joins when it is set.
     planned = [a["session"] for a in applied if "opening" not in a]
     out: Dict[str, Any] = {"recipe": doc.name, **found, "applied": applied}
+    if since:
+        out["since"] = since
+        out["skipped_steps"] = skipped
     if not planned:
         return out
     made = PlanMigration().execute(
-        {"sessions": planned, "order": planned, "failure_rule": doc.failure_rule or "leave_out"}
+        {
+            "sessions": planned,
+            # a delta run goes in the order of M-D6, which the plan works out
+            **({} if since else {"order": planned}),
+            "failure_rule": doc.failure_rule or "leave_out",
+        }
     )
     if not made.get("success"):
         raise RecipeProblem(made.get("error") or _("The plan could not be made."))
@@ -457,9 +561,15 @@ def run(recipe_name: str, session_names: List[str]) -> Dict[str, Any]:
         "questions": [q for a in applied for q in a["questions"]],
         "answered": [],
     }
+    if since:
+        progress["delta_since"] = since
     plan.progress = frappe.as_json(progress)
     plan.log_step("Plan", "Success", _("From recipe {0}.").format(doc.name))
+    if since:
+        plan.log_step("Plan", "Success", _("Delta run: what happened after {0}.").format(since))
     plan.save_open()
+    if since:
+        import_plan.arrange(plan)  # again, now it is known as a delta run: the order is not an opening's
     out["plan"] = plan.name
     out["problems"] = made.get("problems") or []
     return out

@@ -457,10 +457,46 @@ def _engine_rank(session) -> int:
     return {None: 0, stock: 1, invoices: 2, balances: 3}.get(engine, 3)
 
 
+#: A delta run's order among files free to go (M-D6): new masters, stock movements, delivery notes and
+#: purchase receipts, invoices, payments, journals, so a document comes after the ones it refers to.
+DELTA_RANK = {
+    "Stock Entry": 1,
+    "Delivery Note": 2,
+    "Purchase Receipt": 2,
+    "Sales Invoice": 3,
+    "Purchase Invoice": 3,
+    "Payment Entry": 4,
+    "Journal Entry": 5,
+}
+
+
+def delta_since(session) -> Optional[str]:
+    """The cut-off of the delta run ``session``'s plan is, or None when its plan isn't one (#34420)."""
+    plan = session.get("migration_plan")
+    if not plan:
+        return None
+    try:
+        return _progress(get_plan(plan)).get("delta_since") or None
+    except frappe.DoesNotExistError:
+        return None
+
+
+def refuse_in_delta(session) -> None:
+    """A delta run never posts an opening entry: the opening engines refuse a file of one (M-D5)."""
+    if delta_since(session):
+        raise dry_run.DryRunProblem(
+            _(
+                "{0} is part of a delta run, which brings in what happened after the cut-off. An opening "
+                "file would post an opening entry again: leave it out."
+            ).format(session.file_name)
+        )
+
+
 def order(sessions: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """The sessions in the order they are imported, each with its position and the reason, and a
     problem for every pair of files that link to each other. Among files free to go, the one given
     first goes first."""
+    delta = bool(sessions) and bool(delta_since(sessions[0]))
     plain = [s for s in sessions if not _engine_rank(s)]
     opening = sorted((s for s in sessions if _engine_rank(s)), key=_engine_rank)
 
@@ -474,7 +510,10 @@ def order(sessions: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
     ordered, placed, problems = [], set(), []
     waiting = list(plain)
     while waiting:
-        free = next((s for s in waiting if all(o.name in placed for o in needs[s.name])), None)
+        ready = [s for s in waiting if all(o.name in placed for o in needs[s.name])]
+        free = ready[0] if ready else None
+        if ready and delta:
+            free = min(ready, key=lambda s: (DELTA_RANK.get(s.target_doctype, 0), waiting.index(s)))
         if free is None:  # every file left waits on another: they link to each other
             first = waiting[0]
             other = next(o for o in needs[first.name] if o.name not in placed)
