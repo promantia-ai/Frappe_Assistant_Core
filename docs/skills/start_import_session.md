@@ -35,7 +35,7 @@ Other parameters:
 Supported files: `.csv`, `.xlsx`, `.xls`. One file holds one kind of record, e.g. customers.
 
 - **Headings below a title row** (Tally, Busy and Zoho exports start with the company or report name): the tool finds the heading row and leaves the rows above it out. `header_row` in the reply says where they were.
-- **CSV text**: UTF-8 or UTF-16 (Excel's "Unicode Text"), separated by commas, semicolons, tabs or pipes. The tool works out which.
+- **CSV text**: UTF-8 or UTF-16 (Excel's "Unicode Text"), separated by commas, semicolons, tabs or pipes. The tool works out which. A file in an older encoding (windows-1252, from Excel's plain "CSV") is read too, with a `note` saying so.
 - **Repeated headings** are made unique: `Name`, `Name (2)`. Map each by that name.
 
 ## Response Format
@@ -59,7 +59,7 @@ With headings below a title row, the reply also has `"header_row": 3` and a `not
 
 - `sample_rows` (up to 10) come back so you can show the user what was read. They are text the way Data Import will read it: dates as `YYYY-MM-DD`, whole numbers without `.0`. A cell longer than 200 characters is cut, ending in `…`; the file keeps it whole. They are **not stored** on the session. `row_count` skips blank rows.
 - `header_row` appears when the headings aren't on row 1. Later replies (dry run, failures, import) count rows from the heading row: row 2 is the first row under the headings. Tell the user once.
-- `note` appears when the headings aren't on row 1, or when other sheets of a workbook also have rows. Only one sheet is used per session. For a Google Sheets link, it says that only one tab was read: to import another tab, the user opens it and copies the link again.
+- `note` appears when the headings aren't on row 1, when the file isn't UTF-8 (it names the encoding it was read in: ask the user to check that the accented letters in the sample rows look right), or when other sheets of a workbook also have rows (their names are in `other_sheets`). Only one sheet is used per session. For a Google Sheets link, it says that only one tab was read: to import another tab, the user opens it and copies the link again.
 
 ## When the tool can't tell where the headings are
 

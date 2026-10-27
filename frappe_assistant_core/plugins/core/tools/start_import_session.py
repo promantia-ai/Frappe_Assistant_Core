@@ -77,6 +77,7 @@ class StartImportSession(BaseTool):
             "sheets",
             "sample_rows",
             "first_rows",
+            "other_sheets",
             "note",
             "error",
         )
@@ -251,11 +252,13 @@ class StartImportSession(BaseTool):
             )
         ignored = [s.name for s in sheets if s is not chosen and s.row_count]
         if ignored:
+            # The names are the file's, so they stay in a fenced field: the note is FAC's own text.
+            result["other_sheets"] = ignored
             notes.append(
                 _(
-                    "Only sheet '{0}' is used. These sheets also have rows and were not used: {1}. "
-                    "Start another session with sheet set to use one of them."
-                ).format(chosen.name, ", ".join(ignored))
+                    "Only the sheet in 'sheet' is used. The sheets in 'other_sheets' also have rows "
+                    "and were not used. Start another session with sheet set to use one of them."
+                )
             )
         if sheet_url:
             notes.append(
