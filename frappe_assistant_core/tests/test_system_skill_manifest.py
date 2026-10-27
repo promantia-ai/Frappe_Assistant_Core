@@ -80,6 +80,7 @@ NOT_TOOLS = {
 }
 TOOL_FAILURE_HEADING = "## When an import tool fails"
 DELEGATION_HEADING = "## Keep the migration in this conversation"
+UNDO_HEADING = "## Undoing an import"
 
 
 def _load_manifest(name: str) -> list:
@@ -331,6 +332,17 @@ class TestSystemSkillManifest(BaseAssistantTest):
         rule = _one_line(content.split(DELEGATION_HEADING)[1].split("\n## ")[0])
         self.assertIn("Never hand a migration, or any step of it, to a helper task (delegating it)", rule)
         self.assertIn("helpers don't have the import tools", rule)
+
+    def test_migrate_data_undoes_an_import_from_its_own_records(self):
+        # "Undo that import" deleted the customers created after a minute, at once, with no question.
+        content = _skill_content("migrate_data.md")
+        self.assertIn(UNDO_HEADING, content)
+        rule = _one_line(content.split(UNDO_HEADING)[1].split("\n## ")[0])
+        self.assertIn("never by creation time, owner or a name pattern", rule)
+        self.assertIn("Data Import Log", rule)
+        self.assertIn("created_records", rule)
+        self.assertIn("**Ask first**, with one confirm card (`ask_user`)", rule)
+        self.assertIn("even when deleting needs no approval card", rule)
 
     def test_migrate_data_never_replaces_a_users_value_unasked(self):
         content = _one_line(_skill_content("migrate_data.md"))

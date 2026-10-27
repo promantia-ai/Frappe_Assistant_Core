@@ -168,6 +168,25 @@ workbook with several sheets is one session per sheet.
   (Customers, Suppliers, Accounts from a ledger list).
 - **A file larger than Max Rows per Import**: refused with the limit. Ask the user to split it.
 
+## Undoing an import
+
+There is no undo tool. When the user wants an import taken back ("undo that import", "that was the
+wrong file"), remove exactly the records that import made, and nothing else:
+
+1. **Find them from the session**, never by creation time, owner or a name pattern (a record
+   another user made at the same time would go too). Open the session with `get_document` on
+   `FAC Import Session`. A file imported through Data Import lists its imports in data_imports:
+   its records are the docname of each successful `Data Import Log` row of those imports
+   (`list_documents` with that data_import and success 1). Opening stock and opening invoices, and
+   the masters created for the file, are in created_records.
+2. **Show them** in a table: each record, and what was made with it or links to it (the contact a
+   customer's phone and email made, invoices against a customer, items using a created group).
+3. **Ask first**, with one confirm card (`ask_user`): "Delete these N records?". Always, even when
+   deleting needs no approval card on this site: an undo can't be undone.
+4. **Then remove them**: submitted ones (opening stock, opening invoices) are cancelled with
+   `document_action`, then deleted; records before the masters created for them. Say what was
+   removed and what was kept, with the counts.
+
 ## Updating records that already exist
 
 When the user wants to change records already in ERPNext from a file ("update my customers' credit
