@@ -485,7 +485,9 @@ class ApplyImportPreset(BaseTool):
                 "import_type": "Insert New Records",
                 "status": "File Read",
                 # Its numbers are already read: not the user's typing (opening_stock.typed_file)
-                "template_options": frappe.as_json({PRESET_FILE: cleaned_file.name}),
+                "template_options": frappe.as_json(
+                    {PRESET_FILE: cleaned_file.name, "preset": {"id": match.preset["id"], "target": target["name"]}}
+                ),
             }
         )
         where = _(", sheet {0}").format(sheet.name) if sheet.name else ""

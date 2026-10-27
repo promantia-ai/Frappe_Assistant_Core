@@ -34,7 +34,7 @@ Call `choose_old_id_storage(session)`. Read `offer`:
   refuses a field that doesn't hold this file's IDs.
 - A field is read-only for people: the IDs are written by the import, never typed.
 - Records keep their old ID after an import creates them, including retries and each level of a
-  tree file. Undoing an import removes the key-map rows it wrote; a field value goes with its record.
+  tree file. A field value goes with its record; a key-map row of a deleted record is swept daily.
 - The answer is kept for the site, so the next session of the same DocType and system doesn't ask.
 
 ## Next

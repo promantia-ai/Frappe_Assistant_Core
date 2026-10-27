@@ -39,5 +39,7 @@ class FACMigrationRecipe(Document):
                     json.loads(value)
                 except ValueError:
                     frappe.throw(
-                        _("Step {0}: {1} is not valid JSON.").format(row.position, row.meta.get_label(fieldname))
+                        _("Step {0}: {1} is not valid JSON.").format(
+                            row.position, row.meta.get_label(fieldname)
+                        )
                     )

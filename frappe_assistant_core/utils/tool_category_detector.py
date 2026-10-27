@@ -106,6 +106,8 @@ READ_ONLY_TOOLS = {
     # Records where a session's old IDs are kept, after checking the answer against the site:
     # it adds no field (create_document does, on its own card) and writes no business data.
     "choose_old_id_storage",
+    # Writes only a recipe, a record of FAC's own that holds how a migration was mapped (#34420).
+    "save_migration_recipe",
     # Writes only the session's settings and mapping, as set_column_mapping does.
     "set_opening_stock",
     "set_opening_invoices",

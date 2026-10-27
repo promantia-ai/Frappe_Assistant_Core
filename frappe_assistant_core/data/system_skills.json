@@ -140,6 +140,16 @@
     "content_file": "choose_old_id_storage.md"
   },
   {
+    "skill_id": "save-migration-recipe-usage",
+    "title": "How to Use save_migration_recipe",
+    "description": "Keep a finished migration as a recipe (how each file was mapped, no rows, no dates) to run again on new files, on another site, or on the transactions after the cut-off",
+    "skill_type": "Tool Usage",
+    "linked_tool": "save_migration_recipe",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "save_migration_recipe.md"
+  },
+  {
     "skill_id": "dry-run-import-usage",
     "title": "How to Use dry_run_import",
     "description": "Checking every row of a migration file before importing: the grouped failures explained in plain words, fixing them with the user, large files in the background, re-checking only the rows an import left, the failed rows as a file to correct",
