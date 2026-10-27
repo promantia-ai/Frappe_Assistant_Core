@@ -32,6 +32,7 @@ from frappe import _
 from frappe.utils import add_months, cint, cstr, get_datetime, get_last_day, getdate, now_datetime, today
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import plan_runner
 from frappe_assistant_core.utils.untrusted_output import unfenced
 
 SESSION_DOCTYPE = dry_run.SESSION_DOCTYPE
@@ -507,26 +508,19 @@ def order(sessions: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
             other for other in plain if other.name != session.name and other.target_doctype in wanted
         ]
 
-    ordered, placed, problems = [], set(), []
-    waiting = list(plain)
-    while waiting:
-        ready = [s for s in waiting if all(o.name in placed for o in needs[s.name])]
-        free = ready[0] if ready else None
-        if ready and delta:
-            free = min(ready, key=lambda s: (DELTA_RANK.get(s.target_doctype, 0), waiting.index(s)))
-        if free is None:  # every file left waits on another: they link to each other
-            first = waiting[0]
-            other = next(o for o in needs[first.name] if o.name not in placed)
-            problems.append(
-                _(
-                    "{0} and {1} link to each other: map the linking columns of one to Don't Import "
-                    "(and import them later), or set the order with plan_migration's order."
-                ).format(first.file_name, other.file_name)
-            )
-            free = first
-        waiting.remove(free)
-        placed.add(free.name)
-        before = needs[free.name]
+    in_order, cycles = plan_runner.topological(
+        plain, needs, rank=(lambda s: DELTA_RANK.get(s.target_doctype, 0)) if delta else None
+    )
+    # every file left waits on another: they link to each other
+    problems = [
+        _(
+            "{0} and {1} link to each other: map the linking columns of one to Don't Import "
+            "(and import them later), or set the order with plan_migration's order."
+        ).format(first.file_name, other.file_name)
+        for first, other in cycles
+    ]
+    ordered = []
+    for free, before in in_order:
         if before:
             reason = _("After {0}: it needs the {1} records from there.").format(
                 ", ".join(o.file_name for o in before),
@@ -1002,7 +996,7 @@ MASTERS_SAVEPOINT = "fac_plan_masters"
 
 
 def _progress(plan) -> Dict[str, Any]:
-    return frappe.parse_json(plan.progress or "{}") or {}
+    return plan_runner.read_progress(plan.progress)
 
 
 def _update(plan_name: str, status: Optional[str] = None, step: Optional[Tuple[str, str]] = None, **progress):
@@ -1312,18 +1306,15 @@ def _end_if_dead(name: str) -> bool:
 def _guarded(plan_name: str, work) -> None:
     """Run a step of the plan. Whatever goes wrong in it ends the plan, saying why, instead of
     leaving it Running with nothing to carry it on."""
-    frappe.db.savepoint(STEP_SAVEPOINT)
     try:
-        work()
-    except Exception as e:
-        try:
-            frappe.db.rollback(save_point=STEP_SAVEPOINT)
-        except Exception:
-            if frappe.flags.in_test:
-                raise
-            frappe.db.rollback()  # a commit inside the step released the savepoint
-        frappe.log_error(title=_("FAC migration plan stopped"), message=frappe.get_traceback())
-        _end(plan_name, "Failed" if isinstance(e, PlanProblem) else "Stopped", str(e) or type(e).__name__)
+        plan_runner.guarded(
+            work,
+            STEP_SAVEPOINT,
+            _("FAC migration plan stopped"),
+            lambda e: _end(
+                plan_name, "Failed" if isinstance(e, PlanProblem) else "Stopped", str(e) or type(e).__name__
+            ),
+        )
     finally:
         frappe.local.fac_plan_running = None
 
