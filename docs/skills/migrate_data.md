@@ -144,6 +144,8 @@ import tool yourself, in this conversation, one step after another.
   rows into the chat or a tool call. Not with `extract_file_content`, `run_python_code` or
   `get_document` either. The import tools read the file on the site and give you a summary:
   columns, row count, up to 10 sample rows, and grouped failures with row numbers. Work from those.
+- **Dropping a column.** A column goes to "Don't Import" only when the user says so. A column you
+  can't place is a question for the user, with the field you think fits (State → Territory).
 - **Guessing.** Never invent a value, a mapping or a name. When you aren't sure what a column
   means, ask with a choice card (`ask_user`). A fix maps only to a name the tool listed in
   `closest`, or one the user gave. A value from the user's file is never replaced by a different

@@ -209,6 +209,24 @@ class TestSetColumnMapping(ImportToolTestCase):
         self.assertEqual((step.step, step.outcome), ("Map Columns", "Success"))
         self.assertEqual(step.message, result["summary"])
 
+    def test_a_column_left_out_is_to_be_shown_to_the_user(self):
+        # "State has no direct Customer field, so I'll skip it": dropped unasked, the customers got
+        # the default territory.
+        result = self._map(
+            self._session(), {"First Name": "first_name", "Notes": "Don't Import"}, doctype="Contact"
+        )
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["not_imported"], ["Notes"])
+        self.assertIn("show them to the user and ask", result["note"])
+        self.assertNotIn("Notes", result["note"])  # FAC's own text names nothing from the file
+
+    def test_a_mapping_that_drops_nothing_has_no_note(self):
+        result = self._map(self._session(), {"First Name": "first_name"}, doctype="Contact")
+
+        self.assertTrue(result["success"], result)
+        self.assertNotIn("note", result)
+
     def test_a_later_turn_reads_the_mapping_back(self):
         session = self._session()
         self._map(session, {"First Name": "first_name"}, doctype="Contact")

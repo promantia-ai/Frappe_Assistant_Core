@@ -65,7 +65,9 @@ class SetColumnMapping(BaseTool):
             "any is wrong: the result says what to fix. Pass doctype the first time, or to change "
             "the target (that clears the old mapping). The result is the full mapping to show the "
             "user: parent fields and each child table apart, with unmapped columns and required "
-            "fields that have no column. Next, once the user agrees the mapping: dry_run_import to "
+            'fields that have no column. Map a column to "Don\'t Import" only when the user says '
+            "so: a column you can't place is asked about, never dropped. Next, once the user "
+            "agrees the mapping: dry_run_import to "
             "check every row. For a session in a migration plan, don't ask the user here: map what "
             "you are sure of, and plan_questions asks the rest with the plan's other questions."
         )
@@ -182,13 +184,23 @@ class SetColumnMapping(BaseTool):
             doc.import_type = import_type
             doc.match_key = match_key
             save_mapping(doc, target, merged, described["summary"])
-            return {
+            result = {
                 "success": True,
                 "session": session_name,
                 "doctype": target,
                 "status": doc.status,
                 **described,
             }
+            if described["not_imported"]:
+                # A column the model couldn't place went to Don't Import unasked, and the customers got
+                # the default territory. Names no column: they are the file's, fenced in not_imported.
+                result["note"] = _(
+                    "The columns in not_imported won't be imported. Unless the user chose that, show "
+                    "them to the user and ask: a column with no field of the same name may still belong "
+                    "in one (a state or region in Territory). In a migration plan, ask with the plan's "
+                    "questions."
+                )
+            return result
 
         except Exception as e:
             frappe.log_error(

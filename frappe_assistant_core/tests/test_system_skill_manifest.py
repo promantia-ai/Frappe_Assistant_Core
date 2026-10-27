@@ -344,6 +344,11 @@ class TestSystemSkillManifest(BaseAssistantTest):
         self.assertIn("**Ask first**, with one confirm card (`ask_user`)", rule)
         self.assertIn("even when deleting needs no approval card", rule)
 
+    def test_migrate_data_never_drops_a_column_unasked(self):
+        # "State has no direct Customer field, so I'll skip it": the customers got the default territory
+        content = _one_line(_skill_content("migrate_data.md"))
+        self.assertIn('A column goes to "Don\'t Import" only when the user says so.', content)
+
     def test_migrate_data_never_replaces_a_users_value_unasked(self):
         content = _one_line(_skill_content("migrate_data.md"))
         self.assertIn(
