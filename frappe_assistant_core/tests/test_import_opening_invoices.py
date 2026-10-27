@@ -169,7 +169,10 @@ class TestSetup(OpeningInvoicesCase):
         mapping = reply["result"]["column_to_field_map"]
         self.assertEqual(mapping["0"], "customer")
         self.assertEqual(mapping["4"], "outstanding_amount")
-        self.assertEqual(mapping["1"], "Don't Import")
+        # read by the engine as the invoice's number: shown as "Don't Import", the model told the
+        # user the old numbers were dropped
+        self.assertEqual(mapping["1"], "invoice_number")
+        self.assertEqual(dry_run.column_to_field_map(doc)["1"], "Don't Import")  # stored as before
 
     def test_purchase_maps_the_party_to_supplier(self):
         session = self._session([f"{self.supplier},B1,{self.date},{self.date},100"])

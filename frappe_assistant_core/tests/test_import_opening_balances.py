@@ -176,7 +176,7 @@ class TestSetup(OpeningBalancesCase):
         self.assertEqual(opening_balances.settings(self._doc(session))["columns"], {"balance": 3})
         mapping = reply["result"]["column_to_field_map"]
         self.assertEqual(mapping["0"], "accounts.account")
-        self.assertEqual(mapping["3"], "Don't Import")
+        self.assertEqual(mapping["3"], "balance")  # read by the engine, not dropped
 
     def test_every_wrong_column_is_listed_at_once(self):
         session = self._session()

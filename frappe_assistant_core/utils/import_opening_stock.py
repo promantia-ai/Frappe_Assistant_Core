@@ -176,7 +176,7 @@ def setup(
             company, stock["posting_date"], stock["posting_time"], difference_account
         ),
     )
-    return {"opening_stock": stock, "column_to_field_map": mapping}
+    return {"opening_stock": stock, "column_to_field_map": shown_mapping(mapping, extra)}
 
 
 # -- reading the file ------------------------------------------------------------------------
@@ -197,6 +197,13 @@ class Typed(str):
 
 
 PRESET_FILE = "preset_file"  # template_options: the CSV apply_import_preset wrote for the session
+
+
+def shown_mapping(mapping: Dict[str, str], extra: Dict[str, int]) -> Dict[str, str]:
+    """The column map as the reply shows it. A column the engine reads itself (an invoice number,
+    a batch) is stored as Don't Import, Data Import's word for a column it doesn't take: shown
+    so, the model told the user the column wasn't imported. It is shown by its field."""
+    return {**mapping, **{str(position): field for field, position in extra.items()}}
 
 
 def typed_file(session, file_doc) -> bool:

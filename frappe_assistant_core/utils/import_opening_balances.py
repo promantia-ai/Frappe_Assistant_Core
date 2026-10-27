@@ -251,7 +251,7 @@ def setup(
             company, balances["cut_off"], balances["temporary_opening_account"]
         ),
     )
-    return {"opening_balances": balances, "column_to_field_map": mapping}
+    return {"opening_balances": balances, "column_to_field_map": opening_stock.shown_mapping(mapping, extra)}
 
 
 def check_can_run(session) -> None:

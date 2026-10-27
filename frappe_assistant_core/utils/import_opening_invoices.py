@@ -191,7 +191,7 @@ def setup(session, company: str, invoice_type: str, cut_off: str, columns: Dict[
             _(invoice_type), company, invoices["cut_off"], invoices["temporary_opening_account"]
         ),
     )
-    return {"opening_invoices": invoices, "column_to_field_map": mapping}
+    return {"opening_invoices": invoices, "column_to_field_map": opening_stock.shown_mapping(mapping, extra)}
 
 
 def check_can_run(session) -> None:
