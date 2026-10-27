@@ -355,9 +355,14 @@ def session_summary(session) -> Dict[str, Any]:
 
 def plan_sessions(plan: str) -> List[str]:
     """A migration plan's sessions, the plan's own first (#34549): a migration reported on its own,
-    whatever its dates, without earlier runs of the same files."""
+    whatever its dates, without earlier runs of the same files. ``plan`` may name several, separated by
+    commas: the opening migration and its delta run are one sign-off (#34420)."""
+    plans = [name.strip() for name in plan.split(",") if name.strip()]
     names = frappe.get_list(
-        dry_run.SESSION_DOCTYPE, filters={"migration_plan": plan}, pluck="name", order_by="creation asc"
+        dry_run.SESSION_DOCTYPE,
+        filters={"migration_plan": ["in", plans]},
+        pluck="name",
+        order_by="creation asc",
     )
     if not names:
         raise frappe.DoesNotExistError(_("Migration plan {0} not found, or you can't read it.").format(plan))
@@ -399,10 +404,11 @@ def sessions_of(
     return [frappe.get_doc(dry_run.SESSION_DOCTYPE, name) for name in found]
 
 
-def build(sessions: List[Any]) -> Dict[str, Any]:
+def build(sessions: List[Any], closing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The sign-off report of ``sessions``: per DocType, the rows of the files and where each
-    ended; the opening balances per company against the files' totals; and what stands in the
-    way of signing off."""
+    ended; the opening balances per company against the files' totals; what a delta run brought in
+    after the cut-off; the books at go-live against the old system's closing totals, when ``closing``
+    gives them; and what stands in the way of signing off."""
     summaries = [session_summary(session) for session in sessions]
     report = {
         "generated_on": str(now_datetime()),
@@ -410,6 +416,8 @@ def build(sessions: List[Any]) -> Dict[str, Any]:
         "sessions": summaries,
         "doctypes": _per_doctype(summaries),
         "opening_balances": _opening_balances(summaries),
+        "since_cut_off": _since_cut_off(sessions, summaries),
+        "go_live": go_live_check(closing) if closing else None,
     }
     report["open_points"] = open_points(report)
     report["ready_to_sign"] = bool(summaries) and not report["open_points"]
@@ -439,6 +447,119 @@ def _per_doctype(summaries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _precision() -> int:
     return frappe.get_precision("GL Entry", "debit") or 2
+
+
+def _since_cut_off(sessions: List[Any], summaries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """What the delta runs brought in after the cut-off, per DocType: the rows of their files, how many
+    were left out because they were dated on or before the cut-off (the opening migration has them), and
+    where the rest ended (#34420). None when none of the sessions is of a delta run."""
+    from frappe_assistant_core.utils import import_plan
+    from frappe_assistant_core.utils.migration_recipe import LEFT_OUT_BEFORE
+
+    since_of = {session.name: import_plan.delta_since(session) for session in sessions}
+    entries: Dict[str, Dict[str, Any]] = {}
+    for summary in summaries:
+        since = since_of.get(summary["session"])
+        if not since or "rows" not in summary:
+            continue
+        entry = entries.setdefault(
+            summary["label"],
+            {"label": summary["label"], "before": 0, **{status: 0 for status in ("source", *STATUSES)}},
+        )
+        before = sum(
+            g["count"] for g in summary.get("excluded") or [] if g["reason"].startswith(_(LEFT_OUT_BEFORE))
+        )
+        entry["before"] += before
+        for key, value in summary["rows"].items():
+            entry[key] += value
+        entry["excluded"] -= before  # left out for another reason: shown as such
+        entry["since"] = max(since, entry.get("since", since))
+    if not entries:
+        return None
+    return {"since": max(e["since"] for e in entries.values()), "doctypes": list(entries.values())}
+
+
+#: The old system's closing totals the consultant gives, and what they are compared with in ERPNext.
+CLOSING_TOTALS = ("receivables", "payables", "stock_value", "debit", "credit")
+
+
+def go_live_check(closing: Dict[str, Any]) -> Dict[str, Any]:
+    """The books of ``closing['company']`` at ``closing['as_of']`` against the old system's closing
+    totals, each one the consultant gave (RC-6): receivables, payables, stock value, and the trial
+    balance's total debit and credit. A total not given is shown from ERPNext alone."""
+    from frappe.query_builder.functions import Sum
+
+    company, as_of = closing["company"], closing["as_of"]
+    out: Dict[str, Any] = {"company": company, "as_of": as_of, "items": []}
+    if not can_read_ledger("GL Entry", company):
+        out["problem"] = _cannot_read("GL Entry", company)
+        return out
+    precision = _precision()
+    gle = frappe.qb.DocType("GL Entry")
+
+    def net(accounts) -> float:
+        if not accounts:
+            return 0.0
+        row = (
+            frappe.qb.from_(gle)
+            .select(Sum(gle.debit).as_("debit"), Sum(gle.credit).as_("credit"))
+            .where(
+                (gle.company == company)
+                & (gle.is_cancelled == 0)
+                & (gle.posting_date <= as_of)
+                & gle.account.isin(accounts)
+            )
+        ).run(as_dict=True)[0]
+        return flt(row.debit) - flt(row.credit)
+
+    def accounts_of(account_type: str) -> List[str]:
+        return frappe.get_all(
+            "Account", filters={"company": company, "account_type": account_type, "is_group": 0}, pluck="name"
+        )
+
+    here: Dict[str, Optional[float]] = {
+        "receivables": net(accounts_of("Receivable")),
+        "payables": -net(accounts_of("Payable")),
+    }
+    if can_read_ledger("Stock Ledger Entry", company):
+        sle = frappe.qb.DocType("Stock Ledger Entry")
+        value = (
+            (
+                frappe.qb.from_(sle)
+                .select(Sum(sle.stock_value_difference).as_("value"))
+                .where((sle.company == company) & (sle.is_cancelled == 0) & (sle.posting_date <= as_of))
+            )
+            .run(as_dict=True)[0]
+            .value
+        )
+        here["stock_value"] = flt(value)
+    else:
+        here["stock_value"] = None
+    trial = trial_balance(company, as_of)
+    here["debit"], here["credit"] = trial.get("debit"), trial.get("credit")
+    labels = {
+        "receivables": _("Receivables"),
+        "payables": _("Payables"),
+        "stock_value": _("Stock value"),
+        "debit": _("Trial balance: total debit"),
+        "credit": _("Trial balance: total credit"),
+    }
+    for key in CLOSING_TOTALS:
+        given = closing.get(key)
+        old = flt(given, precision) if given not in (None, "") else None
+        erpnext = flt(here[key], precision) if here[key] is not None else None
+        difference = flt(erpnext - old, precision) if old is not None and erpnext is not None else None
+        out["items"].append(
+            {
+                "key": key,
+                "label": labels[key],
+                "old_system": old,
+                "erpnext": erpnext,
+                "difference": difference,
+                "matches": difference == 0 if difference is not None else None,
+            }
+        )
+    return out
 
 
 def _opening_balances(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -605,6 +726,30 @@ def open_points(report: Dict[str, Any]) -> List[str]:
                     "opening balance is in."
                 ).format(company, _amount(temporary), trial["as_of"])
             )
+    live = report.get("go_live")
+    if live and live.get("problem"):
+        points.append(live["problem"])
+    for item in (live or {}).get("items") or []:
+        if item["old_system"] is None:
+            points.append(
+                _("Go-live check at {0}: the old system's {1} wasn't given, so it isn't compared.").format(
+                    live["as_of"], item["label"].lower()
+                )
+            )
+        elif item["erpnext"] is None:
+            points.append(_("Go-live check: ERPNext's {0} can't be read.").format(item["label"].lower()))
+        elif not item["matches"]:
+            points.append(
+                _(
+                    "Go-live check at {0}: {1} is {2} in the old system and {3} in ERPNext (difference {4})."
+                ).format(
+                    live["as_of"],
+                    item["label"].lower(),
+                    _amount(item["old_system"]),
+                    _amount(item["erpnext"]),
+                    _amount(item["difference"]),
+                )
+            )
     return points
 
 
@@ -733,6 +878,36 @@ def _rows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
                     }
                 )
         out += _trial_balance_rows(company, balances.get("trial_balance") or {})
+    since = report.get("since_cut_off")
+    for entry in (since or {}).get("doctypes") or []:
+        out.append(
+            {
+                "section": _("Since Cut-off"),
+                "item": entry["label"],
+                "source_rows": entry["source"],
+                "imported_rows": entry["imported"],
+                "unchanged_rows": entry["unchanged"],
+                "left_out_rows": entry["excluded"],
+                "failed_rows": entry["failed"],
+                "not_imported_rows": entry["not_imported"],
+                "details": _(
+                    "{0} more rows are dated on or before {1}: the opening migration has them."
+                ).format(entry["before"], since["since"]),
+            }
+        )
+    live = report.get("go_live") or {}
+    for item in live.get("items") or []:
+        out.append(
+            {
+                "section": _("Go-live Check"),
+                "item": item["label"],
+                "company": live["company"],
+                "in_files": item["old_system"],
+                "in_erpnext": item["erpnext"],
+                "difference": item["difference"],
+                "details": _("At {0}.").format(live["as_of"]),
+            }
+        )
     for number, point in enumerate(report["open_points"], start=1):
         out.append({"section": _("Open Points"), "item": str(number), "details": point})
     for summary in report["sessions"]:
@@ -848,7 +1023,16 @@ def summary_cards(report: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
-SECTIONS = ("Records", "Why Not Imported", "Opening Balances", "Trial Balance", "Open Points", "Sessions")
+SECTIONS = (
+    "Records",
+    "Why Not Imported",
+    "Opening Balances",
+    "Trial Balance",
+    "Since Cut-off",
+    "Go-live Check",
+    "Open Points",
+    "Sessions",
+)
 
 
 def _value(column: Dict[str, Any], value) -> str:
@@ -918,6 +1102,26 @@ def scope(filters, plan: str, names: List[str], count: int) -> str:
     )
 
 
+def closing_totals(filters) -> Optional[Dict[str, Any]]:
+    """The go-live check the filters ask for: ``go_live_date``, with the old system's closing totals
+    (closing_receivables, closing_payables, closing_stock_value, closing_debit, closing_credit) and the
+    ``company`` (the site's default, else its only one)."""
+    as_of = cstr(filters.get("go_live_date")).strip()
+    if not as_of:
+        return None
+    company = cstr(filters.get("company")).strip() or frappe.defaults.get_global_default("company")
+    if not company:
+        companies = frappe.get_all("Company", pluck="name", limit=2)
+        company = companies[0] if len(companies) == 1 else ""
+    if not company:
+        frappe.throw(_("Give the company for the go-live check."))
+    return {
+        "company": company,
+        "as_of": str(getdate(as_of)),
+        **{key: filters.get(f"closing_{key}") for key in CLOSING_TOTALS},
+    }
+
+
 def execute(filters: Optional[Dict[str, Any]] = None):
     """The Migration Sign-off report: columns, rows, the headline and the summary cards. With the
     ``document`` filter, the message is the whole report as a document, for the PDF."""
@@ -929,7 +1133,7 @@ def execute(filters: Optional[Dict[str, Any]] = None):
     sessions = sessions_of(
         names or None, filters.get("user"), filters.get("from_date"), filters.get("to_date")
     )
-    report = build(sessions)
+    report = build(sessions, closing_totals(filters))
     # What the report covers, first: a date range takes in earlier test runs, a plan doesn't (#34549)
     report["message"] = scope(filters, plan, names, len(sessions)) + " " + report["message"]
     message = document(report) if cint(filters.get("document")) else report["message"]

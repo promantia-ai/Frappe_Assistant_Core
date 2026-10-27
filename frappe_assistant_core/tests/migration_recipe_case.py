@@ -8,6 +8,8 @@
 
 """A finished migration to make recipes from (#34420). A base for the recipe tests, with no tests of its own."""
 
+import json
+
 import frappe
 
 from frappe_assistant_core.tests.test_import_run import ImportRunCase
@@ -76,3 +78,90 @@ class RecipeCase(ImportRunCase):
         saved = self._run("save_migration_recipe", {"plan": plan})
         self.assertTrue(saved["success"], saved)
         return saved["result"]["recipe"]
+
+
+def step(position, sheet, target, headers, mapping, **extra):
+    """A recipe step as a FAC Migration Recipe row is made."""
+    return {
+        "position": position,
+        "sheet_name": sheet,
+        "original_file_name": f"{sheet}.csv",
+        "target_doctype": target,
+        "import_type": "Insert New Records",
+        "header_signature": json.dumps(headers),
+        "column_map": json.dumps(mapping),
+        **extra,
+    }
+
+
+class DeltaRecipeCase(RecipeCase):
+    """A recipe made of a master, three transaction steps and an opening step, to run as a delta."""
+
+    CUT_OFF = "2026-03-31"
+
+    def _delta_recipe(self):
+        return frappe.get_doc(
+            {
+                "doctype": RECIPE,
+                "title": "Cut-over",
+                "steps": [
+                    step(
+                        1,
+                        "Groups",
+                        "Item Group",
+                        ["Name", "Parent"],
+                        {"0": "item_group_name", "1": "parent_item_group"},
+                    ),
+                    step(
+                        2,
+                        "Invoices",
+                        "Sales Invoice",
+                        ["Invoice", "Date", "Customer"],
+                        {"0": "po_no", "1": "posting_date", "2": "customer"},
+                        is_transaction_step=1,
+                    ),
+                    step(
+                        3,
+                        "Stock",
+                        "Stock Entry",
+                        ["Ref", "Moved", "Note"],
+                        {"0": "remarks", "1": "posting_date"},
+                        is_transaction_step=1,
+                    ),
+                    step(
+                        4,
+                        "Journals",
+                        "Journal Entry",
+                        ["Voucher", "Booked", "Opening", "Account"],
+                        {"0": "user_remark", "1": "posting_date", "2": "is_opening", "3": "accounts.account"},
+                        is_transaction_step=1,
+                    ),
+                    step(
+                        5,
+                        "Opening stock",
+                        None,
+                        ["Item", "Qty"],
+                        {},
+                        opening_engine="stock",
+                        engine_settings=json.dumps({"warehouse": "Main"}),
+                    ),
+                ],
+            }
+        ).insert()
+
+    def _csv(self, name, header, *rows):
+        return self._opened(f"{name}.csv", ("\n".join([header, *rows]) + "\n").encode())
+
+    def _invoices(self, *rows):
+        return self._csv("Invoices", "Invoice,Date,Customer", *rows)
+
+    def _delta(self, *sessions, since=None, **arguments):
+        return self._run(
+            "run_migration_recipe",
+            {
+                "recipe": self.recipe.name,
+                "sessions": list(sessions),
+                "since": since or self.CUT_OFF,
+                **arguments,
+            },
+        )

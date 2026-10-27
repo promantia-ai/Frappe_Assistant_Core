@@ -13,7 +13,7 @@ import unittest
 
 import frappe
 
-from frappe_assistant_core.tests.migration_recipe_case import RECIPE, SESSION, RecipeCase
+from frappe_assistant_core.tests.migration_recipe_case import SESSION, DeltaRecipeCase
 from frappe_assistant_core.utils import import_dry_run as dry_run
 from frappe_assistant_core.utils import (
     import_opening_balances,
@@ -25,83 +25,11 @@ from frappe_assistant_core.utils import (
 CUT_OFF = "2026-03-31"
 
 
-def _step(position, sheet, target, headers, mapping, **extra):
-    return {
-        "position": position,
-        "sheet_name": sheet,
-        "original_file_name": f"{sheet}.csv",
-        "target_doctype": target,
-        "import_type": "Insert New Records",
-        "header_signature": json.dumps(headers),
-        "column_map": json.dumps(mapping),
-        **extra,
-    }
-
-
 @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's invoices and entries")
-class TestDeltaRun(RecipeCase):
+class TestDeltaRun(DeltaRecipeCase):
     def setUp(self):
         super().setUp()
-        self.recipe = frappe.get_doc(
-            {
-                "doctype": RECIPE,
-                "title": "Cut-over",
-                "steps": [
-                    _step(
-                        1,
-                        "Groups",
-                        "Item Group",
-                        ["Name", "Parent"],
-                        {"0": "item_group_name", "1": "parent_item_group"},
-                    ),
-                    _step(
-                        2,
-                        "Invoices",
-                        "Sales Invoice",
-                        ["Invoice", "Date", "Customer"],
-                        {"0": "po_no", "1": "posting_date", "2": "customer"},
-                        is_transaction_step=1,
-                    ),
-                    _step(
-                        3,
-                        "Stock",
-                        "Stock Entry",
-                        ["Ref", "Moved", "Note"],
-                        {"0": "remarks", "1": "posting_date"},
-                        is_transaction_step=1,
-                    ),
-                    _step(
-                        4,
-                        "Journals",
-                        "Journal Entry",
-                        ["Voucher", "Booked", "Opening", "Account"],
-                        {"0": "user_remark", "1": "posting_date", "2": "is_opening", "3": "accounts.account"},
-                        is_transaction_step=1,
-                    ),
-                    _step(
-                        5,
-                        "Opening stock",
-                        None,
-                        ["Item", "Qty"],
-                        {},
-                        opening_engine="stock",
-                        engine_settings=json.dumps({"warehouse": "Main"}),
-                    ),
-                ],
-            }
-        ).insert()
-
-    def _csv(self, name, header, *rows):
-        return self._opened(f"{name}.csv", ("\n".join([header, *rows]) + "\n").encode())
-
-    def _invoices(self, *rows):
-        return self._csv("Invoices", "Invoice,Date,Customer", *rows)
-
-    def _delta(self, *sessions, since=CUT_OFF, **arguments):
-        return self._run(
-            "run_migration_recipe",
-            {"recipe": self.recipe.name, "sessions": list(sessions), "since": since, **arguments},
-        )
+        self.recipe = self._delta_recipe()
 
     def _excluded(self, session):
         return sorted(frappe.parse_json(frappe.db.get_value(SESSION, session, "excluded_rows") or "[]"))
