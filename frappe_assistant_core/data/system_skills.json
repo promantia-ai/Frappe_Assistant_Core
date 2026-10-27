@@ -170,6 +170,16 @@
     "content_file": "export_migration_recipe.md"
   },
   {
+    "skill_id": "import-chart-of-accounts-usage",
+    "title": "How to Use check_chart_of_accounts, import_chart_of_accounts and replace_chart_of_accounts",
+    "description": "Put the client's own chart of accounts on a company: read and classify it, then map onto the accounts it has, add under the right parents, or replace the standard chart of a company with no transactions",
+    "skill_type": "Tool Usage",
+    "linked_tool": "import_chart_of_accounts",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "import_chart_of_accounts.md"
+  },
+  {
     "skill_id": "dry-run-import-usage",
     "title": "How to Use dry_run_import",
     "description": "Checking every row of a migration file before importing: the grouped failures explained in plain words, fixing them with the user, large files in the background, re-checking only the rows an import left, the failed rows as a file to correct",
