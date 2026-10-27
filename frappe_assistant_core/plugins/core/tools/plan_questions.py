@@ -35,14 +35,14 @@ class PlanQuestions(BaseTool):
             "the cut-off date of opening stock, invoices and balances (cut_off: ask the user, never "
             "guess it), and what happens to rows that still fail when their file comes up "
             "(failure_rule). "
-            "Files are checked again first, in the plan's order. Show the plan first, a table of "
-            "its files in order with each one's reason (files). Ask once: one table of every "
-            "question (duplicates and left-out rows too, and what needed_by says) with the answer "
-            "you suggest and the cut-off date, in your message's text (never only in your "
-            "thinking: the user doesn't see it), not in the card; then ONE "
-            "single-choice card with one short line (ask_user single_select, never "
-            "multi_select): 'Apply all suggested answers and start (cut-off <date>)' or 'Let me "
-            "change some'. A question with nothing to suggest gets its own single-choice card. "
+            "Files are checked again first, in the plan's order. Ask once: 'table' holds the "
+            "plan's files in order with each one's reason, and every question with its suggested "
+            "answer; show it as it is in your message's text (never only in your thinking: the "
+            "user doesn't see it) and as the card's description, with what needed_by says; then "
+            "ONE single-choice card (ask_user single_select, never multi_select): 'Apply all "
+            "suggested answers and start (cut-off <date>)' or 'Let me change some'. 'Apply all' "
+            "answers each fix question with its 'suggested'. A question with nothing suggested "
+            "gets its own single-choice card. "
             "Never questions as text to type answers to. Map files yourself where you are sure. "
             "Then call again with "
             "answers: [{id, ...}], a fix's fields as dry_run_import takes them (action map/"
@@ -64,6 +64,7 @@ class PlanQuestions(BaseTool):
             "questions[kind=blocked].message",
             "questions[kind=fix].explanation",
             "questions[kind=fix].fixes",
+            "questions[kind=fix].suggested",
             "questions[].file_name",
             "questions[].columns",
             "questions[].dates",
@@ -75,6 +76,7 @@ class PlanQuestions(BaseTool):
             "applied",
             "error",
             "approval.decisions[]",
+            "table",
         )
 
         self.inputSchema = {
@@ -153,9 +155,10 @@ def _next(result: Dict[str, Any], answered: bool) -> str:
     if any(q.get("kind") in ("checking", "structure") for q in result.get("questions") or []):
         return "Map or wait for the files the questions name, then call plan_questions again."
     return (
-        "One table in your message of every question (file, problem, suggested answer, the cut-off), "
-        "then ONE ask_user single_select: 'Apply all suggested answers and start (cut-off <date>)' "
-        "or 'Let me change some'. No other card."
+        "Show 'table' as it is (the text inside its fence) in your message, and as the ask_user "
+        "card's description: the user can't choose on questions they haven't seen. Then ONE "
+        "ask_user single_select: 'Apply all suggested answers and start (cut-off <date>)' or 'Let "
+        "me change some'. No other card. 'Apply all' answers each fix question with its 'suggested'."
     )
 
 

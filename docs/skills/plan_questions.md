@@ -32,20 +32,21 @@ Ask once, with one card. The user is touched twice in a whole migration: the cut
 start (`plan_migration`'s `opening_setup`; the company only when the site has more than one), then
 this card. `next` in the result says which of the steps below comes now.
 
-0. Show **the plan** first, as a table in your message's text: each file in its order, with what
-   it imports and its `reason` (the reply's `files`). The user approves the order too.
-1. Show **every** question in **one table, in your message's text** (not inside the card: a card
-   shows no tables; and never only in your thinking, which the user doesn't see, so a card asking
-   "how should I proceed?" would have nothing above it): file, the problem in plain words, and the answer you suggest (the first of its
-   `fixes`). Every one: typos, missing records, duplicates, rows left out, values with no match.
-   Put the cut-off date in it, and the failure rule (`leave_out`). A question with `needed_by`
-   says so in its row: "leaving it out also leaves out <needed_by>"; prefer a fix that keeps it.
+0. Show **`table`** as it is, the text inside its fence: first the plan, each file in its order with
+   what it imports and its `reason` (the user approves the order too); then **every** question with
+   its suggested answer, the cut-off date and the failure rule. Put it **in your message's text**
+   (never only in your thinking, which the user doesn't see) **and as the card's description**, so
+   the user sees it even when the message has no text. Add what `needed_by` says to that question's
+   row: "leaving it out also leaves out <needed_by>"; prefer a fix that keeps it.
+1. The suggested answer of a fix question is its `suggested`: the name it is most likely a
+   misspelling of (`likely`), else creating the missing record, else leaving the rows out.
 2. Then **one single-choice card** (`ask_user`, `single_select`, never `multi_select`), its
    question one short line ("Apply these answers?"), with two
    options: **"Apply all suggested answers and start (cut-off <date>)"** first, and **"Let me
    change some"**. Never one option per answer: a card of checkboxes lets the user pick two
    answers to one question (map it and create it).
-3. On "Apply all…": answer every question as suggested, and once `ready` is true, call
+3. On "Apply all…": answer every question with its `suggested` (and the cut-off and failure rule
+   in the table), and once `ready` is true, call
    `run_migration_plan` with the `approval` straight away: the user already said start. No
    "Start the migration?" card after it.
 4. On "Let me change some": ask which, in their words or a card each, then apply all the answers
@@ -65,7 +66,8 @@ create those records or to leave those rows out.
 | Field | Description |
 |---|---|
 | `files` | The plan's files in order, with their status. |
-| `questions` | What is still open. |
+| `questions` | What is still open. A fix question has `suggested`: its answer on "Apply all". |
+| `table` | The plan's files in order and every question with its suggested answer, in markdown: show it in your message and as the card's description. |
 | `ready` | True when nothing is open and every file is Ready to Import: the plan is `Ready to Run`. Next: `run_migration_plan`. |
 | `approval` | Once ready: what `run_migration_plan` is given, exactly (files, rows, masters, `cut_off`, `decisions`). Its approval card shows the user every decision. |
 | `applied` | What the answers did. |

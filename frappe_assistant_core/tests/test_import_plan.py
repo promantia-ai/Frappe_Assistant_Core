@@ -14,9 +14,11 @@ from unittest.mock import patch
 import frappe
 
 from frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session import PLAN_FIELDS
+from frappe_assistant_core.chat.api._untrusted import wrap_untrusted
 from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.tests.base_test import BaseAssistantTest, item_hsn_fields
 from frappe_assistant_core.utils import import_opening_stock, import_plan
+from frappe_assistant_core.utils.untrusted_output import FENCE
 
 SESSION = "FAC Import Session"
 
@@ -558,6 +560,81 @@ class TestPlanQuestions(ImportPlanCase):
         self.assertIn("create", [f["action"] for f in fix["fixes"]])
         self.assertFalse(result["ready"])
         self.assertEqual(import_plan.get_plan(plan).status, "Planning")
+
+    def _plan_with_a_new_and_a_misspelt_group(self):
+        self.meant = f"Hospitals {self.tag}"
+        frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": self.meant,
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+        customers = self._session(
+            "customers.csv",
+            ["Name", "Group", "Type"],
+            [
+                [f"C {self.tag}", f"Zymurgy {self.tag}", "Company"],
+                [f"D {self.tag}", f"Hospitls {self.tag}", "Company"],
+            ],
+            "Customer",
+            {"Name": "customer_name", "Group": "customer_group", "Type": "customer_type"},
+        )
+        return self._run("plan_migration", {"sessions": [customers]})["result"]["plan"]
+
+    def test_every_question_and_its_suggested_answer_is_in_the_table(self):
+        # Left to the model, the table was skipped: the user saw only "Apply these answers?".
+        plan = self._plan_with_a_new_and_a_misspelt_group()
+
+        result = self._run("plan_questions", {"plan": plan})["result"]
+
+        fixes = {q["message"]: q for q in result["questions"] if q["kind"] == "fix"}
+        new = next(q for m, q in fixes.items() if f"Zymurgy {self.tag}" in m)
+        misspelt = next(q for m, q in fixes.items() if f"Hospitls {self.tag}" in m)
+        self.assertEqual(new["suggested"], {"action": "create", "parent": "All Customer Groups"})
+        self.assertEqual(misspelt["suggested"], {"action": "map", "to": self.meant})
+        table = result["table"]
+        self.assertIn("customers.csv", table)
+        self.assertIn(f"Create Customer Group 'Zymurgy {self.tag}'", table)
+        self.assertIn(f"Use '{self.meant}'", table)
+        self.assertIn("Rows that still fail when their file comes up | Leave them out", table)
+        self.assertEqual(table.count("\n| "), len(result["files"]) + len(result["questions"]) + 1)
+        self.assertIn("card's description", result["next"])
+
+    def test_the_suggested_answers_are_answers_the_plan_takes(self):
+        plan = self._plan_with_a_new_and_a_misspelt_group()
+        questions = self._run("plan_questions", {"plan": plan})["result"]["questions"]
+        answers = [{"id": q["id"], **q["suggested"]} for q in questions if q["kind"] == "fix"]
+
+        response = self._run(
+            "plan_questions",
+            {"plan": plan, "answers": [*answers, {"id": "plan:failure_rule", "rule": "leave_out"}]},
+        )
+
+        self.assertTrue(response["success"], response)
+        self.assertTrue(response["result"]["ready"], response["result"]["questions"])
+
+    def test_a_suggested_name_passed_back_fenced_is_taken(self):
+        # suggested is fenced like fixes (it names a record); an answer may carry it back as it came
+        plan = self._plan_with_a_new_and_a_misspelt_group()
+        questions = self._run("plan_questions", {"plan": plan})["result"]["questions"]
+        answers = [
+            {
+                "id": q["id"],
+                **q["suggested"],
+                **({"to": wrap_untrusted(q["suggested"]["to"], FENCE)} if "to" in q["suggested"] else {}),
+            }
+            for q in questions
+            if q["kind"] == "fix"
+        ]
+
+        response = self._run(
+            "plan_questions",
+            {"plan": plan, "answers": [*answers, {"id": "plan:failure_rule", "rule": "leave_out"}]},
+        )
+
+        self.assertTrue(response["success"], response)
+        self.assertTrue(response["result"]["ready"], response["result"]["questions"])
 
     def test_answers_are_applied_and_the_plan_becomes_ready_to_run(self):
         plan, _customers = self._plan_with_a_missing_group()

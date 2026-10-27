@@ -32,6 +32,7 @@ from frappe import _
 from frappe.utils import add_months, cint, cstr, get_datetime, get_last_day, getdate, now_datetime, today
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils.untrusted_output import unfenced
 
 SESSION_DOCTYPE = dry_run.SESSION_DOCTYPE
 ANSWERS_SAVEPOINT = "fac_plan_answers"
@@ -646,13 +647,96 @@ def open_questions(plan) -> Dict[str, Any]:
         )
     files = children(plan)
     _add_needed_by(questions, files)
+    for question in questions:
+        suggested = suggested_fix(question) if question["kind"] == "fix" else None
+        if suggested:
+            question["suggested"] = suggested
     ready = bool(files) and not questions and all(s.status == "Ready to Import" for s in files)
     plan.status = "Ready to Run" if ready else "Planning"
     plan.save_open()
     result = {**describe(plan), "questions": questions, "ready": ready}
+    if questions:
+        # The user must see every question before "Apply all suggested answers": left to the
+        # model, the table was skipped and the user approved blind.
+        result["table"] = questions_table(result["files"], questions)
     if ready:  # what run_migration_plan is given, so its approval card shows it
         result["approval"] = card_figures(plan)
     return result
+
+
+def suggested_fix(question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The answer "Apply all suggested answers" gives a fix question: map to the name the value is
+    most likely a misspelling of, else create the missing record, else leave the rows out. None
+    when no fix fits (an answer the user must give on a card of its own)."""
+    from frappe_assistant_core.utils import import_fixes
+
+    fixes = {fix.get("action"): fix for fix in question.get("fixes") or []}
+    likely = (fixes.get(import_fixes.MAP) or {}).get("likely")
+    if likely:
+        return {"action": import_fixes.MAP, "to": likely}
+    if import_fixes.CREATE in fixes:
+        parent = fixes[import_fixes.CREATE].get("parent")
+        return {"action": import_fixes.CREATE, **({"parent": parent} if parent else {})}
+    if import_fixes.LEAVE_OUT in fixes:
+        return {"action": import_fixes.LEAVE_OUT, "reason": question.get("cause") or _("Left out")}
+    return None
+
+
+def questions_table(files: List[Dict[str, Any]], questions: List[Dict[str, Any]]) -> str:
+    """The plan's files in order and every open question with its suggested answer, as markdown:
+    what the user reads before choosing "Apply all suggested answers"."""
+    lines = [
+        "| # | " + _("File") + " | " + _("Records") + " | " + _("Why here") + " |",
+        "|---|---|---|---|",
+    ]
+    for i, file in enumerate(files, 1):
+        lines.append(
+            f"| {i} | {_cell(file['file_name'])} | {_cell(_(file['doctype'] or ''))} | {_cell(file['reason'])} |"
+        )
+    lines += [
+        "",
+        "| # | " + _("File") + " | " + _("Question") + " | " + _("Suggested answer") + " |",
+        "|---|---|---|---|",
+    ]
+    for i, question in enumerate(questions, 1):
+        lines.append(
+            f"| {i} | {_cell(question.get('file_name') or _('The plan'))} | {_cell(_question_text(question))} "
+            f"| {_cell(_answer_text(question))} |"
+        )
+    return "\n".join(lines)
+
+
+def _question_text(question: Dict[str, Any]) -> str:
+    if question["kind"] == "cut_off":
+        return _("The cut-off date of the opening files")
+    if question["kind"] == "failure_rule":
+        return _("Rows that still fail when their file comes up")
+    return question.get("explanation") or question.get("message") or ""
+
+
+def _answer_text(question: Dict[str, Any]) -> str:
+    from frappe_assistant_core.utils import import_fixes
+
+    kind = question["kind"]
+    if kind == "cut_off":
+        dates = [date for date in question.get("choices") or [] if date != "another_date"]
+        return ", ".join(dates) if dates else _("Ask the user")
+    if kind == "failure_rule":
+        return _("Leave them out") if question.get("suggested") == "leave_out" else _("Stop the plan")
+    suggested = question.get("suggested")
+    if not suggested:
+        return _("Ask the user") if kind == "fix" else ""
+    action = suggested["action"]
+    if action == import_fixes.MAP:
+        return _("Use '{0}'").format(suggested["to"])
+    if action == import_fixes.CREATE:
+        create = next(fix for fix in question["fixes"] if fix.get("action") == import_fixes.CREATE)
+        return _("Create {0} '{1}'").format(_(create.get("doctype") or ""), create.get("name") or "")
+    return _("Leave out {0}").format(import_fixes._rows(question.get("count") or 0))
+
+
+def _cell(text: Any) -> str:
+    return " ".join(str(text or "").split()).replace("|", "\\|")
 
 
 def _add_needed_by(questions: List[Dict[str, Any]], files: List[Any]) -> None:
@@ -732,7 +816,12 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
         fixes.setdefault(session_name, []).append(
             {
                 "group": group,
-                **{k: v for k, v in answer.items() if k != "id" and k not in FIX_DESCRIPTION_KEYS},
+                # a value from a fenced `suggested` or `fixes` may come back still fenced
+                **{
+                    k: unfenced(v) if isinstance(v, str) else v
+                    for k, v in answer.items()
+                    if k != "id" and k not in FIX_DESCRIPTION_KEYS
+                },
             }
         )
 
