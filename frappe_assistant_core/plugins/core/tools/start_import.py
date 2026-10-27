@@ -13,6 +13,8 @@ Imports an import session's checked file through Frappe's own Data Import, after
 and continues an import that was interrupted.
 """
 
+import random
+import time
 from typing import Any, Dict
 
 import frappe
@@ -81,6 +83,18 @@ class StartImport(BaseTool):
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        # A start that collided with another import saving at the same moment was undone whole
+        # by the database, and nothing before it in this call wrote anything: the call runs
+        # again from the start, after a short random wait, so the user isn't asked to (BT-17).
+        for attempt in range(1, import_run.START_ATTEMPTS + 1):
+            try:
+                return self._execute(arguments)
+            except import_run.StartCollided as e:
+                if attempt == import_run.START_ATTEMPTS:
+                    return {"success": False, "error": str(e), "session": arguments.get("session")}
+                time.sleep(random.uniform(0.1, 0.5))
+
+    def _execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         session_name = arguments.get("session")
         try:
             session = load_session(session_name)
@@ -129,6 +143,8 @@ class StartImport(BaseTool):
                 data_import, state = import_run.resume(session)
             else:
                 data_import, state = import_run.start(session), "started"
+        except import_run.StartCollided:
+            raise
         except import_run.NothingToChange as e:
             return {"success": True, "session": session_name, "status": "Completed", "message": str(e)}
         except (import_run.ImportProblem, FileProblem) as e:
