@@ -815,6 +815,58 @@ class TestTheApprovalNamesTheCheck(ImportRunCase):
                 self.assertIn("file_name", reply["result"]["error"])
         self.assertFalse(self._imported())
 
+    def test_a_card_that_leaves_out_submit_imports_a_session_that_doesnt_submit(self):
+        # BT-18: FACO leaves an optional false out, and the card is right without it; refused
+        # after the user approved, 6 files took 12 approvals.
+        session, checked = self._ready_session()
+        card = self._card(session, checked)
+        del card["submit_after_import"]
+
+        with self._each_row_commits():
+            reply = self._run("start_import", card)
+
+        self.assertTrue(reply["success"], reply)
+
+    def test_a_card_that_leaves_out_submit_is_refused_when_the_session_submits(self):
+        # The user must see on the card that the records are submitted.
+        session, _checked = self._ready_session()
+        frappe.db.set_value("FAC Import Session", session, "submit_after_import", 1)
+        checked = self._run("dry_run_import", {"session": session})["result"]
+        card = self._card(session, checked)
+        del card["submit_after_import"]
+
+        reply = self._run("start_import", card)
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("submit_after_import true", reply["result"]["error"])
+        self.assertFalse(self._imported())
+
+    def test_a_deadlock_while_starting_says_try_again_and_leaves_no_file(self):
+        # BT-17: six imports started at once deadlocked. The server undid the victim's whole
+        # transaction, so the rollback to the start's savepoint failed ("SAVEPOINT
+        # fac_start_import does not exist"), hid the deadlock, and left the cleaned file on disk.
+        session, checked = self._ready_session()
+        removed = []
+        real_remove = import_run._remove_from_disk
+
+        def deadlock(*args, **kwargs):
+            frappe.db.rollback()  # what the server does to a deadlock's victim
+            raise frappe.QueryDeadlockError("Deadlock found when trying to get lock")
+
+        def remove(file_doc):
+            removed.append(file_doc.file_url)
+            real_remove(file_doc)
+
+        with patch.object(import_run, "_record_start", side_effect=deadlock), patch.object(
+            import_run, "_remove_from_disk", side_effect=remove
+        ):
+            reply = self._import(session, checked)
+
+        self.assertFalse(reply["success"], reply)
+        self.assertIn("try again", reply["result"]["error"])
+        self.assertNotIn("SAVEPOINT", reply["result"]["error"])
+        self.assertTrue(removed, "the cleaned file was left on disk")
+
 
 class TestOnlyWhatWasMappedAndChecked(ImportRunCase):
     """Review fixes: a column the user left unmapped is not imported (#33993), and the mapping

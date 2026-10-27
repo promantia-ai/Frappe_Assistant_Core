@@ -114,6 +114,10 @@ def check_card(
                 "so the approval is of what was checked. Show the user that check's result first."
             )
         )
+    if submit is None and not session.submit_after_import:
+        # Left out, it is the default, false, and the card is right without it: FACO leaves an
+        # optional false out (BT-18). A submit the card doesn't show is still refused.
+        submit = False
     card = (cstr(file_name).strip(), _bool(submit))
     if card != (cstr(session.file_name), bool(session.submit_after_import)):
         raise ImportProblem(
@@ -226,11 +230,22 @@ def _new_import(
             }
         ).insert()
         _record_start(session, data_import.name, purpose, session.source_file, message)
-    except Exception:
+    except Exception as e:
         # Nothing half made stays behind: no Data Import without its session's record of it.
-        frappe.db.rollback(save_point=START_SAVEPOINT)
+        try:
+            frappe.db.rollback(save_point=START_SAVEPOINT)
+        except Exception:
+            # A deadlock's victim lost its whole transaction, the savepoint with it (BT-17).
+            frappe.db.rollback()
         if file_doc:
             _remove_from_disk(file_doc)
+        if isinstance(e, frappe.QueryDeadlockError):
+            raise ImportProblem(
+                _(
+                    "Another import was saving at the same time, so this one stopped. Nothing was "
+                    "saved. Call again with the same values to try again."
+                )
+            ) from e
         raise
     _launch(session, data_import.name)
     return data_import.name
