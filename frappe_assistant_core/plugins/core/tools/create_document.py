@@ -38,6 +38,7 @@ from frappe_assistant_core.utils.savepoint import (
     rollback_to_savepoint,
 )
 
+from .batch import MODE_SCHEMA, batch_refusal, run_batch, run_validation
 from .child_tables import ChildRowError, child_table_fields, normalize_child_rows, restricted_row_keys
 
 # The submit after a create runs inside this savepoint, so a refused submit leaves the draft.
@@ -103,7 +104,7 @@ class DocumentCreate(BaseTool):
     def __init__(self):
         super().__init__()
         self.name = "create_document"
-        self.description = "Create new Frappe documents with proper validation and child table support. Supports all DocTypes including those with child tables. WORKFLOW: First use get_doctype_info to understand the DocType structure, identify required fields and child tables, then create the document with proper field values. Child tables must be provided as arrays of objects; a Table MultiSelect field also accepts an array of its link values (e.g. ['user@example.com']). Referenced records (customers, items, warehouses, etc.) must already exist in the system. Use exact field names as shown in DocType metadata. Error responses include specific guidance for resolution. Common use cases: creating Sales Orders with line items, Purchase Orders with items and taxes, customer records, inventory transactions. SEVERAL RECORDS AT ONCE: instead of doctype and data, pass documents, a list of {doctype, data} (up to 100): one approval for all, and all are created or none. Customisations (Custom Field, Property Setter, Server Script, Role, Workflow and the like) and records that change the database schema (Inventory Dimension, Accounting Dimension) are not for a list: create them one at a time, each with doctype and data. Show the user the records as a table first; the approval card then lists each one. A failure names the record and why. documents is not a way to import a user's file: a file goes through the import tools (start_import_session, dry_run_import, start_import), and if they fail, stop and tell the user what failed; never create the file's records here instead. The one exception is a session's missing masters, with import_session."
+        self.description = "Create new Frappe documents with proper validation and child table support. Supports all DocTypes including those with child tables. WORKFLOW: First use get_doctype_info to understand the DocType structure, identify required fields and child tables, then create the document with proper field values. Child tables must be provided as arrays of objects; a Table MultiSelect field also accepts an array of its link values (e.g. ['user@example.com']). Referenced records (customers, items, warehouses, etc.) must already exist in the system. Use exact field names as shown in DocType metadata. Error responses include specific guidance for resolution. Common use cases: creating Sales Orders with line items, Purchase Orders with items and taxes, customer records, inventory transactions. MANY RECORDS OF ONE DOCTYPE: pass 'records' (a list of field dicts, at most 100) instead of 'data'. RECORDS OF SEVERAL DOCTYPES AT ONCE: instead of doctype and data, pass documents, a list of {doctype, data} (up to 100): one approval for all, and all are created or none. Customisations (Custom Field, Property Setter, Server Script, Role, Workflow and the like) and records that change the database schema (Inventory Dimension, Accounting Dimension) are not for a list: create them one at a time, each with doctype and data. Show the user the records as a table first; the approval card then lists each one. A failure names the record and why. records and documents are not a way to import a user's file: a file goes through the import tools (start_import_session, dry_run_import, start_import), and if they fail, stop and tell the user what failed; never create the file's records here instead. The one exception is a session's missing masters, with import_session."
         self.requires_permission = None  # Permission checked dynamically per DocType
         # With import_session, the records and errors carry names from the user's file (#34003).
         self.untrusted_fields = ("error", "problems", "created", "documents")
@@ -119,6 +120,12 @@ class DocumentCreate(BaseTool):
                     "type": "object",
                     "description": "Document field data as key-value pairs. Include all required fields for the doctype. Example: {'customer_name': 'ABC Corp', 'customer_type': 'Company'}",
                 },
+                "records": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Instead of 'data': several records to create, each a field dict like 'data'. Each is checked as a single create would be.",
+                },
+                "mode": MODE_SCHEMA,
                 "submit": {
                     "type": "boolean",
                     "default": False,
@@ -147,7 +154,8 @@ class DocumentCreate(BaseTool):
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new document, or, with ``documents``, several in one call"""
+        """Create one document from ``data``, several of one DocType from ``records``, or, with
+        ``documents``, records of several DocTypes in one call"""
         if (
             arguments.get("documents") == []
             and not arguments.get("doctype")
@@ -169,18 +177,65 @@ class DocumentCreate(BaseTool):
             return self._execute_many(arguments)
 
         doctype = arguments.get("doctype")
-        data = arguments.get("data", {})
-        if not doctype or "data" not in arguments:
+        if not doctype:
             return {
                 "success": False,
-                "error": _("Pass doctype and data for one record, or documents for several."),
+                "error": _(
+                    "Pass doctype and data for one record, records for several of one DocType, "
+                    "or documents for several."
+                ),
             }
-        refused = document_batch.internal_keys_refusal(doctype, data)
-        if refused:
-            return refused
         submit = arguments.get("submit", False)
         validate_only = arguments.get("validate_only", False)
 
+        if "records" not in arguments:
+            if "data" not in arguments:
+                return {
+                    "success": False,
+                    "error": _("Pass 'data' for one record or 'records' for several."),
+                    "doctype": doctype,
+                }
+            return self._create_one(doctype, arguments["data"], submit, validate_only)
+        if "data" in arguments:
+            return {
+                "success": False,
+                "error": _("Pass either 'data' or 'records', not both."),
+                "doctype": doctype,
+            }
+
+        records = arguments["records"]
+        refusal = batch_refusal(doctype, records, "records", arguments.get("mode", "all_or_nothing"))
+        if refusal:
+            return refusal
+        if not all(isinstance(record, dict) for record in records):
+            return {
+                "success": False,
+                "error": _("Each item in 'records' must be a field dict."),
+                "doctype": doctype,
+            }
+
+        def label(index: int, record: Dict[str, Any]) -> str:
+            return _("Record {0}").format(index + 1)
+
+        if validate_only:
+            return run_validation(
+                doctype, records, lambda record: self._create_one(doctype, record, False, True), label
+            )
+        return run_batch(
+            doctype,
+            records,
+            lambda record: self._create_one(doctype, record, submit, False),
+            label,
+            arguments.get("mode", "all_or_nothing"),
+        )
+
+    def _create_one(
+        self, doctype: str, data: Dict[str, Any], submit: bool, validate_only: bool
+    ) -> Dict[str, Any]:
+        """Create a new document"""
+        refused = document_batch.internal_keys_refusal(doctype, data)
+        if refused:
+            return refused
         # Import security validation
         from frappe_assistant_core.core.security_config import (
             filter_sensitive_fields,

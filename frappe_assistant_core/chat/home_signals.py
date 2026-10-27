@@ -18,7 +18,10 @@ from frappe import _, _lt
 from frappe.utils import add_days, fmt_money, get_datetime, now_datetime, today
 
 from frappe_assistant_core.chat.home_preferences import load_home_preferences
-from frappe_assistant_core.plugins.core.tools.get_pending_approvals import readable_open_approvals
+from frappe_assistant_core.plugins.core.tools.get_pending_approvals import (
+    COUNT_LIMIT,
+    readable_open_approvals,
+)
 
 LENS_ROLES: dict[str, tuple[str, ...]] = {
     "accounts": ("Accounts Manager", "Accounts User"),
@@ -39,7 +42,7 @@ DEFAULT_AREA = "business"
 
 TONE_RANK = {"danger": 0, "warning": 1, "neutral": 2}
 
-APPROVALS_LIMIT = 200
+APPROVALS_LIMIT = COUNT_LIMIT
 OVERDUE_DAYS = 60
 PAYABLES_WINDOW_DAYS = 7
 TOP_CUSTOMERS = 2
@@ -585,7 +588,11 @@ def _below_reorder(user: str, company: str | None) -> SignalResult | None:
         count=count,
         title=_("item below its reorder level") if count == 1 else _("items below their reorder level"),
         detail=_("Stock has fallen under the reorder level of a warehouse"),
-        ask=_("Which items are below their reorder level?"),
+        ask=(
+            _("Which items are below their reorder level in the warehouses of {0}?").format(company)
+            if company
+            else _("Which items are below their reorder level?")
+        ),
         action=_("See which items"),
         source=_("Item"),
     )
@@ -609,7 +616,11 @@ def _late_purchase_orders(user: str, company: str | None) -> SignalResult | None
         count=count,
         title=_("purchase order is late") if count == 1 else _("purchase orders are late"),
         detail=_("Submitted orders past their required date that are not fully received"),
-        ask=_("Which purchase orders are late from suppliers?"),
+        ask=(
+            _("Which purchase orders for {0} are late from suppliers?").format(company)
+            if company
+            else _("Which purchase orders are late from suppliers?")
+        ),
         action=_("See which orders"),
         source=_("Purchase Order"),
     )
@@ -623,7 +634,11 @@ def _pending_material_requests(user: str, company: str | None) -> SignalResult |
         count=count,
         title=_("material request still pending") if count == 1 else _("material requests still pending"),
         detail=_("Submitted requests that nobody has ordered or issued yet"),
-        ask=_("Show material requests that are still pending"),
+        ask=(
+            _("Show material requests for {0} that are still pending").format(company)
+            if company
+            else _("Show material requests that are still pending")
+        ),
         action=_("Review them"),
         source=_("Material Request"),
     )

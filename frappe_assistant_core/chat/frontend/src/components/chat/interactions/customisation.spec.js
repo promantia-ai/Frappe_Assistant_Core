@@ -4,6 +4,7 @@ import {
 	conditionNotice,
 	customisationConsequence,
 	fieldPlacementTarget,
+	goesLiveFields,
 	renameNotice,
 	renameKeys,
 	writesCondition,
@@ -15,6 +16,21 @@ describe("writeConsequence", () => {
 		expect(writeConsequence("create_document", {})).toBe("This will write a new record to your ERP");
 		expect(writeConsequence("update_document", {})).toBe("This will modify an existing record in your ERP");
 		expect(writeConsequence("delete_document", {})).toBe("This will permanently delete a record from your ERP");
+	});
+
+	it("counts the records of a bulk write", () => {
+		expect(writeConsequence("create_document", { records: [{}, {}, {}] })).toBe(
+			"This will write 3 new records to your ERP",
+		);
+		expect(writeConsequence("update_document", { names: ["a", "b"], data: {} })).toBe(
+			"This will modify 2 existing records in your ERP",
+		);
+		expect(writeConsequence("update_document", { records: [{ name: "a", data: {} }] })).toBe(
+			"This will modify an existing record in your ERP",
+		);
+		expect(writeConsequence("delete_document", { names: ["a", "b", "c", "d"] })).toBe(
+			"This will permanently delete 4 records from your ERP",
+		);
 	});
 
 	it("follows the requested document action", () => {
@@ -124,6 +140,7 @@ describe("customisationConsequence for every customisation doctype", () => {
 		["Report", { ref_doctype: "Lead" }, "Adds a report on Lead", "Changes a report on Lead"],
 		["Print Format", { doc_type: "Lead" }, "Changes how Lead prints", "Changes how Lead prints"],
 		["Notification", { document_type: "Lead" }, "Sends messages automatically when Lead records change", "Sends messages automatically when Lead records change"],
+		["FAC Page", { slug: "team-planner" }, "Adds a page to Desk", "Changes a page in Desk"],
 	];
 
 	it.each(DOCTYPES)("%s: create and update each have their own sentence", (doctype, data, created, updated) => {
@@ -255,5 +272,20 @@ describe("renameNotice", () => {
 		expect(renameNotice("update_document", { doctype: "Role", name: "A", data: { disabled: 1 } })).toBeNull();
 		expect(renameNotice("update_document", { doctype: "Role", name: "A", data: { name: "A" } })).toBeNull();
 		expect(renameKeys("update_document", { doctype: "Role", name: "A", data: {} })).toEqual([]);
+	});
+});
+
+describe("goesLiveFields for a FAC Page", () => {
+	const update = (data) => ({ doctype: "FAC Page", name: "my-board-abc123", data });
+	const PAGE_FIELDS = ["html", "script", "style", "roles"];
+
+	it("shows the page's code and roles when an update publishes it or shares it", () => {
+		expect(goesLiveFields("update_document", update({ published: 1 }))).toEqual(PAGE_FIELDS);
+		expect(goesLiveFields("update_document", update({ visibility: "Shared" }))).toEqual(PAGE_FIELDS);
+	});
+
+	it("shows nothing for an update that keeps the page personal and unpublished", () => {
+		expect(goesLiveFields("update_document", update({ visibility: "Only me" }))).toEqual([]);
+		expect(goesLiveFields("update_document", update({ published: 0, html: "<p>x</p>" }))).toEqual([]);
 	});
 });

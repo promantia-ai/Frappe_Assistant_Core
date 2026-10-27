@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
-import { mount, flushPromises, enableAutoUnmount } from "@vue/test-utils";
+import { mount, flushPromises, enableAutoUnmount, RouterLinkStub } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 
@@ -521,6 +521,53 @@ describe("widget panel", () => {
 		expect(spot).not.toHaveBeenCalled();
 	});
 
+	describe("at the user's personal limit", () => {
+		const atLimit = { has_individual_limit: true, monthly_credit_limit: 10000, credits_used_this_month: 11234 };
+		const withLink = { ...stubs, InputArea: SendStub, RouterLink: RouterLinkStub };
+
+		it("holds the send and shows what lifts it, instead of the quota Spotlight", async () => {
+			api.users.getMyCreditStatus.mockResolvedValueOnce(atLimit);
+			const chat = useChatStore();
+			const send = vi.spyOn(chat, "sendMessage").mockResolvedValue();
+			const spot = vi.spyOn(useSpotlightStore(), "onQuotaExhausted").mockResolvedValue();
+			// The team is out too: buying credits would still leave this admin blocked.
+			useUserStore().quotaInfo = { credits_exhausted: true, is_admin: true };
+			const w = mount(WidgetPanel, { global: { stubs: withLink } });
+			await flushPromises();
+			await w.findComponent(SendStub).vm.$emit("send", { message: "hello" });
+			await flushPromises();
+			expect(send).not.toHaveBeenCalled();
+			expect(spot).not.toHaveBeenCalled();
+			const banner = w.find('[data-test="personal-limit-banner"]');
+			expect(banner.exists()).toBe(true);
+			expect(banner.text()).toContain("Settings → Users");
+			expect(w.findComponent(RouterLinkStub).props("to")).toEqual({ name: "settings-users" });
+			expect(w.findComponent(SendStub).attributes("hold-send")).toBe("true");
+		});
+
+		it("tells a member to ask their admin", async () => {
+			api.users.getMyCreditStatus.mockResolvedValueOnce(atLimit);
+			useUserStore().quotaInfo = { credits_exhausted: false, is_admin: false };
+			const w = mount(WidgetPanel, { global: { stubs: withLink } });
+			await flushPromises();
+			expect(w.find('[data-test="personal-limit-banner"]').text()).toContain("Ask your team admin");
+			expect(w.findAllComponents(RouterLinkStub)).toHaveLength(0);
+		});
+
+		it("sends as usual under the limit", async () => {
+			api.users.getMyCreditStatus.mockResolvedValueOnce({ ...atLimit, credits_used_this_month: 10 });
+			const chat = useChatStore();
+			const send = vi.spyOn(chat, "sendMessage").mockResolvedValue();
+			useUserStore().quotaInfo = { credits_exhausted: false, is_admin: true };
+			const w = mount(WidgetPanel, { global: { stubs: withLink } });
+			await flushPromises();
+			expect(w.find('[data-test="personal-limit-banner"]').exists()).toBe(false);
+			await w.findComponent(SendStub).vm.$emit("send", { message: "hello" });
+			await flushPromises();
+			expect(send).toHaveBeenCalled();
+		});
+	});
+
 	it("sends through the store when credits remain", async () => {
 		const chat = useChatStore();
 		const send = vi.spyOn(chat, "sendMessage").mockResolvedValue();
@@ -620,6 +667,23 @@ describe("browser tool confirmation card", () => {
 		await w.find('[data-test="confirm-approve"]').trigger("click");
 		await w.find('[data-test="confirm-trust"]').trigger("click");
 		expect(w.emitted("decide").map((e) => e[0])).toEqual(["deny", "approve", "trust"]);
+	});
+
+	it("offers allowing the tool on this page in this chat, translated through Desk's __()", async () => {
+		window.__ = vi.fn((s) => `[tr] ${s}`);
+		onTestFinished(() => delete window.__);
+		const w = mount(BrowserToolConfirm, { props: { request: { tool_name: "take_screenshot", params: {}, description: "" } } });
+		const button = w.find('[data-test="confirm-trust-page"]');
+		expect(button.text()).toBe("[tr] Allow on this page in this chat");
+		await button.trigger("click");
+		expect(w.emitted("decide").map((e) => e[0])).toEqual(["trust_page"]);
+	});
+
+	it("offers no Always Allow to a host whose trust stays on one page in one chat", () => {
+		const request = { tool_name: "take_screenshot", params: {}, description: "", alwaysAllow: false };
+		const w = mount(BrowserToolConfirm, { props: { request } });
+		expect(w.find('[data-test="confirm-trust"]').exists()).toBe(false);
+		expect(w.find('[data-test="confirm-trust-page"]').exists()).toBe(true);
 	});
 
 	it("falls back to a generic line for an unknown tool, escaping nothing by hand", () => {

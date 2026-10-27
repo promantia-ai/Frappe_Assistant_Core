@@ -103,7 +103,7 @@ import ComposerPlusMenu from "@/components/chat/ComposerPlusMenu.vue";
 import ThinkingLevelMenu from "@/components/chat/ThinkingLevelMenu.vue";
 import AttachedFilePreview from "@/components/chat/AttachedFilePreview.vue";
 import InputToolbar from "@/components/chat/InputToolbar.vue";
-import { keepComposerFocus } from "@/composables/useComposerFocus";
+import { keepComposerFocus, onComposerFocusRequest } from "@/composables/useComposerFocus";
 import {
 	useComposerAttachments,
 	UPLOAD_ACCEPT_ATTR,
@@ -131,6 +131,8 @@ const modelStore = useModelStore();
 
 const props = defineProps({
 	disabled: { type: Boolean, default: false },
+	// Sending is refused for now (a personal limit is reached): the text stays and stays editable.
+	holdSend: { type: Boolean, default: false },
 	isStreaming: { type: Boolean, default: false },
 	context: { type: Object, default: null },
 	initialMessage: { type: String, default: "" },
@@ -155,6 +157,7 @@ const {
 
 const message = ref("");
 const textInput = ref(null);
+onComposerFocusRequest(() => textInput.value?.focus());
 const showMarkdownPreview = ref(false);
 const slashMenuRef = ref(null);
 
@@ -220,7 +223,7 @@ const slashOpen = computed(() => slashMatch.value !== null);
 const slashQuery = computed(() => slashMatch.value || "");
 
 const canSend = computed(
-	() => !props.disabled && (message.value.trim() || attachedFiles.value.length > 0)
+	() => !props.disabled && !props.holdSend && (message.value.trim() || attachedFiles.value.length > 0)
 );
 
 // A pending interaction card overrides the generic streaming placeholder —

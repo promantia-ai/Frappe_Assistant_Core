@@ -119,6 +119,9 @@ permission_query_conditions = {
     "Assistant Audit Log": "frappe_assistant_core.utils.permissions.get_audit_permission_query_conditions",
     "Prompt Template": "frappe_assistant_core.utils.permissions.get_prompt_permission_query_conditions",
     "FAC Skill": "frappe_assistant_core.utils.permissions.get_skill_permission_query_conditions",
+    "FAC Page": (
+        "frappe_assistant_core.assistant_core.doctype.fac_page.fac_page.get_permission_query_conditions"
+    ),
 }
 
 # has_permission = {
@@ -482,6 +485,8 @@ has_permission = {
     "FAC Import Session": (
         "frappe_assistant_core.assistant_core.doctype.fac_import_session.fac_import_session.has_permission"
     ),
+    # A personal page opens only for its owner; System Managers act on any page.
+    "FAC Page": "frappe_assistant_core.assistant_core.doctype.fac_page.fac_page.has_permission",
 }
 
 # Wildcard doc_events dispatcher.

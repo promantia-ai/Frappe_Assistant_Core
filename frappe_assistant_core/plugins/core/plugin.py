@@ -85,6 +85,11 @@ class CorePlugin(BasePlugin):
             "plan_questions",
             "run_migration_plan",
             "stop_migration_plan",
+            # Permission checks
+            "test_as_user",
+            # Builder checks
+            "sandbox_reference",
+            "recent_errors",
         ]
 
     def validate_environment(self):

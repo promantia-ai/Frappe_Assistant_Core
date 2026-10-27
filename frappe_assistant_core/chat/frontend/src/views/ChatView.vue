@@ -101,6 +101,7 @@
 						@unqueue="handleUnqueue"
 					>
 						<template #composer>
+							<PersonalLimitBanner v-if="composerInHero && limitBlock" v-bind="limitBannerProps" />
 							<InputArea v-if="composerInHero" v-bind="composerBindings" />
 						</template>
 					</ChatStagePicker>
@@ -125,6 +126,7 @@
 				</button>
 
 				<!-- Input Area - bottom dock once a conversation exists -->
+				<PersonalLimitBanner v-if="!composerInHero && limitBlock" v-bind="limitBannerProps" />
 				<InputArea
 					v-if="
 						registrationStatus === 'ready' &&
@@ -136,6 +138,15 @@
 					class="composer-dock-enter"
 				/>
 			</div>
+
+			<PageDock
+				:messages="messages"
+				:session-id="currentSessionId"
+				:can-share="isAdmin"
+				:user="user || ''"
+				@open="collapseRailDock(); closeRail()"
+				@share="prefillComposer"
+			/>
 
 			<!-- Docked rail (>=1280px) — collapsible to reclaim the reading width -->
 			<aside v-if="railMode === 'rail' && railVisible" class="rail-dock">
@@ -151,7 +162,7 @@
 			</aside>
 			<!-- Slim reopen tab once the docked rail is collapsed -->
 			<button
-				v-if="railShowDockReopen"
+				v-if="railShowDockReopen && !pageOpen"
 				class="rail-tab"
 				aria-label="Show context"
 				@click="expandRailDock"
@@ -162,7 +173,7 @@
 
 			<!-- Slim tab (768–1279px) — slides the rail open as an overlay -->
 			<button
-				v-if="railShowTab && railMode === 'tab' && !railVisible"
+				v-if="railShowTab && railMode === 'tab' && !railVisible && !pageOpen"
 				class="rail-tab"
 				@click="openRail"
 			>
@@ -239,13 +250,14 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, defineAsyncComponent } from "vue";
+import { ref, computed, watch, nextTick, defineAsyncComponent } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useChatStore } from "@/stores/chatStore";
 import { useUserStore } from "@/stores/userStore";
 import { useModelStore } from "@/stores/modelStore";
 import { useSuggestionStore } from "@/stores/suggestionStore";
 import { resolveComposerRoute } from "@/stores/chat/composerRouting";
+import { resolutionFor } from "@/stores/chat/interactionRegime";
 import { useToast } from "@/composables/useToast";
 import { __ } from "@/utils/i18n";
 import { storeToRefs } from "pinia";
@@ -257,6 +269,7 @@ import { useConversationsStore } from "@/stores/conversationsStore";
 import { useProjectsStore } from "@/stores/projectsStore";
 import InputArea from "@/components/chat/InputArea.vue";
 import ConnectionBanners from "@/components/chat/ConnectionBanners.vue";
+import PersonalLimitBanner from "@/components/chat/PersonalLimitBanner.vue";
 import ChatStagePicker from "@/components/chat/ChatStagePicker.vue";
 import SupportModal from "@/components/support/SupportModal.vue";
 
@@ -279,9 +292,12 @@ import { useRobotMoodWiring } from "@/composables/useRobotMoodWiring";
 import { useContextRail } from "@/composables/useContextRail";
 import { useSheetDismiss } from "@/composables/useSheetDismiss";
 import { useComposerFocus } from "@/composables/useComposerFocus";
+import { useComposerLimitHold } from "@/composables/useComposerLimitHold";
 import { deriveArtifacts } from "@/utils/contextArtifacts";
 import { isPausedTurn, isStoppedTurn } from "@/utils/turnState";
 import ContextRail from "@/components/chat/ContextRail.vue";
+import PageDock from "@/components/chat/pages/PageDock.vue";
+import { usePagePanel } from "@/composables/usePagePanel";
 import { logger } from "@/utils/logger";
 import { usePreferences } from "@/composables/usePreferences";
 import { resolveReadWidth } from "@/utils/chatWidth";
@@ -332,6 +348,7 @@ const {
 	userAuthStatus,
 	privacyConsentComplete,
 	termsAcceptanceRequired,
+	user,
 } = storeToRefs(userStore);
 
 // Initialize streaming listener for realtime events
@@ -442,6 +459,22 @@ const activeTurnPaused = computed(
 );
 
 const railHasArtifacts = computed(() => activeArtifacts.value.hasArtifacts);
+// Each page write is a rail artifact; an open page keeps the docked rail folded to its tab.
+const { openName: openPageName } = usePagePanel();
+const pageOpen = computed(() => Boolean(openPageName.value));
+// The Context tab sits on the shell's right edge, where an open page now is; it comes back on close.
+// The sidebar folds while a page is open on a desktop, so the chat keeps a readable column, and
+// unfolds on close only if the page folded it.
+let pageFoldedSidebar = false;
+watch(pageOpen, (open) => {
+	if (open && !sidebarCollapsed.value && window.matchMedia?.("(min-width: 1024px)").matches) {
+		sidebarCollapsed.value = true;
+		pageFoldedSidebar = true;
+	} else if (!open && pageFoldedSidebar) {
+		sidebarCollapsed.value = false;
+		pageFoldedSidebar = false;
+	}
+});
 const {
 	mode: railMode,
 	isVisible: railVisible,
@@ -452,7 +485,7 @@ const {
 	toggle: toggleRail,
 	collapseDock: collapseRailDock,
 	expandDock: expandRailDock,
-} = useContextRail(railHasArtifacts);
+} = useContextRail(railHasArtifacts, { holdCollapsed: pageOpen });
 
 const {
 	style: sheetDragStyle,
@@ -512,6 +545,12 @@ function onPinJump(messageId) {
 	if (i >= 0) indexJumpTo(i);
 }
 
+// Share… puts its request in the composer to send; clearing first lets the same text land again.
+function prefillComposer(text) {
+	pendingPrompt.value = "";
+	nextTick(() => (pendingPrompt.value = text));
+}
+
 // Clicking "Review & approve" in the rail scrolls the matching in-thread
 // interaction card into view (the card itself owns the approve/reject buttons).
 function handleRailReviewApproval(blockId) {
@@ -528,7 +567,7 @@ useChatViewInit(
 	{ chatStore, userStore, modelStore, suggestionStore },
 	{ route, router },
 	{ registrationStatus, isUserSetupComplete },
-	{ onFirstMessage: (text) => handleSendMessage({ message: text, files: [] }) }
+	{ onFirstMessage: (text) => sendOrKeep(text) }
 );
 
 // Auto-scroll to bottom on new messages / streaming chunks
@@ -609,14 +648,28 @@ const composerInHero = computed(
 		privacyConsentComplete.value
 );
 
+// At the personal monthly limit AR refuses every stream, so the composer holds the text and the
+// banner above it says what lifts the hold, as the Desk widget does.
+const limitHold = useComposerLimitHold({
+	send: handleSendMessage,
+	continueTurn: (messageId) => chatStore.continueMessage(messageId),
+});
+const limitBlock = limitHold.block;
+const limitBannerProps = computed(() => ({
+	isAdmin: isAdmin.value,
+	used: limitBlock.value?.used || 0,
+	limit: limitBlock.value?.limit || 0,
+}));
+
 // Shared bindings so hero and dock are guaranteed identical. camelCase on*
 // keys are treated as listeners by v-bind.
 const composerBindings = computed(() => ({
+	holdSend: limitHold.held.value,
 	isStreaming: isStreaming.value,
 	interactionMode: chatStore.pendingInteractionBlock?.regime || null,
 	context: currentContext.value,
 	initialMessage: pendingPrompt.value,
-	onSend: handleSendMessage,
+	onSend: limitHold.send,
 	onFileUpload: handleFileUpload,
 	onAbort: handleAbortStream,
 	onPickTemplate: useTemplate,
@@ -658,7 +711,7 @@ function handleAbortStream() {
 }
 
 function handleSuggestion(suggestion) {
-	handleSendMessage({ message: suggestion, files: [] });
+	sendOrKeep(suggestion);
 }
 
 function handleToggleBlock(messageIndex, blockId) {
@@ -675,22 +728,21 @@ async function handleApprovalResponse(blockId, responses) {
 
 	const firstResponse = responses[0].response;
 
-	let resolution;
-	if (firstResponse === "trust") resolution = "trusted";
-	else if (firstResponse === "rejected") resolution = "rejected";
-	else if (firstResponse === "approve") resolution = "approved";
-	else resolution = "answered"; // question-type responses (string, array, etc.)
-
 	await chatStore.submitInterruptDecision({
 		blockId,
-		resolution,
+		resolution: resolutionFor(firstResponse),
 		userResponse: firstResponse,
 		response: firstResponse,
 	});
 }
 
+// Text that never sat in the composer (a suggestion, a project's first message) waits there when held.
+function sendOrKeep(text) {
+	if (limitHold.send({ message: text, files: [] }) === false) prefillComposer(text);
+}
+
 function handleContinueResponse(messageId) {
-	chatStore.continueMessage(messageId);
+	limitHold.continueTurn(messageId);
 }
 
 function handleUnqueue(queueId) {

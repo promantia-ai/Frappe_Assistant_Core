@@ -8,11 +8,13 @@ The `create_document` tool creates new Frappe documents (records). It handles fi
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `doctype` | string | **Yes**, for one record | — | Exact DocType name |
-| `data` | object | **Yes**, for one record | — | Field values as key-value pairs |
-| `submit` | boolean | No | `false` | Submit after creation (for submittable DocTypes). One record only. Under an active Workflow the document is created as a draft instead |
+| `doctype` | string | **Yes**, except with `documents` | — | Exact DocType name |
+| `data` | object | One of `data`/`records` | — | Field values as key-value pairs |
+| `records` | array | One of `data`/`records` | — | Several records of this DocType, each a field dict like `data`. See **Creating many records** |
+| `mode` | string | No | `all_or_nothing` | For `records`: `all_or_nothing` or `continue` |
+| `submit` | boolean | No | `false` | Submit after creation (for submittable DocTypes). Not with `documents`. Under an active Workflow the document is created as a draft instead |
 | `validate_only` | boolean | No | `false` | Validate without saving — use to test data format |
-| `documents` | array | **Yes**, for several records | — | Instead of `doctype` and `data`: a list of `{doctype, data}`, up to 100. See **Several records at once** |
+| `documents` | array | Instead of `doctype` and `data` | — | Records of several DocTypes: a list of `{doctype, data}`, up to 100, all created or none. See **Several records at once** |
 | `import_session` | string | No | — | With `documents`: the import session whose missing masters these are. See **Missing masters of an import** |
 
 ## Response Format
@@ -29,6 +31,8 @@ The `create_document` tool creates new Frappe documents (records). It handles fi
   }
 }
 ```
+
+`url` links to the record's form. For a `FAC Page`, `page_url` is also returned: the `/app/fac-pages/<name>` link (a personal page's name is its slug plus an owner tag) where the page itself opens.
 
 ## Best Practices
 
@@ -103,9 +107,29 @@ A Table MultiSelect takes an array of its link values, as Desk sends it. Each va
 }
 ```
 
+## Creating many records
+
+For many records of **one DocType**, pass `records` instead of `data`. Each record is checked exactly as a single create would be, including child tables, restricted fields and `submit`.
+
+```json
+{
+  "doctype": "ToDo",
+  "records": [
+    {"description": "Call supplier A"},
+    {"description": "Call supplier B"}
+  ]
+}
+```
+
+- With `validate_only: true`, every record is checked, nothing is saved, and every failing record is reported, not just the first.
+- At most 100 records per call; split a larger job into several calls.
+- `mode: "all_or_nothing"` (the default) saves nothing if any record fails, and `failed_record` names the record and its error. `mode: "continue"` saves the records that pass and lists each record's outcome in `results`.
+- Customisation DocTypes (Custom Field, Property Setter, Server Script, Client Script, DocType, Workflow, Report, Print Format, Notification and similar) are refused in a batch: write them one at a time so each one is previewed.
+- **`records` is not a way to import a user's file** either: a file goes through the import tools (see below).
+
 ## Several records at once
 
-Pass `documents` instead of `doctype` and `data`: one call, so the user approves **once** for all of them.
+For records of **several DocTypes** (or an import's missing masters), pass `documents` instead of `doctype` and `data`: one call, so the user approves **once** for all of them.
 
 **`documents` is not a way to import a user's file.** A file goes through the import tools: `start_import_session` (or `apply_import_preset`), `dry_run_import`, then `start_import`; if they fail, stop and tell the user what failed and the error. Never create the file's records here instead, one by one or as a list. The one exception is a session's missing masters, with `import_session` (see **Missing masters of an import**).
 

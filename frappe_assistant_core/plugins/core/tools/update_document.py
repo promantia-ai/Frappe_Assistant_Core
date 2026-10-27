@@ -19,6 +19,7 @@ Document Update Tool for Core Plugin.
 Updates existing Frappe documents.
 """
 
+import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
@@ -34,6 +35,7 @@ from frappe_assistant_core.utils.customisation import (
     server_script_guard,
 )
 
+from .batch import MODE_SCHEMA, batch_refusal, run_batch
 from .child_tables import ChildRowError, child_table_fields, normalize_child_rows
 
 
@@ -207,7 +209,9 @@ class DocumentUpdate(BaseTool):
             "'Purchase Order Item') directly — that bypasses the parent's recalculation and leaves "
             "totals stale. Always call it on the parent doctype (e.g. 'Sales Order') and pass the "
             "child row updates under the table fieldname (e.g. 'items'). "
-            "SEVERAL RECORDS AT ONCE: instead of doctype, name and data, pass documents, a list of "
+            "MANY RECORDS OF ONE DOCTYPE: pass 'names' with one 'data' for all of them, "
+            "or 'records' ([{'name': ..., 'data': {...}}], at most 100) for different changes. "
+            "RECORDS OF SEVERAL DOCTYPES AT ONCE: instead of doctype, name and data, pass documents, a list of "
             "{doctype, name, data} (up to 100): one approval for all, and all are updated or none. "
             "Customisations (Custom Field, Property Setter, Server Script, Role, Workflow and the "
             "like) and records that change the database schema are not for a list: update them one "
@@ -253,27 +257,95 @@ class DocumentUpdate(BaseTool):
                         "required": ["doctype", "name", "data"],
                     },
                 },
+                "names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Instead of 'name': several records that all get the same 'data'.",
+                },
+                "records": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Instead of 'name' and 'data': several records, each {'name': ..., 'data': {...}}.",
+                },
+                "mode": MODE_SCHEMA,
             },
             "required": [],
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Update an existing document, or, with ``documents``, several in one call"""
+        """Update one document, several of one DocType from ``names`` or ``records``, or, with
+        ``documents``, records of several DocTypes in one call"""
         if document_batch.given(arguments.get("documents")):
             return self._execute_many(arguments)
 
         doctype = arguments.get("doctype")
-        name = arguments.get("name")
-        data = arguments.get("data", {})
-        if not doctype or not name or "data" not in arguments:
+        if not doctype:
             return {
                 "success": False,
                 "error": _("Pass doctype, name and data for one record, or documents for several."),
             }
+        forms = [key for key in ("name", "names", "records") if key in arguments]
+        if len(forms) != 1:
+            return {
+                "success": False,
+                "error": _("Pass exactly one of 'name', 'names' or 'records'."),
+                "doctype": doctype,
+            }
+
+        if forms == ["name"]:
+            if "data" not in arguments:
+                return {"success": False, "error": _("Pass the changes in 'data'."), "doctype": doctype}
+            return self._update_one(doctype, arguments["name"], arguments["data"], arguments)
+
+        mode = arguments.get("mode", "all_or_nothing")
+        if forms == ["names"]:
+            if "data" not in arguments:
+                return {"success": False, "error": _("Pass the changes in 'data'."), "doctype": doctype}
+            items = arguments["names"]
+            refusal = batch_refusal(doctype, items, "names", mode)
+            if refusal:
+                return refusal
+            data = arguments["data"]
+            items = [{"name": name, "data": data} for name in items]
+        else:
+            if "data" in arguments:
+                return {
+                    "success": False,
+                    "error": _("With 'records', put each record's changes in its own 'data'."),
+                    "doctype": doctype,
+                }
+            items = arguments["records"]
+            refusal = batch_refusal(doctype, items, "records", mode)
+            if refusal:
+                return refusal
+
+        if not all(
+            isinstance(item, dict) and item.get("name") and isinstance(item.get("data"), dict)
+            for item in items
+        ):
+            return {
+                "success": False,
+                "error": _("Each record needs a 'name' and a 'data' dict of changes."),
+                "doctype": doctype,
+            }
+
+        return run_batch(
+            doctype,
+            items,
+            # A copy per record: doc.append writes into the child-row dicts it is given, and
+            # with 'names' every record shares one 'data'.
+            lambda item: self._update_one(doctype, item["name"], copy.deepcopy(item["data"]), {}),
+            lambda index, item: str(item["name"]),
+            mode,
+        )
+
+    def _update_one(
+        self, doctype: str, name: str, data: Dict[str, Any], arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Update an existing document"""
         refused = document_batch.internal_keys_refusal(doctype, data)
         if refused:
             return refused
-
         data, rename_requested = _split_rename(name, data, arguments)
         if rename_requested and not data:
             return {

@@ -26,6 +26,7 @@ const CUSTOMISATION_DOCTYPES = new Set([
 	"Report",
 	"Print Format",
 	"Notification",
+	"FAC Page",
 ]);
 
 const startsWithVowel = (word) => /^[aeiou]/i.test(word);
@@ -104,6 +105,7 @@ const CUSTOMISATION_CONSEQUENCES = {
 	Role: accessLine,
 	"Custom DocPerm": accessLine,
 	DocType: () => __("Changes how a kind of record is built for everyone"),
+	"FAC Page": (f, isUpdate) => (isUpdate ? __("Changes a page in Desk") : __("Adds a page to Desk")),
 };
 
 /**
@@ -127,10 +129,31 @@ const DOCUMENT_ACTION_CONSEQUENCES = {
 	amend: () => __("This will create a new draft copy of a cancelled record"),
 };
 
+// A bulk call lists its records under one of these keys; the count is what the person approves.
+const batchSize = (input, ...keys) => {
+	const list = keys.map((key) => input?.[key]).find(Array.isArray);
+	return list ? list.length : 0;
+};
+
 const WRITE_CONSEQUENCES = {
-	create_document: () => __("This will write a new record to your ERP"),
-	update_document: () => __("This will modify an existing record in your ERP"),
-	delete_document: () => __("This will permanently delete a record from your ERP"),
+	create_document: (input) => {
+		const count = batchSize(input, "records");
+		return count > 1
+			? __("This will write {0} new records to your ERP", [count])
+			: __("This will write a new record to your ERP");
+	},
+	update_document: (input) => {
+		const count = batchSize(input, "names", "records");
+		return count > 1
+			? __("This will modify {0} existing records in your ERP", [count])
+			: __("This will modify an existing record in your ERP");
+	},
+	delete_document: (input) => {
+		const count = batchSize(input, "names");
+		return count > 1
+			? __("This will permanently delete {0} records from your ERP", [count])
+			: __("This will permanently delete a record from your ERP");
+	},
 };
 
 function documentActionConsequence(input) {
@@ -145,7 +168,7 @@ export function writeConsequence(toolName, input) {
 	const tool = baseToolName(toolName);
 	if (tool === "document_action") return documentActionConsequence(input);
 	const consequence = WRITE_CONSEQUENCES[tool];
-	return consequence ? consequence() : "";
+	return consequence ? consequence(input) : "";
 }
 
 const WRITE_TOOLS = ["create_document", "update_document"];
@@ -215,4 +238,62 @@ export function renameNotice(toolName, input) {
 	return renameRequested(toolName, input)
 		? __("Renaming isn't possible here. Only the other changes will be saved.")
 		: null;
+}
+
+const ON_VALUES = [1, "1", true];
+const OFF_VALUES = [0, "0", false];
+const has = (fields, key) => Object.prototype.hasOwnProperty.call(fields, key);
+
+// True when the update names the switch with a value that turns the code on. Fails closed: a
+// value other than 0, 1, "0", "1", true or false may still switch it on once Frappe saves it,
+// so it counts as switching on and the card shows the code.
+function switches(fields, key, onValues) {
+	if (!has(fields, key)) return false;
+	const value = fields[key];
+	return onValues.includes(value) || ![...ON_VALUES, ...OFF_VALUES].includes(value);
+}
+
+// The switch each code doctype uses, and the stored fields that run once it is on.
+const SWITCHED_CODE = {
+	"Server Script": { switchedOn: (f) => switches(f, "disabled", OFF_VALUES), fields: ["script"] },
+	"Client Script": { switchedOn: (f) => switches(f, "enabled", ON_VALUES), fields: ["script"] },
+	Notification: {
+		switchedOn: (f) => switches(f, "enabled", ON_VALUES),
+		fields: ["subject", "condition", "message"],
+	},
+	// roles is the page's audience, shown as a sentence rather than as code.
+	// Sharing a personal page opens it to other people, as publishing a shared one does.
+	"FAC Page": {
+		switchedOn: (f) => switches(f, "published", ON_VALUES) || f.visibility === "Shared",
+		fields: ["html", "script", "style", "roles"],
+	},
+};
+
+/**
+ * The code fields an update switches on, so the card can show the stored code that goes live
+ * with it; an empty list when the write switches nothing on.
+ */
+export function goesLiveFields(toolName, input) {
+	if (baseToolName(toolName) !== "update_document" || !input || typeof input !== "object") return [];
+	const fields = flattenInput(input);
+	const entry = SWITCHED_CODE[fields.doctype];
+	return entry && entry.switchedOn(fields) ? entry.fields : [];
+}
+
+// Roles every user who can log in holds, so a page listing one reaches everyone.
+const EVERYONE_ROLES = ["All", "Guest"];
+
+/**
+ * Who a FAC Page goes live to, from its stored role names: `{ text, everyone }`, or null when
+ * the roles are not a list. No roles means only System Managers can open it.
+ */
+export function goesLiveAudience(roles) {
+	if (!Array.isArray(roles)) return null;
+	const names = roles.filter((role) => typeof role === "string" && role);
+	const shown = names.length ? names : [__("System Managers only")];
+	return {
+		text: shown.join(", "),
+		roles: shown,
+		everyone: names.some((role) => EVERYONE_ROLES.includes(role)),
+	};
 }

@@ -13,6 +13,14 @@
 				@toggle-block="(msgIdx, blockId) => $emit('toggleBlock', msgIdx, blockId)"
 			/>
 
+			<!-- Questions FACO asked together, answered and sent as one card -->
+			<QuestionGroupCard
+				v-else-if="segment.type === 'question_group'"
+				:blocks="segment.blocks"
+				:submitting="isResuming"
+				@approve="(blockId, responses) => $emit('approve', blockId, responses)"
+			/>
+
 			<!-- Interaction Card: HITL approval + LLM questions -->
 			<InteractionCard
 				v-else-if="segment.type === 'interaction'"
@@ -79,6 +87,11 @@
 				v-else-if="segment.type === 'workflow_created'"
 				:block="segment"
 			/>
+
+			<!-- FAC Pages this turn wrote; a chip opens one in the page panel. -->
+			<div v-else-if="segment.type === 'page_chips'" class="page-chips">
+				<FacPageChip v-for="chip in segment.chips" :key="chip.name" :chip="chip" />
+			</div>
 		</template>
 
 		<!-- Streaming indicator when actively streaming text -->
@@ -98,9 +111,14 @@ import { computed, reactive, ref, watch, onMounted } from "vue";
 import ProcessingCard from "./ProcessingCard.vue";
 import ProcessingIndicator from "./ProcessingIndicator.vue";
 import InteractionCard from "./InteractionCard.vue";
+import QuestionGroupCard from "./interactions/QuestionGroupCard.vue";
+import { findQuestionGroups } from "./interactions/questionGroup";
 import SourcesBlock from "./SourcesBlock.vue";
 import GeneratedDocumentsBlock from "./GeneratedDocumentsBlock.vue";
 import WorkflowCreatedBlock from "./WorkflowCreatedBlock.vue";
+import FacPageChip from "./pages/FacPageChip.vue";
+import { usePagePanel } from "@/composables/usePagePanel";
+import { chipsForMessage } from "@/utils/pageChips";
 import CitationPill from "./CitationPill.vue";
 import { parseRichBlocks } from "./richBlocks/parser";
 import { renderMarkdown as renderMd, ensureHljs } from "@/utils/markdown.js";
@@ -131,6 +149,8 @@ const props = defineProps({
 });
 
 defineEmits(["toggleBlock", "approve", "reject", "previewDocument"]);
+
+const { chips: conversationPageChips } = usePagePanel();
 
 const waitingOn = computed(() => turnWaitingOn(props.blocks, props.isResuming));
 
@@ -188,9 +208,18 @@ const groupedContent = computed(() => {
 	// Set once a group has taken an approval receipt: siblings of that approval
 	// still belong to it, but the next unit of work starts a new card.
 	let sealedByApproval = false;
+	const questionGroups = findQuestionGroups(props.blocks);
+	const grouped = new Set([...questionGroups.values()].flat().map((b) => b.id));
 
 	for (const block of props.blocks) {
-		if (block.type === "interaction") {
+		if (block.type === "interaction" && grouped.has(block.id)) {
+			// The whole group renders where its first question sits, waiting or answered.
+			if (questionGroups.has(block.id)) {
+				currentGroup = null;
+				sealedByApproval = false;
+				segments.push({ type: "question_group", id: `qg_${block.id}`, blocks: questionGroups.get(block.id) });
+			}
+		} else if (block.type === "interaction") {
 			if (block.status === "pending") {
 				// Pending interactions render at top level — prominent and actionable
 				currentGroup = null;
@@ -244,6 +273,10 @@ const groupedContent = computed(() => {
 			segments.push(block);
 		}
 	}
+
+	// Derived from the tool_call blocks at render time, so a reloaded conversation keeps its chips.
+	const chips = chipsForMessage(props.blocks, conversationPageChips.value);
+	if (chips.length) segments.push({ type: "page_chips", id: "page_chips", chips });
 
 	return segments;
 });
@@ -375,6 +408,13 @@ function onCitationNavigate(n) {
 .message-blocks {
 	display: flex;
 	flex-direction: column;
+}
+
+.page-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 6px 0;
 }
 
 /* Text block inherits message-text styles from parent */

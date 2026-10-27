@@ -1,38 +1,66 @@
 <template>
-	<div v-if="hasDetails" class="approval-table">
-		<template v-for="[key, value] in visibleRows" :key="key">
-			<span class="field-key">{{ formatKey(key) }}</span>
-			<span
-				class="field-value"
-				:class="{
-					'value-mono': !isCondition(key) && isMonoValue(key, value),
-					'value-money': !isCondition(key) && isMoneyKey(key),
-				}"
-			>
-				<ConditionValue v-if="isCondition(key)" :expression="value" />
-				<LongValue v-else-if="isLongValue(value)" :value="value" />
-				<template v-else>{{ formatValue(value) }}</template>
-			</span>
-		</template>
-		<template v-if="fieldSplit.overflowCount > 0">
-			<span class="field-more">{{ __("+ {0} more", [fieldSplit.overflowCount]) }}</span>
-			<button
-				type="button"
-				class="field-toggle"
-				:aria-expanded="String(showAllFields)"
-				@click="showAllFields = !showAllFields"
-			>
-				{{ showAllFields ? __("Show fewer fields ‹") : __("Show all fields ›") }}
-			</button>
-		</template>
-		<CodePreview
-			v-for="[key, value] in codeRows"
-			:key="key"
-			:label="formatKey(key)"
-			:code="value"
-			:language="codeLanguage(key, doctype)"
-			:previous="previousCode(key)"
-		/>
+	<div v-if="hasContent" class="approval-details">
+		<section v-if="liveFields.length" class="goes-live-box">
+			<h4 class="goes-live" data-test="goes-live">{{ __("This goes live") }}</h4>
+			<div v-if="audience" class="goes-live-audience" data-test="goes-live-audience">
+				<span class="goes-live-label">{{ __("Goes live to") }}</span>
+				<span v-for="role in audience.roles" :key="role" class="role-chip">{{ role }}</span>
+			</div>
+			<div v-if="audience?.everyone" class="goes-live-missing" data-test="goes-live-everyone">
+				{{ __("All and Guest include every user who can log in.") }}
+			</div>
+			<div v-if="codeLoading" class="goes-live-note" data-test="goes-live-loading">
+				{{ __("Loading the code that goes live…") }}
+			</div>
+			<div v-else-if="liveEmpty" class="goes-live-note" data-test="goes-live-empty">{{ __("(empty)") }}</div>
+			<div v-if="liveMissing" class="goes-live-missing" data-test="goes-live-missing">
+				{{ __("Couldn't load the code that goes live. Check it in Desk before approving.") }}
+			</div>
+		</section>
+		<div v-if="visibleRows.length" class="approval-table">
+			<template v-for="[key, value] in visibleRows" :key="key">
+				<span class="field-key">{{ formatKey(key) }}</span>
+				<span
+					class="field-value"
+					:class="{
+						'value-num': !isCondition(key) && isMonoValue(key, value),
+						'value-money': !isCondition(key) && isMoneyKey(key),
+					}"
+				>
+					<ConditionValue v-if="isCondition(key)" :expression="value" />
+					<LongValue v-else-if="isLongValue(value)" :value="value" />
+					<template v-else>{{ displayValue(key, value) }}</template>
+				</span>
+			</template>
+			<template v-if="fieldSplit.overflowCount > 0">
+				<span class="field-more">{{ __("+ {0} more", [fieldSplit.overflowCount]) }}</span>
+				<button
+					type="button"
+					class="field-toggle"
+					:aria-expanded="String(showAllFields)"
+					@click="showAllFields = !showAllFields"
+				>
+					{{ showAllFields ? __("Show fewer fields") : __("Show all fields") }}
+				</button>
+			</template>
+		</div>
+		<div v-if="codeRows.length || storedLiveRows.length" class="code-stack">
+			<CodePreview
+				v-for="[key, value] in codeRows"
+				:key="key"
+				:label="formatKey(key)"
+				:code="value"
+				:language="codeLanguage(key, doctype)"
+				:previous="previousCode(key)"
+			/>
+			<CodePreview
+				v-for="[key, value] in storedLiveRows"
+				:key="`live-${key}`"
+				:label="formatKey(key)"
+				:code="value"
+				:language="codeLanguage(key, doctype)"
+			/>
+		</div>
 		<div v-for="[key, lines] in listRows" :key="key" class="value-list">
 			<span class="field-key">{{ formatKey(key) }}</span>
 			<ul class="value-lines">
@@ -45,22 +73,24 @@
 </template>
 
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { __ } from "@/utils/i18n";
 import ApprovalNotes from "./ApprovalNotes.vue";
 import ChildTable from "./ChildTable.vue";
 import ConditionValue from "./ConditionValue.vue";
 import CodePreview from "./CodePreview.vue";
 import LongValue from "./LongValue.vue";
-import { renameKeys, writesCondition } from "./customisation";
+import { baseToolName } from "@/utils/toolNames";
+import { headlineKeys } from "./approvalHeadline";
+import { goesLiveAudience, goesLiveFields, renameKeys, writesCondition } from "./customisation";
 import { useCurrentCode } from "./useCurrentCode";
 import {
+	displayValue,
 	flattenInput,
 	formatKey,
-	formatValue,
 	isMonoValue,
 	isMoneyKey,
-	isCodeKey,
+	isCodeField,
 	isChildTable,
 	isTextList,
 	isLongValue,
@@ -71,9 +101,16 @@ import {
 const props = defineProps({
 	block: { type: Object, required: true },
 });
+// True while the code that goes live is loading: the card must not be approved unseen.
+const emit = defineEmits(["blocking"]);
 
 const showAllFields = ref(false);
-const currentCode = useCurrentCode(() => props.block);
+const {
+	current: currentCode,
+	failed: currentCodeFailed,
+	loading: codeLoading,
+} = useCurrentCode(() => props.block);
+watch(codeLoading, (loading) => emit("blocking", loading), { immediate: true });
 
 // A rename the tool will not make is a notice (ApprovalNotes), never a changed field.
 const flat = computed(() => {
@@ -83,20 +120,32 @@ const flat = computed(() => {
 		Object.entries(flattenInput(props.block.input)).filter(([key]) => !hidden.includes(key)),
 	);
 });
-const hasDetails = computed(() => Object.keys(flat.value).length > 0);
+const hasContent = computed(() => Object.keys(flat.value).length > 0 || liveFields.value.length > 0);
 const doctype = computed(() => flat.value.doctype);
 
 // Code and child tables always show in full; only the plain fields fold behind "Show all fields".
 const codeRows = computed(() =>
-	Object.entries(flat.value).filter(([k, v]) => isCodeKey(k) && typeof v === "string" && v !== ""),
+	Object.entries(flat.value).filter(
+		([k, v]) => isCodeField(k, doctype.value) && typeof v === "string" && v !== "",
+	),
 );
 const tableRows = computed(() => Object.entries(flat.value).filter(([, v]) => isChildTable(v)));
 // Every line of a list in sight, not "2 items" behind "+ more": the user approves them (#34547)
 const listRows = computed(() => Object.entries(flat.value).filter(([, v]) => isTextList(v)));
+// The title already names the record and its doctype, so the field list starts at what changes.
+const shownInTitle = computed(() => headlineKeys(props.block));
+// A blank value is a change only on an update (it clears the field); elsewhere it is noise.
+const keepsBlanks = computed(() => baseToolName(props.block.tool_name) === "update_document");
+const isBlank = (v) => v === null || v === undefined || v === "";
 const plainFields = computed(() =>
 	Object.fromEntries(
 		Object.entries(flat.value).filter(
-			([k, v]) => !codeRows.value.some(([ck]) => ck === k) && !isChildTable(v) && !isTextList(v),
+			([k, v]) =>
+				!codeRows.value.some(([ck]) => ck === k) &&
+				!isChildTable(v) &&
+				!isTextList(v) &&
+				!shownInTitle.value.includes(k) &&
+				(keepsBlanks.value || !isBlank(v)),
 		),
 	),
 );
@@ -104,6 +153,33 @@ const plainFields = computed(() =>
 const fieldSplit = computed(() => splitDetailFields(plainFields.value, 4));
 const visibleRows = computed(() =>
 	showAllFields.value ? [...fieldSplit.value.primary, ...fieldSplit.value.overflow] : fieldSplit.value.primary,
+);
+
+// Switching code on runs what is stored, so the card shows it, not just "Enabled 1".
+const liveFields = computed(() => goesLiveFields(props.block.tool_name, props.block.input));
+// A go-live field the update also writes shows its new value (diff or table row) instead.
+const unchangedLiveFields = computed(() => liveFields.value.filter((key) => !(key in flat.value)));
+const storedLiveRows = computed(() =>
+	unchangedLiveFields.value
+		.map((key) => [key, currentCode.value?.[key]])
+		.filter(([, stored]) => typeof stored === "string" && stored !== ""),
+);
+// A FAC Page's stored roles; an update that sets roles shows them as a changed child table.
+const audience = computed(() =>
+	unchangedLiveFields.value.includes("roles") ? goesLiveAudience(currentCode.value?.roles) : null,
+);
+// roles is an audience, not code: an empty list must not hide "(empty)" for empty code.
+const unchangedLiveCode = computed(() => unchangedLiveFields.value.filter((key) => key !== "roles"));
+const liveEmpty = computed(
+	() =>
+		currentCode.value !== null &&
+		unchangedLiveCode.value.length > 0 &&
+		unchangedLiveCode.value.every((key) => currentCode.value[key] === ""),
+);
+const liveMissing = computed(
+	() =>
+		currentCodeFailed.value ||
+		(currentCode.value !== null && unchangedLiveFields.value.some((key) => currentCode.value[key] === undefined)),
 );
 
 // A condition expression is read as a sentence; the raw text stays behind a toggle.
@@ -117,6 +193,63 @@ function previousCode(key) {
 </script>
 
 <style scoped>
+.approval-details {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 0 16px 12px;
+	font-size: 13px;
+}
+
+.goes-live-box {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 10px 12px;
+	border-radius: var(--ql-radius-md, 8px);
+	background: var(--ql-gold-soft);
+}
+
+.goes-live {
+	margin: 0;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--ql-text);
+}
+
+.goes-live-audience {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin: 0;
+}
+
+.goes-live-label {
+	color: var(--ql-text-secondary);
+	margin-right: 2px;
+}
+
+.role-chip {
+	padding: 2px 8px;
+	border-radius: 999px;
+	background: var(--ql-surface);
+	border: 1px solid var(--ql-border-hover);
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--ql-text);
+}
+
+.goes-live-note {
+	margin: 0;
+	color: var(--ql-text-secondary);
+}
+
+.goes-live-missing {
+	margin: 0;
+	color: var(--ql-danger);
+}
+
 .value-list {
 	grid-column: 1 / -1;
 	padding: 6px 0 0;
@@ -131,10 +264,8 @@ function previousCode(key) {
 
 .approval-table {
 	display: grid;
-	grid-template-columns: auto 1fr;
-	gap: 5px 14px;
-	padding: 10px 14px;
-	font-size: 11.5px;
+	grid-template-columns: minmax(96px, max-content) 1fr;
+	gap: 6px 16px;
 }
 
 .field-key {
@@ -144,12 +275,11 @@ function previousCode(key) {
 .field-value {
 	color: var(--ql-text);
 	font-weight: 500;
-	word-break: break-word;
+	overflow-wrap: anywhere;
 }
 
-/* Tabular mono numerals/dates so values align on the decimal (spec §2.2) */
-.value-mono {
-	font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+/* Figures align on the digit without switching typeface. */
+.value-num {
 	font-variant-numeric: tabular-nums;
 }
 
@@ -168,12 +298,35 @@ function previousCode(key) {
 	background: transparent;
 	border: none;
 	padding: 0;
-	font-size: 11.5px;
+	font: inherit;
 	color: var(--ql-accent);
 	cursor: pointer;
 }
 
 .field-toggle:hover {
 	color: var(--ql-accent-hover);
+}
+
+.field-toggle:focus-visible {
+	outline: 2px solid var(--ql-accent);
+	outline-offset: 2px;
+	border-radius: 4px;
+}
+
+.code-stack {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+@container (max-width: 380px) {
+	.approval-table {
+		grid-template-columns: 1fr;
+		gap: 2px;
+	}
+
+	.field-value {
+		margin-bottom: 6px;
+	}
 }
 </style>

@@ -18,11 +18,13 @@ import { createStreamManager } from "./chat/streamManager";
 import { createBlockHandlers } from "./chat/blockHandlers";
 import { createSendQueue } from "./chat/sendQueue";
 import { applyLiveSnapshot, createLiveTurnSync } from "./chat/liveTurnSync";
+import { createTurnClaim } from "./chat/turnClaim";
 import { isApprovalInteraction } from "./chat/interactionRegime";
 import { getSurface, surfaceClientSignals } from "./chat/surface";
 import { useComposerModesStore } from "./composerModesStore";
 import { useModelStore } from "./modelStore";
 import { useSpotlightStore } from "./spotlightStore";
+import { useUserStore } from "./userStore";
 
 export const SESSIONS_PAGE_SIZE = 30;
 
@@ -239,6 +241,8 @@ export const useChatStore = defineStore("chat", () => {
 	});
 	// sync: a join started right after the switch must not be reset by it.
 	watch(currentSessionId, () => liveSync.reset(), { flush: "sync" });
+
+	const turnClaim = createTurnClaim({ claim: (id) => api.chat.claimLiveTurn(id), currentSessionId });
 
 	function admitStreamEvent(event) {
 		return liveSync.admit(event);
@@ -575,6 +579,7 @@ export const useChatStore = defineStore("chat", () => {
 			isStreaming.value = true;
 			streamingMessage.value = "";
 			streamRequestId.value = randomUUID();
+			turnClaim.releaseClaim();
 
 			stream.startStreamTimeout();
 
@@ -855,6 +860,15 @@ export const useChatStore = defineStore("chat", () => {
 	async function answerPendingQuestion(text) {
 		const pending = pendingInteractionBlock.value;
 		if (!pending || pending.regime !== "question") return false;
+		// Questions asked together wait for the group's Send: a typed answer fills the next
+		// unanswered one as a draft, or replaces the last answer when all have one.
+		const grouped = (findActiveMessage(messages.value)?.blocks || []).filter(
+			(b) => b.type === "interaction" && b.status === "pending" && !b.decision
+		);
+		if (grouped.length > 1) {
+			const target = grouped.find((b) => b.draft == null) || grouped[grouped.length - 1];
+			return blocks.setInteractionDraft(target.id, text);
+		}
 		await submitInterruptDecision({
 			blockId: pending.block.id,
 			resolution: "answered",
@@ -995,6 +1009,10 @@ export const useChatStore = defineStore("chat", () => {
 		if (errorCode === "quota_exhausted") {
 			useSpotlightStore().onQuotaExhausted();
 		}
+		// The member's own limit refused the turn: re-read it so the widget holds the next send.
+		if (errorCode === "user_limit_reached") {
+			useUserStore().loadMyCreditStatus();
+		}
 
 		// INTERRUPT_ALREADY_RESOLVED: a stale approval card was clicked
 		// (commonly because Stop was pressed in another tab, or the previous
@@ -1101,6 +1119,22 @@ export const useChatStore = defineStore("chat", () => {
 		streamingMessage.value = "";
 	}
 
+	/**
+	 * Whether this tab sent the live turn of `sessionId`. Another tab, or the Desk widget, can hold
+	 * the same conversation and see its stream; a request it makes back is only this tab's to answer
+	 * when this tab asked.
+	 */
+	function isOwnLiveTurn(sessionId) {
+		const last = messages.value[messages.value.length - 1];
+		return (
+			currentSessionId.value === sessionId &&
+			last?.role === "assistant" &&
+			Boolean(last.isStreaming) &&
+			Boolean(streamRequestId.value) &&
+			last._requestId === streamRequestId.value
+		);
+	}
+
 	return {
 		// State
 		sessions,
@@ -1168,6 +1202,10 @@ export const useChatStore = defineStore("chat", () => {
 		setStreamDispatcher,
 		admitStreamEvent,
 		recoverLiveTurn,
+		isOwnLiveTurn,
+		claimedTurnSession: turnClaim.claimedSession,
+		claimLiveTurn: turnClaim.claimLiveTurn,
+		isClaimedLiveTurn: turnClaim.isClaimedLiveTurn,
 		clearSocketError: stream.clearSocketError,
 		// Block-based message actions (delegated)
 		handlePlanEvent: blocks.handlePlanEvent,
@@ -1186,6 +1224,7 @@ export const useChatStore = defineStore("chat", () => {
 		resolveInteraction: blocks.resolveInteraction,
 		submitInterruptDecision,
 		answerPendingQuestion,
+		setQuestionDraft: blocks.setInteractionDraft,
 		abortPendingInteraction,
 		hydratePendingInterrupt,
 		markInterruptExpired,
