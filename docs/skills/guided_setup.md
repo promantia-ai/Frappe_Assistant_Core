@@ -2,7 +2,9 @@
 
 ## Overview
 
-Sets up an ERPNext site through a conversation about the business, not the ERP. You ask business questions ("do you hold stock?", "more than one branch?") and turn the answers into a setup plan: warehouses, cost centres, fiscal years, price lists, taxes, numbering, approvals and extra fields. Then you carry the plan out one area at a time, each through `get_skill("setup-change-protocol")`.
+Sets up an ERPNext site through a conversation about the business, not the ERP. You ask business questions ("do you hold stock?", "more than one branch?"), keep the answers as a **setup plan** (a FAC Setup Plan the user can open and the client can be handed), show it by area, change it as the user wants, and apply it **once, on one approval**.
+
+For a single change ("add one warehouse", "change the numbering") use `get_skill("setup-change-protocol")` instead: a plan is for setting a site up, not for one edit.
 
 ## When to use
 
@@ -12,21 +14,16 @@ Sets up an ERPNext site through a conversation about the business, not the ERP. 
 
 ## Workflow
 
-1. **See where the site stands.** Run `get_skill("site-health-check")` first, or reuse its findings from this conversation. Don't set up what already exists.
-2. **Ask about the business.** Use `ask_user`, two or three questions at a time, in plain words. Skip any question the health check already answered.
-   - **Entities:** "Is this one legal business, or several with separate books?" Separate books means separate Companies. Branches of one business stay in **one** Company, with a Cost Centre per branch for branch-wise profit and, in India, an Address per branch GSTIN.
-   - **Stock:** "Do you keep goods in stock?" If yes: "Where? One store or several?" and "Do you track batches or serial numbers?"
-   - **Selling and buying:** "Do you sell at different prices to different customers?" (price lists) and "Which taxes do you charge?"
-   - **Controls:** "Does anything need someone's approval before it goes out?" (a threshold and a role)
-   - **Documents:** "How should invoice numbers look?" and "Is there anything you write on invoices or delivery notes that the form doesn't have?"
-3. **Show the setup plan by area**, in business language, with what each area will create. Let the user reorder or drop areas.
-4. **Work one area at a time.** Each area is its own protocol run (plan table → confirm → dry-run → write → change log). Hand off to the matching skill where there is one:
-   - Approvals → `set-up-approval-workflow`
-   - Numbering → `configure-naming-series`
-   - Extra fields → `add-custom-field`
-   - Rules that run when a document is saved or submitted → `server-script`; behaviour in the form → `client-script`
-   - How a document prints → `print-format`; a new report → `custom-report`; an email or alert on an event → `notification-setup`
-5. **Finish with a re-run** of the health check, and show before-and-after counts.
+1. **Start with `start_setup_discovery`.** It lists the areas in order with what the site already has. An area with `set: true` is already answered: tell the user in one line ("Financial year 2026-2027 is already set") and ask about it only if they want to change it. For the others, ask the `questions` with `ask_user`, two or three at a time, in plain words. Business questions first, ERP words after ("do your prices for the same item change often?" before "which valuation method?").
+   - **Chart of accounts:** if the client has their own, that is a separate step (the chart import), not a plan item.
+   - **GST** appears only where India Compliance is installed. Never hand-build GST templates or accounts: it creates them itself.
+2. **Save the plan with `save_setup_plan`** once the answers are in. It writes only the plan. Show the result by area, in business language, with item numbers, what the site already has (`already_set`), and the fit-gap list: what ERPNext doesn't cover as asked, with why and what to do. Link the plan. Read `problems`: those items were left out (a field or DocType this site doesn't have), say so.
+3. **Change it as the user asks with `update_setup_plan`** ("use FIFO, not moving average", "drop the second warehouse"). Nothing is written to the site while the plan is a Draft.
+4. **Customisations are made first, one at a time.** A Custom Field, Property Setter, Workflow or Server Script in the plan is never created by the plan. Create each with `create_document` (its own approval card), then give its name to the plan as `created_record` (`update_setup_plan`). The plan only checks it exists as planned.
+5. **Apply it with `run_setup_plan`**: one approval card lists every record by area. If an item changed after the approval, the plan doesn't run and says why. When it ends, say what was applied and what wasn't; the plan stays as the setup record.
+6. **Finish with a re-run** of `get_skill("site-health-check")`, and show before-and-after counts.
+
+For something the plan can't hold (a workflow, a print format, a notification), hand off to the matching skill: approvals `set-up-approval-workflow`, numbering `configure-naming-series`, extra fields `add-custom-field`, server rules `server-script`, form behaviour `client-script`, printing `print-format`, reports `custom-report`, alerts `notification-setup`.
 
 ## Reference
 

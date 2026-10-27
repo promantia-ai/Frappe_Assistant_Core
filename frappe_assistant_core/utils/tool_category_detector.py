@@ -114,6 +114,11 @@ READ_ONLY_TOOLS = {
     # recipe. Neither touches business data, and a recipe holds no rows.
     "export_migration_recipe",
     "import_migration_recipe",
+    # The setup interview: reads what the site has, and keeps the decisions in a plan of FAC's own. A
+    # Draft plan writes nothing to the site; run_setup_plan is what does, on one approval.
+    "start_setup_discovery",
+    "save_setup_plan",
+    "update_setup_plan",
     # Writes only the session's settings and mapping, as set_column_mapping does.
     "set_opening_stock",
     "set_opening_invoices",
