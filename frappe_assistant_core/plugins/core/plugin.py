@@ -73,6 +73,7 @@ class CorePlugin(BasePlugin):
             "start_import_session",
             "get_import_schema",
             "set_column_mapping",
+            "choose_old_id_storage",
             "set_opening_stock",
             "dry_run_import",
             "start_import",
