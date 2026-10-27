@@ -49,6 +49,7 @@ PRIVILEGED_TOOLS = {
     "delete_document",
     "document_action",  # can cancel, which reverses accounting and stock entries
     "run_migration_plan",  # creates masters and imports every file of a plan, submitting opening entries
+    "run_setup_plan",  # creates and updates every record and setting of a setup plan, on one approval
 }
 
 # Tools that are always categorized as read_only (hardcoded list)

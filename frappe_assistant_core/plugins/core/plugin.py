@@ -81,6 +81,7 @@ class CorePlugin(BasePlugin):
             "start_setup_discovery",
             "save_setup_plan",
             "update_setup_plan",
+            "run_setup_plan",
             "set_opening_stock",
             "dry_run_import",
             "start_import",

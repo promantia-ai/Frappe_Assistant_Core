@@ -586,6 +586,360 @@ def _as_dict(row) -> Dict[str, Any]:
     }
 
 
+# -- the approval and the run ---------------------------------------------------------------------------
+
+JOB = "fac_setup_plan::{0}"
+ITEM_SAVEPOINT = "fac_setup_item"
+PLAN_SAVEPOINT = "fac_setup_plan_step"
+#: A running plan whose job ended less than this ago may be between its last item and its end.
+GRACE_SECONDS = 300
+
+
+def _planned(doc) -> List[Tuple]:
+    return [
+        (
+            i.area,
+            i.target_doctype,
+            i.target_name,
+            i.values,
+            i.depends_on,
+            i.is_customisation,
+            # a customisation's record was made before the approval; any other is made by the run
+            i.created_record if i.is_customisation else None,
+        )
+        for i in doc.items
+    ]
+
+
+def digest(doc) -> str:
+    """What the approval covers: the items and the failure rule, not their state (the run writes it)."""
+    import hashlib
+
+    return hashlib.sha256(json.dumps([_planned(doc), doc.failure_rule], default=str).encode()).hexdigest()[
+        :16
+    ]
+
+
+def _title(area: str) -> str:
+    return next((a["title"] for a in AREAS if a["key"] == area), area)
+
+
+def decisions(doc) -> List[str]:
+    """One line per item for the approval card, by area: what it does and whether it is new, already set
+    on the site, or a customisation created beforehand (S-D3)."""
+    lines = []
+    for item in sorted(
+        doc.items, key=lambda i: (AREA_KEYS.index(i.area) if i.area in AREA_KEYS else 99, i.idx)
+    ):
+        if item.is_customisation or item.target_doctype in CUSTOMISATION_DOCTYPES:
+            how = _("already created: {0}").format(item.created_record or _("not created yet"))
+        elif already_set(_as_dict(item)):
+            how = _("already set")
+        else:
+            how = _("new")
+        lines.append(f"{_(_title(item.area))}: {item.decision} ({how})")
+    return lines
+
+
+def card_figures(doc) -> Dict[str, Any]:
+    """What run_setup_plan is given, so the approval card shows the user every item (SP-4) and a plan
+    that changed since is refused (SP-8)."""
+    return {"items": len(doc.items), "digest": digest(doc), "decisions": decisions(doc)}
+
+
+def _matches(item) -> Optional[str]:
+    """Why the customisation record ``item`` names isn't as planned, or None: it exists, with the
+    planned values (only the keys the item sets)."""
+    if not item.created_record or not frappe.db.exists(item.target_doctype, item.created_record):
+        return _("{0} ({1}) hasn't been created. Create it with create_document first.").format(
+            item.decision, item.target_doctype
+        )
+    record = frappe.get_doc(item.target_doctype, item.created_record)
+    meta = frappe.get_meta(item.target_doctype)
+    wrong = [k for k, v in json.loads(item.values or "{}").items() if not _same(meta, k, record.get(k), v)]
+    if wrong:
+        return _("{0} ({1} {2}) differs from the plan in: {3}.").format(
+            item.decision, item.target_doctype, item.created_record, ", ".join(wrong)
+        )
+    return None
+
+
+def verify_customisations(doc) -> List[str]:
+    """Every customisation item's record, checked before anything is written (SP-7)."""
+    out = []
+    for item in doc.items:
+        if item.is_customisation or item.target_doctype in CUSTOMISATION_DOCTYPES:
+            problem = _matches(item)
+            if problem:
+                out.append(problem)
+    return out
+
+
+def run_problem(doc) -> Optional[str]:
+    """Why the plan can't run now, or None."""
+    if doc.status != "Draft":
+        return _("Plan {0} is {1}: only a Draft can be run.").format(doc.name, _(doc.status))
+    if not doc.items:
+        return _("Plan {0} has no items.").format(doc.name)
+    problems = verify_customisations(doc)
+    if problems:
+        return _("Nothing was written. {0}").format(" ".join(problems))
+    return None
+
+
+def _needs(doc) -> Dict[str, List[Any]]:
+    """Item name -> the items it needs first: those it names in depends_on, and those whose record its
+    values link to (a Warehouse's parent, an Item Group's parent)."""
+    rows = list(doc.items)
+    by_number = {r.idx: r for r in rows}
+    needs: Dict[str, List[Any]] = {}
+    for row in rows:
+        wanted = []
+        for number in (cint(n) for n in cstr(row.depends_on).replace(",", " ").split()):
+            if number in by_number and by_number[number] is not row:
+                wanted.append(by_number[number])
+        meta = (
+            frappe.get_meta(row.target_doctype) if frappe.db.exists("DocType", row.target_doctype) else None
+        )
+        for key, value in json.loads(row.values or "{}").items():
+            df = meta.get_field(key) if meta else None
+            if df and df.fieldtype == "Link" and isinstance(value, str):
+                wanted += [
+                    o
+                    for o in rows
+                    if o is not row and o.target_doctype == df.options and o.target_name == value
+                ]
+        needs[row.name] = list(dict.fromkeys(wanted))
+    return needs
+
+
+def ordered_items(doc) -> List[Any]:
+    """The items in the order they are applied: after what they need, else by area (S-D4)."""
+    from frappe_assistant_core.utils import plan_runner
+
+    ordered, cycles = plan_runner.topological(
+        list(doc.items),
+        _needs(doc),
+        rank=lambda r: AREA_KEYS.index(r.area) if r.area in AREA_KEYS else len(AREA_KEYS),
+    )
+    if cycles:
+        first, other = cycles[0]
+        raise SetupProblem(
+            _("{0} and {1} wait for each other: change one of them.").format(first.decision, other.decision)
+        )
+    return [item for item, _before in ordered]
+
+
+def start(doc) -> None:
+    """Approve and run the plan in the background, as the user who approved it. The plan's row is held
+    while its status is judged, so a second approval finds it Running."""
+    stored = frappe.db.get_value(PLAN, doc.name, "status", for_update=True)
+    if stored != "Draft":
+        raise SetupProblem(_("Plan {0} is {1}: only a Draft can be run.").format(doc.name, _(stored)))
+    ordered_items(doc)  # a plan that can't be ordered is refused before it is approved
+    frappe.db.set_value(
+        PLAN,
+        doc.name,
+        {
+            "status": "Running",
+            "approved_digest": digest(doc),
+            "applied_by": frappe.session.user,
+            "applied_on": frappe.utils.now_datetime(),
+            "stop_requested": 0,
+            "progress": json.dumps(
+                {"started_at": str(frappe.utils.now_datetime()), "user": frappe.session.user}
+            ),
+        },
+        update_modified=False,
+    )
+    frappe.enqueue(
+        f"{__name__}.run_job",
+        queue="long",
+        timeout=2 * 60 * 60,
+        job_id=JOB.format(doc.name),
+        deduplicate=True,
+        enqueue_after_commit=True,
+        now=bool(frappe.flags.in_test),
+        plan_name=doc.name,
+        user=frappe.session.user,
+    )
+
+
+def request_stop(plan_name: str) -> None:
+    """Ask a running plan to stop before its next item: what it applied stays."""
+    frappe.db.set_value(PLAN, plan_name, "stop_requested", 1, update_modified=False)
+
+
+def _log(doc, message: str, outcome: str = "Success") -> None:
+    log = json.loads(doc.log or "[]")
+    log.append({"at": str(frappe.utils.now_datetime()), "outcome": outcome, "message": message})
+    frappe.db.set_value(PLAN, doc.name, "log", json.dumps(log), update_modified=False)
+    doc.log = json.dumps(log)
+
+
+def _end(plan_name: str, status: str, message: str) -> None:
+    """End the plan with ``status``, saying why: it is never left Running."""
+    doc = frappe.get_doc(PLAN, plan_name)
+    _log(doc, message, {"Completed": "Success", "Partially Completed": "Warning"}.get(status, "Failed"))
+    frappe.db.set_value(
+        PLAN, plan_name, {"status": status, "applied_on": frappe.utils.now_datetime()}, update_modified=False
+    )
+
+
+def _apply_item(item) -> Tuple[str, str]:
+    """Apply one item as the running user. Returns the state and a message. A customisation is never
+    created here: its record was made before the approval, and is only checked (S-D3)."""
+    doctype = item.target_doctype
+    if item.is_customisation or doctype in CUSTOMISATION_DOCTYPES:
+        problem = _matches(item)
+        if problem:
+            raise SetupProblem(problem)
+        return "Done", _("Already created: {0}.").format(item.created_record)
+    if already_set(_as_dict(item)):
+        return "Skipped", _("Already as planned.")
+    values = json.loads(item.values or "{}")
+    meta = frappe.get_meta(doctype)
+    if meta.issingle:
+        record = frappe.get_doc(doctype)
+        record.update(values)
+        record.save()
+        return "Done", _("Set.")
+    if item.target_name and frappe.db.exists(doctype, item.target_name):
+        record = frappe.get_doc(doctype, item.target_name)
+        record.update(values)
+        record.save()
+        return "Done", _("Updated {0}.").format(record.name)
+    record = frappe.get_doc({"doctype": doctype, **values}).insert()
+    frappe.db.set_value(ITEM, item.name, "created_record", record.name, update_modified=False)
+    return "Done", _("Created {0}.").format(record.name)
+
+
+def _apply_plan(plan_name: str) -> None:
+    doc = frappe.get_doc(PLAN, plan_name)
+    problems = verify_customisations(doc)
+    if problems:
+        _end(plan_name, "Failed", _("Nothing was written. {0}").format(" ".join(problems)))
+        return
+    stop_rule = doc.failure_rule != "continue"
+    done = failed = 0
+    stopped = False
+    for item in ordered_items(doc):
+        if cint(frappe.db.get_value(PLAN, plan_name, "stop_requested")):
+            stopped = True
+            break
+        frappe.db.savepoint(ITEM_SAVEPOINT)
+        try:
+            state, message = _apply_item(item)
+            done += state == "Done"
+        except Exception as e:
+            frappe.db.rollback(save_point=ITEM_SAVEPOINT)
+            state, message = "Failed", str(e) or type(e).__name__
+            failed += 1
+            frappe.log_error(title=_("FAC setup plan item failed"), message=frappe.get_traceback())
+        frappe.db.set_value(ITEM, item.name, {"state": state, "message": message}, update_modified=False)
+        if not frappe.flags.in_test:
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
+        if state == "Failed" and stop_rule:
+            break
+    doc.reload()
+    counts = _("{0} of {1} items applied.").format(done, len(doc.items))
+    left = [i for i in doc.items if i.state == "Pending"]
+    if stopped:
+        _end(plan_name, "Stopped", _("Stopped on request. {0} What was applied stays.").format(counts))
+    elif failed:
+        first = next(i for i in doc.items if i.state == "Failed")
+        status = "Partially Completed" if any(i.state in ("Done", "Skipped") for i in doc.items) else "Failed"
+        _end(plan_name, status, _("{0} Failed at: {1} ({2}).").format(counts, first.decision, first.message))
+    elif left:
+        _end(plan_name, "Stopped", _("{0} {1} items were not reached.").format(counts, len(left)))
+    else:
+        _end(plan_name, "Completed", counts)
+    try:
+        record(frappe.get_doc(PLAN, plan_name))
+    except Exception:
+        frappe.log_error(title=_("FAC setup record failed"), message=frappe.get_traceback())
+
+
+def run_job(plan_name: str, user: str) -> None:
+    """Background job: apply the plan's items in order, as the user who approved it."""
+    from frappe_assistant_core.utils import plan_runner
+
+    frappe.set_user(user)  # nosemgrep: frappe-setuser — the job runs as the user who approved the plan
+    plan_runner.guarded(
+        lambda: _apply_plan(plan_name),
+        PLAN_SAVEPOINT,
+        _("FAC setup plan stopped"),
+        lambda e: _end(plan_name, "Failed", str(e) or type(e).__name__),
+    )
+    if not frappe.flags.in_test:
+        frappe.db.commit()  # nosemgrep: frappe-manual-commit — a background job commits its own work
+
+
+def sweep_dead_plans() -> None:
+    """Scheduled: end each Running plan nothing is running for (its worker died), so it is never left
+    Running. What it applied stays."""
+    from frappe.utils.background_jobs import is_job_enqueued
+
+    for name in frappe.get_all(PLAN, filters={"status": "Running"}, pluck="name"):
+        if is_job_enqueued(JOB.format(name)):
+            continue
+        started = frappe.db.get_value(PLAN, name, "applied_on")
+        if (
+            started
+            and (frappe.utils.now_datetime() - frappe.utils.get_datetime(started)).total_seconds()
+            < GRACE_SECONDS
+        ):
+            continue
+        _end(name, "Stopped", _("No job was running the plan, so it was stopped. What it applied stays."))
+        if not frappe.flags.in_test:
+            frappe.db.commit()  # nosemgrep: frappe-manual-commit — a scheduled job commits its own work
+
+
+# -- the record the client is handed ---------------------------------------------------------------------
+
+
+def record(doc) -> Any:
+    """The finished plan as a setup record: what was applied, by whom and when, and what ERPNext doesn't
+    cover (SP-6). A FAC Onboarding Document, kept apart from the chat so it outlives it."""
+    from frappe_assistant_core.utils import onboarding_document
+
+    facts = describe(doc)
+    lines = [
+        _("Setup of {0}").format(doc.company),
+        "",
+        _("Applied by {0} on {1}. Result: {2}.").format(
+            doc.applied_by, str(doc.applied_on)[:16], _(doc.status)
+        ),
+    ]
+    by_area: Dict[str, List[Dict[str, Any]]] = {}
+    for item in facts["items"]:
+        by_area.setdefault(item["area"], []).append(item)
+    for area in AREA_KEYS:
+        if area not in by_area:
+            continue
+        lines += ["", f"## {_(_title(area))}", ""]
+        for item in by_area[area]:
+            lines.append(
+                f"- {item['decision']}: {_(item['state'])}"
+                + (f" ({item['message']})" if item["message"] else "")
+            )
+    if facts["fit_gap"]:
+        lines += ["", f"## {_('What ERPNext does not cover as asked')}", ""]
+        for gap in facts["fit_gap"]:
+            lines.append(f"- {gap['requirement']}" + (f": {gap['suggestion']}" if gap["suggestion"] else ""))
+    saved = onboarding_document.save(
+        "Setup Record",
+        _("Setup record: {0}").format(doc.title),
+        "\n".join(lines) + "\n",
+        data=facts,
+        company=doc.company,
+    )
+    progress = json.loads(doc.progress or "{}")
+    progress["record"] = saved.name
+    frappe.db.set_value(PLAN, doc.name, "progress", json.dumps(progress), update_modified=False)
+    return saved
+
+
 def describe(doc) -> Dict[str, Any]:
     """The plan as FACO shows it: its items by area, with numbers, and the fit-gap list."""
     return {
@@ -594,6 +948,10 @@ def describe(doc) -> Dict[str, Any]:
         "company": doc.company,
         "status": doc.status,
         "failure_rule": doc.failure_rule,
+        "applied_by": doc.applied_by,
+        "applied_on": str(doc.applied_on) if doc.applied_on else None,
+        "record": (json.loads(doc.progress or "{}")).get("record"),
+        "approval": card_figures(doc) if doc.status == "Draft" else None,
         "items": [
             {
                 "number": item.idx,
