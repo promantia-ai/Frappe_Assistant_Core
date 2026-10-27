@@ -36,7 +36,11 @@ from frappe import _
 from frappe.utils import cstr
 from frappe.utils.global_search import update_global_search
 
-from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES, SCHEMA_CHANGING_DOCTYPES
+from frappe_assistant_core.utils.customisation import (
+    CUSTOMISATION_DOCTYPES,
+    SCHEMA_CHANGING_DOCTYPES,
+    SECURITY_DOCTYPES,
+)
 
 MAX_DOCUMENTS = 100
 SAVEPOINT = "fac_document_batch"
@@ -178,12 +182,14 @@ def _refuse_one_at_a_time(documents: List[Dict[str, Any]], with_name: bool) -> N
             problems.append(_problem(number, entry, _("A customisation: make it on its own.")))
         elif doctype in SCHEMA_CHANGING_DOCTYPES:
             problems.append(_problem(number, entry, _("Changes the database schema: make it on its own.")))
+        elif doctype in SECURITY_DOCTYPES:
+            problems.append(_problem(number, entry, _("Gives access to the site: make it on its own.")))
     if problems:
         inputs = _("doctype, name and data") if with_name else _("doctype and data")
         raise BatchProblem(
             _(
-                "Nothing was written. Customisations and records that change the database schema "
-                "can't be in documents: make each of these on its own, with {0}, one call each. "
+                "Nothing was written. Customisations, users and permissions, and records that change "
+                "the database schema can't be in documents: make each of these on its own, with {0}, one call each. "
                 "The other records may still go as a list."
             ).format(inputs),
             problems,

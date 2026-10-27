@@ -73,6 +73,11 @@ SCHEMA_CHANGING_DOCTYPES = frozenset(
     }
 )
 
+# Who can use the site and what they can reach (#34419). Not customisations, and kept apart from
+# CUSTOMISATION_DOCTYPES, which the SPA and AR mirror. Like them, each is written on its own so its
+# approval card names it: a list would put a user, or a permission, behind one yes.
+SECURITY_DOCTYPES = frozenset({"User", "Role Profile", "User Permission", "Has Role"})
+
 # Roles that do not count as "other people" when judging whether a customisation can be felt.
 SYSTEM_ROLES = frozenset({"System Manager", "Administrator"})
 

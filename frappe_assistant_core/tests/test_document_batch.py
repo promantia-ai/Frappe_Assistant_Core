@@ -26,7 +26,7 @@ from frappe_assistant_core.core.tool_registry import get_tool_registry
 from frappe_assistant_core.plugins.core.tools.create_document import DocumentCreate
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.utils import document_batch
-from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES
+from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES, SECURITY_DOCTYPES
 
 
 class TestDocumentBatch(BaseAssistantTest):
@@ -666,6 +666,72 @@ class TestDocumentBatch(BaseAssistantTest):
 
         self.assertTrue(response["success"], response)
         self.assertEqual(frappe.db.get_value("Role", role.name, "desk_access"), 0)
+
+    # -- users and permissions are never in a list (#34419 P0.2) -------------------------------
+
+    def test_every_security_doctype_in_a_create_list_is_refused_before_anything_is_written(self):
+        doctypes = sorted(SECURITY_DOCTYPES)
+        documents = [self._todo("Plain")] + [{"doctype": doctype, "data": {}} for doctype in doctypes]
+
+        response = self._run("create_document", {"documents": documents})
+
+        self.assertFalse(response["success"], response)
+        result = response["result"]
+        self.assertEqual(result["error_type"], "one_at_a_time")
+        refused = {p["document"]: p["doctype"] for p in result["problems"]}
+        self.assertNotIn(1, refused)  # the ToDo is fine
+        for number, doctype in enumerate(doctypes, start=2):
+            with self.subTest(doctype=doctype):
+                self.assertEqual(refused.get(number), doctype)
+        self.assertEqual(self._todos(), set())
+
+    def test_a_list_of_users_of_one_doctype_is_refused(self):
+        emails = [f"batch-{i}-{self.tag}@example.com" for i in range(2)]
+
+        response = self._run(
+            "create_document",
+            {"doctype": "User", "records": [{"email": email, "first_name": "Batch"} for email in emails]},
+        )
+
+        self.assertFalse(response["success"], response)
+        self.assertEqual(response["result"]["error_type"], "invalid_batch")
+        self.assertFalse(any(frappe.db.exists("User", email) for email in emails))
+
+    def test_a_user_permission_in_an_update_list_is_refused(self):
+        (todo,) = self._make_todos("Keep me")
+
+        response = self._run(
+            "update_document",
+            {
+                "documents": [
+                    {"doctype": "ToDo", "name": todo, "data": {"priority": "High"}},
+                    {"doctype": "User Permission", "name": "x", "data": {"allow": "Company"}},
+                ]
+            },
+        )
+
+        self.assertFalse(response["success"], response)
+        self.assertEqual(response["result"]["error_type"], "one_at_a_time")
+        self.assertEqual([p["document"] for p in response["result"]["problems"]], [2])
+        self.assertNotEqual(frappe.db.get_value("ToDo", todo, "priority"), "High")
+
+    def test_one_user_on_its_own_is_still_created(self):
+        email = f"single-{self.tag}@example.com"
+
+        response = self._run(
+            "create_document",
+            {"doctype": "User", "data": {"email": email, "first_name": "Single", "send_welcome_email": 0}},
+        )
+
+        self.assertTrue(response["success"], response)
+        self.assertTrue(frappe.db.exists("User", email))
+
+    def test_the_list_descriptions_name_users_and_permissions_as_one_at_a_time(self):
+        for tool_name in ("create_document", "update_document"):
+            tool = self.registry.get_tool(tool_name)
+            with self.subTest(tool=tool_name):
+                self.assertIn("User Permission", tool.description)
+                self.assertIn("User Permission", tool.inputSchema["properties"]["documents"]["description"])
 
     def test_the_list_descriptions_say_customisations_go_one_at_a_time(self):
         for tool_name in ("create_document", "update_document"):

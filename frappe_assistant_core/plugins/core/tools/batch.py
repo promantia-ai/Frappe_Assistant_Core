@@ -29,7 +29,7 @@ import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import exception_message
-from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES
+from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES, SECURITY_DOCTYPES
 from frappe_assistant_core.utils.savepoint import open_savepoint, release_savepoint, rollback_to_savepoint
 
 MAX_BATCH_SIZE = 100
@@ -78,6 +78,11 @@ def batch_refusal(doctype: str, items: Any, field: str, mode: Any) -> Optional[D
     elif doctype in CUSTOMISATION_DOCTYPES:
         # Each customisation write gets its own preview and approval, which a batch would skip.
         error = _("{0} records change how the site works, so they are written one at a time.").format(doctype)
+    elif doctype in SECURITY_DOCTYPES:
+        # Who can use the site and what they can reach: each gets its own approval card.
+        error = _("{0} records give people access to the site, so they are written one at a time.").format(
+            doctype
+        )
     if error is None:
         return None
     return {"success": False, "error": error, "error_type": "invalid_batch", "doctype": doctype}
