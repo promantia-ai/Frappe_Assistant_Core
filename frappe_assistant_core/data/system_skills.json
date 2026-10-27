@@ -160,6 +160,16 @@
     "content_file": "run_migration_recipe.md"
   },
   {
+    "skill_id": "export-migration-recipe-usage",
+    "title": "How to Use export_migration_recipe and import_migration_recipe",
+    "description": "Move a migration recipe to another site as a JSON file, for example from the rehearsal site to production",
+    "skill_type": "Tool Usage",
+    "linked_tool": "export_migration_recipe",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "export_migration_recipe.md"
+  },
+  {
     "skill_id": "dry-run-import-usage",
     "title": "How to Use dry_run_import",
     "description": "Checking every row of a migration file before importing: the grouped failures explained in plain words, fixing them with the user, large files in the background, re-checking only the rows an import left, the failed rows as a file to correct",

@@ -110,6 +110,10 @@ READ_ONLY_TOOLS = {
     "save_migration_recipe",
     # Maps the new files as the recipe did and makes the plan, as plan_migration does; imports nothing.
     "run_migration_recipe",
+    # Move a recipe between sites as a file: one writes a private copy of the recipe, the other makes a
+    # recipe. Neither touches business data, and a recipe holds no rows.
+    "export_migration_recipe",
+    "import_migration_recipe",
     # Writes only the session's settings and mapping, as set_column_mapping does.
     "set_opening_stock",
     "set_opening_invoices",

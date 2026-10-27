@@ -76,6 +76,8 @@ class CorePlugin(BasePlugin):
             "choose_old_id_storage",
             "save_migration_recipe",
             "run_migration_recipe",
+            "export_migration_recipe",
+            "import_migration_recipe",
             "set_opening_stock",
             "dry_run_import",
             "start_import",

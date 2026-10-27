@@ -22,6 +22,9 @@ from typing import Any, Dict, List, Optional
 import frappe
 from frappe import _
 
+from frappe_assistant_core.assistant_core.doctype.fac_migration_recipe.fac_migration_recipe import (
+    FORMAT_VERSION,
+)
 from frappe_assistant_core.utils import import_dry_run as dry_run
 from frappe_assistant_core.utils import import_keys, import_plan
 from frappe_assistant_core.utils.import_mapping import session_headers
@@ -592,6 +595,161 @@ def record_run(plan_name: str, status: str, message: str) -> None:
             )
     except Exception:
         frappe.log_error(title="Recipe run record failed", message=frappe.get_traceback())
+
+
+# -- moving a recipe between sites: a JSON file ---------------------------------------------------------
+
+FILE_MARK = "fac_migration_recipe"
+MAX_FILE_BYTES = 1024 * 1024
+MAX_STEPS = 200
+JSON_STEP_FIELDS = ("header_signature", "column_map", "transformation_rules", "engine_settings")
+TEXT_STEP_FIELDS = (
+    "sheet_name",
+    "original_file_name",
+    "target_doctype",
+    "import_type",
+    "preset_id",
+    "preset_target",
+)
+OPENING_ENGINES = ("none", "stock", "invoices", "balances")
+
+
+def to_file_content(doc) -> Dict[str, Any]:
+    """The recipe as it is written to a file (M-D3): the format and FAC version, where it came from, and
+    its steps with their mapping as JSON, not as text in a JSON string."""
+    steps = []
+    for step in doc.steps:
+        row = {
+            key: step.get(key)
+            for key in ("position", *TEXT_STEP_FIELDS, "opening_engine", "is_transaction_step")
+        }
+        for key in JSON_STEP_FIELDS:
+            row[key] = frappe.parse_json(step.get(key)) if step.get(key) else None
+        steps.append(row)
+    return {
+        FILE_MARK: True,
+        "format_version": doc.format_version or FORMAT_VERSION,
+        "fac_version": doc.fac_version,
+        "title": doc.title,
+        "failure_rule": doc.failure_rule,
+        "notes": doc.notes,
+        "origin": {
+            "site": doc.source_site,
+            "plan": doc.source_plan,
+            "created_by": doc.created_by,
+            "created_on": str(doc.created_on) if doc.created_on else None,
+        },
+        "steps": steps,
+    }
+
+
+def export_recipe(recipe_name: str):
+    """A private JSON file of the recipe, for another site (RC-8). Returns the File."""
+    doc = frappe.get_doc(RECIPE, recipe_name)
+    doc.check_permission("read")
+    content = json.dumps(to_file_content(doc), indent=2, sort_keys=True, default=str)
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "-", doc.title or doc.name).strip("-")[:60] or "recipe"
+    return frappe.get_doc(
+        {
+            "doctype": "File",
+            "file_name": f"recipe-{stem}.json",
+            "content": content.encode("utf-8"),
+            "is_private": 1,
+            "attached_to_doctype": RECIPE,
+            "attached_to_name": doc.name,
+        }
+    ).insert()
+
+
+def _text(value: Any, what: str, limit: int = 255) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or len(value) > limit:
+        raise RecipeProblem(_("{0} in the file isn't text of at most {1} characters.").format(what, limit))
+    return value
+
+
+def _read_recipe_file(content: bytes) -> Dict[str, Any]:
+    """The recipe in a file, checked: refused with a plain reason when it isn't one, or is of another
+    format (RC-10). A file from another site is untrusted: only the keys of a recipe are read."""
+    if len(content) > MAX_FILE_BYTES:
+        raise RecipeProblem(
+            _("This file is larger than {0} KB, so it isn't a recipe.").format(MAX_FILE_BYTES // 1024)
+        )
+    try:
+        data = json.loads(content.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise RecipeProblem(_("This file isn't a recipe: it isn't JSON."))
+    if not isinstance(data, dict) or data.get(FILE_MARK) is not True:
+        raise RecipeProblem(_("This file isn't a migration recipe exported by FAC."))
+    if data.get("format_version") != FORMAT_VERSION:
+        raise RecipeProblem(
+            _(
+                "This recipe is in format {0}, written by FAC {1}. This site reads format {2}: export it again "
+                "from a site on the same FAC version, or update this site."
+            ).format(data.get("format_version"), data.get("fac_version") or "?", FORMAT_VERSION)
+        )
+    if not isinstance(data.get("steps"), list) or not data["steps"] or len(data["steps"]) > MAX_STEPS:
+        raise RecipeProblem(_("A recipe has between 1 and {0} steps.").format(MAX_STEPS))
+    return data
+
+
+def import_recipe(file_doc):
+    """Make a recipe from a file another site exported (RC-8). The origin is kept, and a note says who
+    imported it, when, and what wrote it. Returns the recipe."""
+    from frappe_assistant_core.utils.import_session import file_bytes
+
+    data = _read_recipe_file(file_bytes(file_doc))
+    origin = data.get("origin") if isinstance(data.get("origin"), dict) else {}
+    steps = []
+    for position, row in enumerate(data["steps"], start=1):
+        if not isinstance(row, dict):
+            raise RecipeProblem(_("Step {0} of the file isn't an object.").format(position))
+        step: Dict[str, Any] = {"position": position}
+        for key in TEXT_STEP_FIELDS:
+            step[key] = _text(row.get(key), f"{key} of step {position}")
+        engine = row.get("opening_engine") or "none"
+        if engine not in OPENING_ENGINES:
+            raise RecipeProblem(
+                _("Step {0}: opening engine {1} isn't one of {2}.").format(
+                    position, engine, ", ".join(OPENING_ENGINES)
+                )
+            )
+        step["opening_engine"] = engine
+        step["is_transaction_step"] = 1 if row.get("is_transaction_step") else 0
+        for key in JSON_STEP_FIELDS:
+            value = row.get(key)
+            if value is not None and not isinstance(value, (dict, list)):
+                raise RecipeProblem(_("Step {0}: {1} must be JSON data.").format(position, key))
+            step[key] = _json(value)
+        steps.append(step)
+    title = _text(data.get("title"), "title") or _("Imported recipe")
+    note = _("Imported by {0} on {1} from {2}, written by FAC {3}.").format(
+        frappe.session.user,
+        frappe.utils.now_datetime().strftime("%Y-%m-%d %H:%M"),
+        file_doc.file_name,
+        data.get("fac_version") or "?",
+    )
+    doc = frappe.get_doc(
+        {
+            "doctype": RECIPE,
+            "title": title,
+            "failure_rule": data.get("failure_rule")
+            if data.get("failure_rule") in ("leave_out", "stop")
+            else "leave_out",
+            "notes": _text(data.get("notes"), "notes", 2000),
+            "format_version": FORMAT_VERSION,
+            "fac_version": _text(data.get("fac_version"), "fac_version", 40),
+            "source_site": _text(origin.get("site"), "origin site"),
+            "source_plan": _text(origin.get("plan"), "origin plan"),
+            "created_by": _text(origin.get("created_by"), "origin user"),
+            "created_on": _text(origin.get("created_on"), "origin date", 40),
+            "imported_note": note,
+            "steps": steps,
+        }
+    )
+    doc.insert()
+    return doc
 
 
 RECIPE_PREFIX = import_plan.RECIPE_PREFIX
