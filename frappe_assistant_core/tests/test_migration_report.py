@@ -25,6 +25,7 @@ from frappe_assistant_core.tests import test_import_opening_balances as balances
 from frappe_assistant_core.tests import test_import_opening_invoices as invoices_tests
 from frappe_assistant_core.tests import test_import_opening_stock as stock_tests
 from frappe_assistant_core.tests import test_import_run as run_tests
+from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.utils import import_failures, import_signoff
 
 GROUP_NODE = failures_tests.GROUP_NODE
@@ -178,7 +179,7 @@ class TestDataImportSession(run_tests.ImportRunCase):
             ["Customer", 4, 2, 1, 1, 0],
         )
         why = " ".join(row["details"] for row in section(result["data"], "Why Not Imported"))
-        self.assertIn("Closed shop (rows 3", why)
+        self.assertIn("Closed shop (row 3 of", why)
         self.assertIn(GROUP_NODE, why)
         self.assertTrue(section(result["data"], "Open Points"))
         self.assertIn("4 rows in the files, 2 imported, 1 left out, 1 failed", result["message"])
@@ -198,7 +199,7 @@ class TestDataImportSession(run_tests.ImportRunCase):
             "| Item | Rows in the Files | Imported | Unchanged | Left Out | Failed | Not Imported |", text
         )
         self.assertIn("| Customer | 4 | 2 | 0 | 1 | 1 | 0 |", text)
-        self.assertIn("Closed shop (rows 3", text)
+        self.assertIn("Closed shop (row 3 of", text)
         self.assertIn(GROUP_NODE, text)
         self.assertIn("## Open Points", text)
         self.assertIn("Name: ______", text)
@@ -438,3 +439,17 @@ class TestOpeningBalancesInTheReport(balances_tests.OpeningBalancesCase):
         self.assertIn("opening invoices", summary["excluded"][0]["reason"])
         # Nothing brought the 50 into Debtors yet: the report says the books don't hold it.
         self.assertTrue(any(self.debtors in point for point in report["open_points"]), report["open_points"])
+
+
+class TestRowWording(BaseAssistantTest):
+    def test_one_row_is_a_row_and_several_are_rows(self):
+        # The report read "Negative opening quantity (rows 6 of bt26_opening_stock.csv)".
+        one = {"reason": "Negative opening quantity", "count": 1, "rows": "6"}
+        two = {"reason": "Customer does not exist", "count": 2, "rows": "5, 9"}
+
+        self.assertEqual(
+            import_signoff.rows_of(one, "stock.csv"), "Negative opening quantity (row 6 of stock.csv)"
+        )
+        self.assertEqual(
+            import_signoff.rows_of(two, "invoices.csv"), "Customer does not exist (rows 5, 9 of invoices.csv)"
+        )

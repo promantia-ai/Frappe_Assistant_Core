@@ -711,9 +711,7 @@ def _rows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "section": _("Why Not Imported"),
                         "item": "{}: {}".format(summary["label"], _(title)),
                         column_of[status]: group["count"],
-                        "details": _("{0} (rows {1} of {2})").format(
-                            group["reason"], group["rows"], summary.get("file_name") or summary["session"]
-                        ),
+                        "details": rows_of(group, summary.get("file_name") or summary["session"]),
                     }
                 )
     titles = {"stock": _("Stock Value"), "receivables": _("Receivables"), "payables": _("Payables")}
@@ -936,3 +934,9 @@ def execute(filters: Optional[Dict[str, Any]] = None):
     report["message"] = scope(filters, plan, names, len(sessions)) + " " + report["message"]
     message = document(report) if cint(filters.get("document")) else report["message"]
     return columns(), rows(report), message, None, summary_cards(report)
+
+
+def rows_of(group: Dict[str, Any], file_name: str) -> str:
+    """'Closed shop (row 3 of customers.csv)': a group of rows left out, failed or not imported."""
+    text = _("{0} (row {1} of {2})") if group["count"] == 1 else _("{0} (rows {1} of {2})")
+    return text.format(group["reason"], group["rows"], file_name)
