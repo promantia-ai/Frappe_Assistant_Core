@@ -1,0 +1,44 @@
+{
+ "actions": [],
+ "creation": "2026-10-27 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-27 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Assistant Core",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "name": "FAC Setup Plan Gap",
+ "istable": 1,
+ "permissions": [],
+ "fields": [
+  {
+   "fieldname": "requirement",
+   "fieldtype": "Small Text",
+   "label": "Requirement",
+   "in_list_view": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "why_not_standard",
+   "fieldtype": "Small Text",
+   "label": "Why ERPNext Doesn't Cover It",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "suggestion",
+   "fieldtype": "Small Text",
+   "label": "Suggestion",
+   "in_list_view": 1
+  }
+ ],
+ "field_order": [
+  "requirement",
+  "why_not_standard",
+  "suggestion"
+ ]
+}

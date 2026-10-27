@@ -1,0 +1,184 @@
+{
+ "actions": [],
+ "creation": "2026-10-27 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-27 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Assistant Core",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "name": "FAC Setup Plan",
+ "autoname": "naming_series:",
+ "naming_rule": "By \"Naming Series\" field",
+ "title_field": "title",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "FAC-SETUP-.YYYY.-.#####",
+   "default": "FAC-SETUP-.YYYY.-.#####",
+   "hidden": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Draft\nApproved\nRunning\nCompleted\nPartially Completed\nStopped\nFailed",
+   "default": "Draft",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "failure_rule",
+   "fieldtype": "Select",
+   "label": "If an Item Fails",
+   "options": "stop\ncontinue",
+   "default": "stop"
+  },
+  {
+   "fieldname": "stop_requested",
+   "fieldtype": "Check",
+   "label": "Stop Requested",
+   "default": "0",
+   "read_only": 1
+  },
+  {
+   "fieldname": "approved_digest",
+   "fieldtype": "Data",
+   "label": "Approved Digest",
+   "read_only": 1,
+   "description": "What the user approved: the plan does not run if its items changed since."
+  },
+  {
+   "fieldname": "section_answers",
+   "fieldtype": "Section Break",
+   "label": "Interview"
+  },
+  {
+   "fieldname": "answers",
+   "fieldtype": "Code",
+   "label": "Answers",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "section_items",
+   "fieldtype": "Section Break",
+   "label": "Plan"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Items",
+   "options": "FAC Setup Plan Item"
+  },
+  {
+   "fieldname": "section_gaps",
+   "fieldtype": "Section Break",
+   "label": "Fit-gap"
+  },
+  {
+   "fieldname": "gaps",
+   "fieldtype": "Table",
+   "label": "Fit-gap Items",
+   "options": "FAC Setup Plan Gap"
+  },
+  {
+   "fieldname": "section_run",
+   "fieldtype": "Section Break",
+   "label": "Run"
+  },
+  {
+   "fieldname": "applied_by",
+   "fieldtype": "Data",
+   "label": "Applied By",
+   "read_only": 1
+  },
+  {
+   "fieldname": "applied_on",
+   "fieldtype": "Datetime",
+   "label": "Applied On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "progress",
+   "fieldtype": "Code",
+   "label": "Progress",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "log",
+   "fieldtype": "Code",
+   "label": "Log",
+   "options": "JSON",
+   "read_only": 1
+  }
+ ],
+ "field_order": [
+  "naming_series",
+  "title",
+  "company",
+  "status",
+  "column_break_1",
+  "failure_rule",
+  "stop_requested",
+  "approved_digest",
+  "section_answers",
+  "answers",
+  "section_items",
+  "items",
+  "section_gaps",
+  "gaps",
+  "section_run",
+  "applied_by",
+  "applied_on",
+  "column_break_2",
+  "progress",
+  "log"
+ ]
+}

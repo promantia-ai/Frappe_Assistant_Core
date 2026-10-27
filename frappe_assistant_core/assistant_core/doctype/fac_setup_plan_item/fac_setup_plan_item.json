@@ -1,0 +1,118 @@
+{
+ "actions": [],
+ "creation": "2026-10-27 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-27 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Assistant Core",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "name": "FAC Setup Plan Item",
+ "istable": 1,
+ "permissions": [],
+ "fields": [
+  {
+   "fieldname": "area",
+   "fieldtype": "Data",
+   "label": "Area",
+   "in_list_view": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "decision",
+   "fieldtype": "Small Text",
+   "label": "Decision",
+   "in_list_view": 1,
+   "description": "In words, as the consultant said it."
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "target_doctype",
+   "fieldtype": "Data",
+   "label": "Target DocType",
+   "in_list_view": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "target_name",
+   "fieldtype": "Data",
+   "label": "Target Name",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "State",
+   "options": "Pending\nDone\nFailed\nSkipped",
+   "default": "Pending",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "section_values",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "values",
+   "fieldtype": "Code",
+   "label": "Values",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "depends_on",
+   "fieldtype": "Small Text",
+   "label": "Depends On",
+   "description": "Item numbers (idx) this one waits for, comma separated."
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "already_set",
+   "fieldtype": "Check",
+   "label": "Already Set",
+   "default": "0"
+  },
+  {
+   "fieldname": "is_customisation",
+   "fieldtype": "Check",
+   "label": "Customisation",
+   "default": "0",
+   "description": "Created beforehand with its own approval; the plan only checks it."
+  },
+  {
+   "fieldname": "created_record",
+   "fieldtype": "Data",
+   "label": "Created Record"
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Small Text",
+   "label": "Message"
+  }
+ ],
+ "field_order": [
+  "area",
+  "decision",
+  "column_break_1",
+  "target_doctype",
+  "target_name",
+  "state",
+  "section_values",
+  "values",
+  "depends_on",
+  "column_break_2",
+  "already_set",
+  "is_customisation",
+  "created_record",
+  "message"
+ ]
+}
