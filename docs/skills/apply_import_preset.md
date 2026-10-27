@@ -98,6 +98,14 @@ to export the masters from Tally, as XML or Excel.
   Don't Import, so they are not imported on this site. `not_on_this_site` lists only columns
   whose field this site lacks, so it does not name them; tell the user if they ask.
 
+## The old system's IDs
+
+A preset that knows which column holds the old system's own ID for a row (a Zoho `Customer ID`, a
+Tally ledger's name) marks it on each session it opens, and the result's `old_ids` for that
+session names the column and the system. The column is kept for later files that refer to the
+records by it and is not imported (unless it is also a field, like an Item code). The export may
+have no such column or leave it empty: then nothing is marked, and the session has no `old_ids`.
+
 ## Parameters
 
 | Parameter | Required | Description |
