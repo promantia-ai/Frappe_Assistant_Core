@@ -53,7 +53,14 @@
 					@collapse="toggleIndexCollapsed"
 				/>
 			</aside>
-			<div class="chat-area">
+			<div
+				class="chat-area"
+				@dragenter="fileDrop.onDragEnter"
+				@dragover="fileDrop.onDragOver"
+				@dragleave="fileDrop.onDragLeave"
+				@drop="fileDrop.onDrop"
+			>
+				<FileDropOverlay v-if="fileDrop.isDragging" />
 				<!-- Connection + error banners -->
 				<ConnectionBanners
 					:connection-visible="connectionVisible"
@@ -250,7 +257,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, defineAsyncComponent } from "vue";
+import { ref, computed, watch, nextTick, defineAsyncComponent, reactive } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useChatStore } from "@/stores/chatStore";
 import { useUserStore } from "@/stores/userStore";
@@ -268,6 +275,8 @@ import ProjectPage from "@/components/projects/ProjectPage.vue";
 import { useConversationsStore } from "@/stores/conversationsStore";
 import { useProjectsStore } from "@/stores/projectsStore";
 import InputArea from "@/components/chat/InputArea.vue";
+import FileDropOverlay from "@/components/chat/FileDropOverlay.vue";
+import { useFileDrop } from "@/composables/useComposerFileDrop";
 import ConnectionBanners from "@/components/chat/ConnectionBanners.vue";
 import PersonalLimitBanner from "@/components/chat/PersonalLimitBanner.vue";
 import ChatStagePicker from "@/components/chat/ChatStagePicker.vue";
@@ -315,6 +324,8 @@ const userStore = useUserStore();
 const conversationsStore = useConversationsStore();
 const projectsStore = useProjectsStore();
 const modelStore = useModelStore();
+// Files dragged anywhere on the chat go to the composer (reactive: the template reads isDragging).
+const fileDrop = reactive(useFileDrop());
 const suggestionStore = useSuggestionStore();
 const { showError } = useToast();
 

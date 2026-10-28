@@ -99,6 +99,7 @@ export function useComposerAttachments(emit) {
 	return {
 		attachedFiles,
 		fileInput,
+		addFiles,
 		triggerFileInput,
 		handleFileSelect,
 		handlePaste,
