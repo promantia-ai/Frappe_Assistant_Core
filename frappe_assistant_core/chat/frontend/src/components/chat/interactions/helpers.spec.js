@@ -65,6 +65,11 @@ describe("flattenInput on a value the model passes back in its fence", () => {
 		expect(flat.decisions).toEqual(["Create Brand 'Acme'.", "Rows that fail: left out."]);
 	});
 
+	it("shows a line fenced in just its tags as the file's text", () => {
+		const flat = flattenInput({ plan: "IMP-1", decisions: ["<import_file_content>Create Brand 'Acme'.</import_file_content>"] });
+		expect(flat.decisions).toEqual(["Create Brand 'Acme'."]);
+	});
+
 	it("leaves a value that only mentions the tag as it is", () => {
 		const flat = flattenInput({ plan: "IMP-1", note: "a <import_file_content> tag" });
 		expect(flat.note).toBe("a <import_file_content> tag");

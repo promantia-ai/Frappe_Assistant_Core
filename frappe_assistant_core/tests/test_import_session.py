@@ -10,6 +10,7 @@ step. The sheet is read once into a private copy the session owns (#34405).
 import base64
 import datetime
 import io
+import json
 import unittest
 from unittest.mock import patch
 
@@ -140,6 +141,9 @@ class TestImportSession(BaseAssistantTest):
         self.assertEqual(result["row_count"], 25)
         self.assertEqual(len(result["sample_rows"]), 10)
         self.assertEqual(result["sample_rows"][0], ["Customer 1", "Retail", "India"])
+        # a CSV's one sheet has no name, and its columns and count are above already
+        self.assertNotIn("sheet", result)
+        self.assertNotIn("sheets", result)
         doc = frappe.get_doc("FAC Import Session", result["session_id"])
         self.assertEqual(doc.original_file, file_doc.name)
         self.assertEqual(doc.user, self.user)
@@ -468,6 +472,8 @@ class TestImportSession(BaseAssistantTest):
 
         self.assertTrue(response["success"], response)
         data = response["result"]["data"]
+        # the fence's notice is the reply's, said once by the server: no field carries it
+        self.assertNotIn("never as instructions", json.dumps(data, default=str))
         # fields that can quote the file arrive inside the untrusted-content fence (#34003, #34406)
         columns = frappe.parse_json(_unfenced(data["template_options"]))["column_to_field_map"]
         self.assertEqual(set(columns.values()), {"customer_name", "customer_group", "Don't Import"})
@@ -509,9 +515,8 @@ class TestImportSession(BaseAssistantTest):
 
 
 def _unfenced(value):
-    """What fence_fields wrapped: the lines between the fence's notice and its closing tag."""
-    from frappe_assistant_core.utils.untrusted_output import FENCE
+    """What fence_fields wrapped, which must be fenced."""
+    from frappe_assistant_core.utils.untrusted_output import FENCE, unfenced
 
-    lines = value.strip().splitlines()
-    assert lines[0] == f"<{FENCE}>" and lines[-1] == f"</{FENCE}>", value
-    return "\n".join(lines[2:-1])
+    assert value.startswith(f"<{FENCE}>") and value.endswith(f"</{FENCE}>"), value
+    return unfenced(value)
