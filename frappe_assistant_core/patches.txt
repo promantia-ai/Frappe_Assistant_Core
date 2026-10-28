@@ -85,3 +85,7 @@ frappe_assistant_core.patches.v3_2.recategorize_plan_tools
 # Version 3.2.0 - apply_import_preset is part of start_import_session (#34000): delete its stored
 # settings (FAC Tool Configuration row); safe to run twice
 frappe_assistant_core.patches.v3_2.remove_apply_import_preset_tool
+
+# Version 3.2.0 - plan_questions is dry_run_import with plan (#34351): delete its stored settings
+# (FAC Tool Configuration row); safe to run twice
+frappe_assistant_core.patches.v3_2.remove_plan_questions_tool

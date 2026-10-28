@@ -69,7 +69,8 @@ class SetColumnMapping(BaseTool):
             "so: a column you can't place is asked about, never dropped. Next, once the user "
             "agrees the mapping: dry_run_import to "
             "check every row. For a session in a migration plan, don't ask the user here: map what "
-            "you are sure of, and plan_questions asks the rest with the plan's other questions."
+            "you are sure of, and dry_run_import with the plan asks the rest with the plan's other "
+            "questions."
         )
         self.requires_permission = None  # Checked on the session and the target DocType
         # what the user's file says reaches the model fenced (#34003)

@@ -81,7 +81,6 @@ class CorePlugin(BasePlugin):
             "set_opening_balances",
             "import_opening_balances",
             "plan_migration",
-            "plan_questions",
             "run_migration_plan",
             "stop_migration_plan",
             # Permission checks

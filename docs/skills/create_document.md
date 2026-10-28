@@ -191,4 +191,4 @@ A missing record that can't be created has no `create` fix in the check; its gro
 ## In a migration plan
 
 When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
-`plan_questions` gathers every question of the plan into one list. Missing masters of a planned session aren't created with `create_document`: answer their question with the `create` fix, and the plan creates them when it runs.
+`dry_run_import` with `plan` gathers every question of the plan into one list. Missing masters of a planned session aren't created with `create_document`: answer their question with the `create` fix, and the plan creates them when it runs.

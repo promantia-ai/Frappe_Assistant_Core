@@ -17,14 +17,14 @@ For one file the user is happy to take step by step, the plain path (`start_impo
 |---|---|---|---|
 | `sessions` | list of strings | Yes | The import session ids to add. Open every file's session first (`start_import_session`, once per file). |
 | `plan` | string | No | An existing plan to add them to: it orders all its files again. Left out, a new plan is made. |
-| `cut_off` | string | No | The cut-off date the user picked from `opening_setup`, `YYYY-MM-DD`. Pass it with `plan` (no new sessions) once they pick: `plan_questions` then doesn't ask it again. |
-| `failure_rule` | `leave_out` or `stop` | No | What happens to rows that fail when their file comes up. `leave_out` (default) leaves them out with their reason; `stop` stops the plan before that file. `plan_questions` asks it if the user hasn't said. |
+| `cut_off` | string | No | The cut-off date the user picked from `opening_setup`, `YYYY-MM-DD`. Pass it with `plan` (no new sessions) once they pick: the plan's check (`dry_run_import` with `plan`) then doesn't ask it again. |
+| `failure_rule` | `leave_out` or `stop` | No | What happens to rows that fail when their file comes up. `leave_out` (default) leaves them out with their reason; `stop` stops the plan before that file. The plan's check asks it if the user hasn't said. |
 
 ## Result
 
 | Field | Description |
 |---|---|
-| `plan` | The plan id: the session id of its first file (`IMP-YYYY-NNNNN`), which keeps the plan. Pass this id, not another file's, to `plan_questions`, `run_migration_plan` and `stop_migration_plan`. |
+| `plan` | The plan id: the session id of its first file (`IMP-YYYY-NNNNN`), which keeps the plan. Pass this id, not another file's, to `dry_run_import` (as `plan`), `run_migration_plan` and `stop_migration_plan`. |
 | `status` | `Planning` until every question is answered and every file is ready, then `Ready to Run`. |
 | `files` | The files in import order: `session`, `file_name`, `doctype`, `position`, `reason` (which earlier files it needs) and the session's `status`. Show this to the user. |
 | `problems` | Files that link to each other, so neither can go first. Import one with the linking columns left out, then the other. |
@@ -48,5 +48,5 @@ When any file is opening stock, invoices or balances, ask now, before mapping, n
 
 ## Next
 
-Map every file (`get_import_schema`, `set_column_mapping`) yourself, then call `plan_questions`
+Map every file (`get_import_schema`, `set_column_mapping`) yourself, then call `dry_run_import`
 with the plan.

@@ -34,7 +34,7 @@ class RunMigrationPlan(BaseTool):
             "Run a migration plan that is Ready to Run, once the user approves: creates the "
             "masters the plan planned, then imports every file in order in the background, each "
             "checked again just before its import, rows that would fail then handled by the plan's "
-            "failure rule. Nothing asks the user again. Pass plan_questions' last `approval` "
+            "failure rule. Nothing asks the user again. Pass the plan check's last `approval` "
             "exactly: files, rows, masters, cut_off and decisions, so the approval card shows the "
             "user every decision before anything is imported; anything else is refused. Called "
             "again for a plan that is running or done, it only reports: each file's status, "
@@ -71,7 +71,7 @@ class RunMigrationPlan(BaseTool):
                 "decisions": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Every decision of the plan, one line each, as plan_questions' "
+                    "description": "Every decision of the plan, one line each, as dry_run_import's "
                     "approval gives them: the user reads them on the approval card.",
                 },
             },

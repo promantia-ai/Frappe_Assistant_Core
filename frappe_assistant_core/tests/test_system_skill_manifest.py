@@ -75,6 +75,7 @@ NOT_TOOLS = {
     "likely",
     "migration_plan",
     "opening_setup",
+    "plan",
     "plan_settings",
     "session_id",
     "status",

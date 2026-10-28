@@ -42,7 +42,7 @@ class PlanMigration(BaseTool):
             "and balances: use its company without asking (companies: ask which); ask the cut-off "
             "once, now, on ONE ask_user single_select card of cut_off_choices (never as text to "
             "type, never a guessed year), set every opening file to it, and pass it here as cut_off "
-            "(plan, no sessions). Next: map each file, then plan_questions."
+            "(plan, no sessions). Next: map each file, then dry_run_import with the plan."
         )
         self.requires_permission = None  # checked on the plan and on each session
         # File names and reasons quote the user's files (#34003).
@@ -69,7 +69,7 @@ class PlanMigration(BaseTool):
                 },
                 "cut_off": {
                     "type": "string",
-                    "description": "The cut-off date the user picked, YYYY-MM-DD: plan_questions then "
+                    "description": "The cut-off date the user picked, YYYY-MM-DD: the plan's check then "
                     "doesn't ask it again.",
                 },
                 "failure_rule": {

@@ -196,7 +196,7 @@ class TestInvoicesInAPlan(PlanFiles, OpeningInvoicesCase):
         self.assertTrue(self._setup(invoices)["success"])
         plan = self._plan([invoices, customers])
 
-        questions = self._run("plan_questions", {"plan": plan})["result"]["questions"]
+        questions = self._run("dry_run_import", {"plan": plan})["result"]["questions"]
 
         fix = next(q for q in questions if q["kind"] == "fix" and q["session"] == invoices)
         self.assertNotIn("create", [f["action"] for f in fix["fixes"]])
@@ -216,7 +216,7 @@ class TestInvoicesInAPlan(PlanFiles, OpeningInvoicesCase):
         self.assertTrue(self._setup(invoices)["success"])
         plan = self._plan([invoices, customers])
 
-        questions = self._run("plan_questions", {"plan": plan})["result"]["questions"]
+        questions = self._run("dry_run_import", {"plan": plan})["result"]["questions"]
 
         fix = next(q for q in questions if q["kind"] == "fix" and q["session"] == customers)
         self.assertEqual(fix["needed_by"], [f"open-{self.tag}.csv row 2 ({name})"])
@@ -273,7 +273,7 @@ class TestTheCutOffQuestion(StockPlanCase):
         return self._plan([stock, items]), items, stock
 
     def _questions(self, plan, answers=None):
-        response = self._run("plan_questions", {"plan": plan, **({"answers": answers} if answers else {})})
+        response = self._run("dry_run_import", {"plan": plan, **({"answers": answers} if answers else {})})
         return response
 
     def test_the_plan_asks_the_cut_off_date(self):
@@ -426,7 +426,7 @@ class TestTheStartQuestions(StockPlanCase):
         plan = self._planned()["plan"]
 
         response = self._run("plan_migration", {"sessions": [], "plan": plan, "cut_off": self.date})
-        questions = self._run("plan_questions", {"plan": plan})["result"]["questions"]
+        questions = self._run("dry_run_import", {"plan": plan})["result"]["questions"]
 
         self.assertTrue(response["success"], response)
         self.assertEqual(response["result"]["opening_setup"]["cut_off"], self.date)
@@ -437,7 +437,7 @@ class TestTheStartQuestions(StockPlanCase):
         other = frappe.utils.add_days(self.date, -1)
 
         self._run("plan_migration", {"sessions": [], "plan": plan, "cut_off": other})
-        questions = self._run("plan_questions", {"plan": plan})["result"]["questions"]
+        questions = self._run("dry_run_import", {"plan": plan})["result"]["questions"]
 
         self.assertIn("cut_off", [q["kind"] for q in questions])  # the stock file has another date
 
@@ -451,10 +451,10 @@ class TestTheStartQuestions(StockPlanCase):
 
     def test_after_apply_all_the_plan_runs_without_another_card(self):
         plan = self._planned()["plan"]
-        asked = self._run("plan_questions", {"plan": plan})["result"]
+        asked = self._run("dry_run_import", {"plan": plan})["result"]
 
         answered = self._run(
-            "plan_questions",
+            "dry_run_import",
             {
                 "plan": plan,
                 "answers": [

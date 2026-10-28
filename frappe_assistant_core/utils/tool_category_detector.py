@@ -106,13 +106,13 @@ READ_ONLY_TOOLS = {
     "set_opening_stock",
     "set_opening_invoices",
     "set_opening_balances",
-    # Every row it inserts is rolled back; it writes only the session and its result file.
+    # Every row it inserts is rolled back; it writes only the sessions, their result files and a
+    # plan's answers (with plan: a create answer only plans the record, see plan_migration below).
     "dry_run_import",
     # A migration plan's own settings, as the session tools write theirs: a plan cost five
     # approval cards before its run (#34547). A create answer only plans the record, and
     # run_migration_plan creates it, on the one card that lists every decision.
     "plan_migration",  # makes a migration plan and links import sessions to it
-    "plan_questions",  # checks the plan's files and applies the user's answers to their settings
 }
 
 # Tools that are always categorized as write (hardcoded list)

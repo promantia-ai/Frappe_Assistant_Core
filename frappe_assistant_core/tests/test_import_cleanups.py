@@ -145,14 +145,14 @@ class TestUpdateMatchKeys(unittest.TestCase):
 class TestPlanAnswers(unittest.TestCase):
     def test_answers_applied_before_a_failure_are_reported_as_applied(self):
         # #34438: apply_answers released its savepoint, so they stay applied when the next step fails
-        from frappe_assistant_core.plugins.core.tools import plan_questions
+        from frappe_assistant_core.plugins.core.tools.dry_run_import import DryRunImport
         from frappe_assistant_core.utils import import_plan
 
         plan = frappe._dict(name="PLAN-1", status=import_plan.OPEN[0], reload=lambda: None)
         with patch.object(import_plan, "load_plan", return_value=plan), patch.object(
             import_plan, "apply_answers", return_value=[{"id": "q1"}]
         ), patch.object(import_plan, "open_questions", side_effect=import_plan.PlanProblem("broke")):
-            reply = plan_questions.PlanQuestions().execute({"plan": "PLAN-1", "answers": [{"id": "q1"}]})
+            reply = DryRunImport().execute({"plan": "PLAN-1", "answers": [{"id": "q1"}]})
 
         self.assertFalse(reply["success"])
         self.assertEqual(reply["applied"], [{"id": "q1"}])
@@ -271,7 +271,7 @@ class TestPlanFencing(unittest.TestCase):
     def test_only_what_the_files_say_is_fenced_in_the_plans_questions(self):
         # #34438: FAC's own directions were fenced as file content. The decisions quote the files,
         # so each line is fenced on its own and the approval is still a list of lines.
-        from frappe_assistant_core.plugins.core.tools.plan_questions import PlanQuestions
+        from frappe_assistant_core.plugins.core.tools.dry_run_import import DryRunImport
         from frappe_assistant_core.utils.untrusted_output import fence_fields, unfenced
 
         result = {
@@ -295,7 +295,7 @@ class TestPlanFencing(unittest.TestCase):
             },
         }
 
-        fenced = fence_fields(result, PlanQuestions().untrusted_fields)
+        fenced = fence_fields(result, DryRunImport().untrusted_fields)
 
         fix, cut_off, waiting = fenced["questions"]
         self.assertNotEqual(fix["message"], "Brand 'Acme' doesn't exist.")
