@@ -257,7 +257,7 @@ class TestThePlanOnItsFirstSession(ImportPlanCase):
         item, group = self._two()
         self._plan([item, group])
 
-        response = self._run("plan_questions", {"plan": group})
+        response = self._run("dry_run_import", {"plan": group})
 
         self.assertFalse(response["success"], response)
         self.assertIn("not found", response["result"]["error"])
@@ -550,7 +550,7 @@ class TestPlanQuestions(ImportPlanCase):
     def test_every_question_of_the_plan_comes_in_one_list(self):
         plan, _customers = self._plan_with_a_missing_group(unmapped=True)
 
-        result = self._run("plan_questions", {"plan": plan})["result"]
+        result = self._run("dry_run_import", {"plan": plan})["result"]
 
         self.assertEqual(
             sorted({q["kind"] for q in result["questions"]}), ["failure_rule", "fix", "structure"]
@@ -586,7 +586,7 @@ class TestPlanQuestions(ImportPlanCase):
         # Left to the model, the table was skipped: the user saw only "Apply these answers?".
         plan = self._plan_with_a_new_and_a_misspelt_group()
 
-        result = self._run("plan_questions", {"plan": plan})["result"]
+        result = self._run("dry_run_import", {"plan": plan})["result"]
 
         fixes = {q["message"]: q for q in result["questions"] if q["kind"] == "fix"}
         new = next(q for m, q in fixes.items() if f"Zymurgy {self.tag}" in m)
@@ -603,11 +603,11 @@ class TestPlanQuestions(ImportPlanCase):
 
     def test_the_suggested_answers_are_answers_the_plan_takes(self):
         plan = self._plan_with_a_new_and_a_misspelt_group()
-        questions = self._run("plan_questions", {"plan": plan})["result"]["questions"]
+        questions = self._run("dry_run_import", {"plan": plan})["result"]["questions"]
         answers = [{"id": q["id"], **q["suggested"]} for q in questions if q["kind"] == "fix"]
 
         response = self._run(
-            "plan_questions",
+            "dry_run_import",
             {"plan": plan, "answers": [*answers, {"id": "plan:failure_rule", "rule": "leave_out"}]},
         )
 
@@ -617,7 +617,7 @@ class TestPlanQuestions(ImportPlanCase):
     def test_a_suggested_name_passed_back_fenced_is_taken(self):
         # suggested is fenced like fixes (it names a record); an answer may carry it back as it came
         plan = self._plan_with_a_new_and_a_misspelt_group()
-        questions = self._run("plan_questions", {"plan": plan})["result"]["questions"]
+        questions = self._run("dry_run_import", {"plan": plan})["result"]["questions"]
         answers = [
             {
                 "id": q["id"],
@@ -629,7 +629,7 @@ class TestPlanQuestions(ImportPlanCase):
         ]
 
         response = self._run(
-            "plan_questions",
+            "dry_run_import",
             {"plan": plan, "answers": [*answers, {"id": "plan:failure_rule", "rule": "leave_out"}]},
         )
 
@@ -640,12 +640,12 @@ class TestPlanQuestions(ImportPlanCase):
         plan, _customers = self._plan_with_a_missing_group()
         fix = next(
             q
-            for q in self._run("plan_questions", {"plan": plan})["result"]["questions"]
+            for q in self._run("dry_run_import", {"plan": plan})["result"]["questions"]
             if q["kind"] == "fix"
         )
 
         response = self._run(
-            "plan_questions",
+            "dry_run_import",
             {
                 "plan": plan,
                 "answers": [
@@ -671,17 +671,17 @@ class TestPlanQuestions(ImportPlanCase):
         from frappe_assistant_core.utils.tool_category_detector import detect_tool_category
 
         registry = get_tool_registry()
-        for name in ("plan_migration", "plan_questions"):
+        for name in ("plan_migration", "dry_run_import"):
             self.assertEqual(detect_tool_category(registry.get_tool(name)), "read_only", name)
         self.assertEqual(detect_tool_category(registry.get_tool("run_migration_plan")), "privileged")
 
     def test_the_failure_rule_is_taken_by_its_own_name_too(self):
         # FACO sent the rule as failure_rule, the name the plan uses for it
         plan, _customers = self._plan_with_a_missing_group()
-        self._run("plan_questions", {"plan": plan})
+        self._run("dry_run_import", {"plan": plan})
 
         answers = [{"id": "plan:failure_rule", "failure_rule": "stop"}]
-        response = self._run("plan_questions", {"plan": plan, "answers": answers})
+        response = self._run("dry_run_import", {"plan": plan, "answers": answers})
 
         self.assertTrue(response["success"], response)
         self.assertEqual(import_plan.get_plan(plan).failure_rule, "stop")
@@ -690,7 +690,7 @@ class TestPlanQuestions(ImportPlanCase):
         plan, _customers = self._plan_with_a_missing_group()
         fix = next(
             q
-            for q in self._run("plan_questions", {"plan": plan})["result"]["questions"]
+            for q in self._run("dry_run_import", {"plan": plan})["result"]["questions"]
             if q["kind"] == "fix"
         )
 
@@ -699,21 +699,21 @@ class TestPlanQuestions(ImportPlanCase):
             ({"id": fix["id"], "action": "create", "fix": "x"}, "action"),
         ):
             with self.subTest(answer=answer):
-                response = self._run("plan_questions", {"plan": plan, "answers": [answer]})
+                response = self._run("dry_run_import", {"plan": plan, "answers": [answer]})
                 self.assertFalse(response["success"], response)
                 self.assertIn(named, frappe.as_json(response))
 
         # a suggested fix sent back whole, with the keys that describe it, is taken
         create = next(f for f in fix["fixes"] if f["action"] == "create")
-        response = self._run("plan_questions", {"plan": plan, "answers": [{"id": fix["id"], **create}]})
+        response = self._run("dry_run_import", {"plan": plan, "answers": [{"id": fix["id"], **create}]})
         self.assertTrue(response["success"], response)
 
     def test_a_wrong_answer_changes_nothing(self):
         plan, _customers = self._plan_with_a_missing_group()
-        self._run("plan_questions", {"plan": plan})
+        self._run("dry_run_import", {"plan": plan})
 
         response = self._run(
-            "plan_questions",
+            "dry_run_import",
             {
                 "plan": plan,
                 "answers": [{"id": "plan:failure_rule", "rule": "stop"}, {"id": "IMP-0:G1", "action": "map"}],
@@ -738,11 +738,47 @@ class TestThePlanSkills(ImportPlanCase):
         manifest = json.load(open(os.path.join(app, "data", "system_skills.json")))
         linked = {s["skill_id"]: s.get("linked_tool") for s in manifest}
         self.assertEqual(linked.get("plan-migration-usage"), "plan_migration")
-        self.assertEqual(linked.get("plan-questions-usage"), "plan_questions")
+        self.assertNotIn("plan-questions-usage", linked)  # a plan's questions are dry_run_import's
+        self.assertEqual(linked.get("dry-run-import-usage"), "dry_run_import")
         self.assertEqual(linked.get("run-migration-plan-usage"), "run_migration_plan")
-        for skill_id in ("plan-migration-usage", "plan-questions-usage", "run-migration-plan-usage"):
+        for skill_id in ("plan-migration-usage", "dry-run-import-usage", "run-migration-plan-usage"):
             entry = next(s for s in manifest if s["skill_id"] == skill_id)
             self.assertTrue(os.path.exists(os.path.join(app, "..", "docs", "skills", entry["content_file"])))
+
+
+class TestOneCheckTool(ImportPlanCase):
+    """plan_questions became dry_run_import's plan mode: one tool checks a file or a whole plan."""
+
+    def test_the_plan_questions_tool_is_gone_and_dry_run_import_takes_a_plan(self):
+        self.assertIsNone(self.registry.get_tool("plan_questions"))
+        schema = self.registry.get_tool("dry_run_import").inputSchema
+        for name in ("plan", "answers", "session", "fixes"):
+            self.assertIn(name, schema["properties"])
+        self.assertNotIn("session", schema.get("required", []))
+
+    def test_a_session_or_a_plan_exactly(self):
+        plan = TestPlanQuestions._plan_with_a_missing_group(self)[0]
+        session = self._session(
+            "other.csv", ["Name"], [[f"O {self.tag}"]], "Customer", {"Name": "customer_name"}
+        )
+        for arguments in ({}, {"session": session, "plan": plan}):
+            with self.subTest(arguments=arguments):
+                response = self._run("dry_run_import", arguments)
+                self.assertFalse(response["success"], response)
+                self.assertIn("session or plan", frappe.as_json(response))
+
+    def test_answers_go_with_a_plan_and_fixes_and_files_with_a_session(self):
+        plan, customers = TestPlanQuestions._plan_with_a_missing_group(self)
+        for arguments, named in (
+            ({"session": customers, "answers": [{"id": "plan:failure_rule", "rule": "stop"}]}, "answers"),
+            ({"plan": plan, "fixes": [{"group": "G1", "action": "leave_out"}]}, "fixes"),
+            ({"plan": plan, "file_id": "x"}, "file"),
+            ({"plan": plan, "failed_rows_file": True}, "failed_rows_file"),
+        ):
+            with self.subTest(arguments=arguments):
+                response = self._run("dry_run_import", arguments)
+                self.assertFalse(response["success"], response)
+                self.assertIn(named, frappe.as_json(response))
 
 
 class TestWhatTheReviewFound(ImportPlanCase):
@@ -759,7 +795,7 @@ class TestWhatTheReviewFound(ImportPlanCase):
         )
 
     def _questions(self, plan, answers=None):
-        response = self._run("plan_questions", {"plan": plan, **({"answers": answers} if answers else {})})
+        response = self._run("dry_run_import", {"plan": plan, **({"answers": answers} if answers else {})})
         self.assertTrue(response["success"], response)
         return response["result"]
 

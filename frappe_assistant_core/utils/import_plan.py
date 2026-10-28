@@ -182,7 +182,7 @@ def imported_by_its_plan(session) -> Optional[str]:
     if status in (*OPEN, "Running"):
         return _(
             "{0} is in migration plan {1} ({2}): the plan imports it, in its order. Answer "
-            "plan_questions, then run_migration_plan."
+            "its questions (dry_run_import with the plan), then run_migration_plan."
         ).format(session.file_name, plan, _(status))
     return None
 
@@ -1081,7 +1081,9 @@ def run_problem(plan) -> Optional[str]:
     from frappe_assistant_core.utils import import_fixes, import_run
 
     if plan.status != "Ready to Run":
-        return _("The plan is {0}: run plan_questions until it is Ready to Run.").format(_(plan.status))
+        return _("The plan is {0}: check it with dry_run_import (plan) until it is Ready to Run.").format(
+            _(plan.status)
+        )
     digests = _progress(plan).get("digests") or {}
     for session in children(plan):
         if (
@@ -1090,7 +1092,8 @@ def run_problem(plan) -> Optional[str]:
             or digests.get(session.name) != plan_digest(session)
         ):
             return _(
-                "{0} changed since it was checked. Run plan_questions again: the approval is for what was checked."
+                "{0} changed since it was checked. Check the plan again with dry_run_import: the approval is "
+                "for what was checked."
             ).format(session.file_name)
         engine = dry_run.special_engine(session)
         if engine:
@@ -1341,7 +1344,7 @@ def _prepare(plan, child) -> Optional[str]:
     ):
         return _(
             "{0} changed after the plan was approved ({1} now), so it isn't imported. Check the plan "
-            "again with plan_questions."
+            "again with dry_run_import."
         ).format(child.file_name, _(child.status))
     # The plan job is a background job: a file over BACKGROUND_ROWS, checked in the background
     # before the approval, is checked here too (#34427).

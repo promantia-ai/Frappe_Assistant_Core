@@ -22,7 +22,7 @@ When unsure, ask the user which they prefer. A plan is the better default for tw
 | 1 | **Sessions**: open one per file | `start_import_session`, once per file | Every file has a `session_id` |
 | 2 | **Plan**: group and order them | `plan_migration` with all the sessions | The user has seen the files in order, each with its reason; with opening files, the cut-off picked on one card from `opening_setup` |
 | 3 | **Map** every file | `get_import_schema`, `set_column_mapping` (opening files: `set_opening_stock`, `set_opening_invoices`, `set_opening_balances`) | Every file is mapped. Map yourself where you are sure; ask only where you aren't |
-| 4 | **Questions**: all of them at once | `plan_questions` | Show every question together, grouped by file, the suggested answer first; send all the answers in one call. Repeat until ready is true |
+| 4 | **Questions**: all of them at once | `dry_run_import` with `plan` | Show every question together, grouped by file, the suggested answer first; send all the answers in one call. Repeat until ready is true |
 | 5 | **Approve once** | `run_migration_plan` with the files, rows and masters it will do | The user approved |
 | 6 | **Follow it** | `run_migration_plan` again (it only reports) | The plan is Completed, Partially Completed, Stopped or Failed |
 | 7 | **Sign-off** | `get_skill("migration-sign-off")` with the plan's sessions | The user has the report |
@@ -111,7 +111,7 @@ doesn't bring itself.
 When an import tool fails or isn't available, tell the user it failed and what the error was, in
 the tool's own words. Then stop. This holds for every one of them: `start_import_session`,
 `get_import_schema`, `set_column_mapping`, `dry_run_import`, `start_import`,
-the plan tools (`plan_migration`, `plan_questions`, `run_migration_plan`) and the opening tools
+the plan tools (`plan_migration`, `run_migration_plan`) and the opening tools
 (`set_opening_stock`, `set_opening_invoices`, `set_opening_balances`, `import_opening_stock`,
 `import_opening_invoices`, `import_opening_balances`).
 
@@ -210,7 +210,7 @@ The session keeps every step, so a migration can also continue in a later chat. 
 stands, read the user's sessions with `list_documents` on `FAC Import Session` (its `status`), and
 open one with `get_document`. Carry on from its status. Never start the file again. A file in a
 migration plan names it in `migration_plan`: the plan's id, the session of its first file, whose
-`plan_settings` hold the plan's status. `plan_questions` (while it's Planning) or
+`plan_settings` hold the plan's status. `dry_run_import` with `plan` (while it's Planning) or
 `run_migration_plan` (once it runs) carries on from there.
 
 ## Talking to the user

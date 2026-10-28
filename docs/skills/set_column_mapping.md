@@ -77,4 +77,4 @@ Once the user agrees the mapping, call `dry_run_import(session)` to check every 
 ## In a migration plan
 
 When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
-`plan_questions` gathers every question of the plan into one list. Map the columns you are sure of; leave the unsure ones for that list.
+`dry_run_import` with `plan` gathers every question of the plan into one list. Map the columns you are sure of; leave the unsure ones for that list.

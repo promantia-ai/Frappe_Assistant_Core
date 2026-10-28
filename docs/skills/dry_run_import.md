@@ -8,11 +8,15 @@ Data Import's own preview catches only bad links, options and dates. This catche
 
 Call it once the columns are mapped (`set_column_mapping`). Then call it again with the user's `fixes`: they are saved on the session and every row is checked again.
 
+For several files in a migration plan, pass `plan` instead of `session`: every file of the plan is checked and all the plan's questions come in one list (see **A whole migration plan**).
+
 ## Parameters
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `session` | string | **Yes** | The import session id |
+| `session` | string | **Yes**, unless `plan` | The import session id: one file |
+| `plan` | string | Instead of `session` | The migration plan id: every file of the plan is checked, and all its questions listed. See **A whole migration plan** |
+| `answers` | list of objects | No, with `plan` only | The user's answers to the plan's questions. Each has the `id` of its question. All apply, or none. |
 | `file_id` (or `file_url`) | string | No | When the session's file is just in the chat (Claude, ChatGPT): the same file on this site, uploaded in File Manager or attached in FAC Chat. Pass its **File ID** (its name in File Manager), or its URL; not both. The user must be allowed to read it. Or the user's **corrected file** of failed rows (see **After an import**). Its columns must match the session's. The mapping is kept. A **different** file puts back the rows left out before (`notice` says so). Never send it with `fixes`. |
 | `google_sheets_url` | string | No | For a session that came from a Google Sheet: the link again, when the user says they **fixed the sheet**. A fresh copy is checked; its columns must match, and the mapping is kept. Not with `file_id`, `file_url` or `fixes`. If the sheet didn't change, the session keeps its copy. |
 | `fixes` | array | No | The user's fixes for the last check's groups: `{group, action, to?, reason?}`. See **Fixing the groups**. |
@@ -312,7 +316,68 @@ messages and the like) arrive inside those tags too.
   how many more). Fix the ones listed and check again; the next ones then show. `masters_plan` lists at
   most 50 records (`masters_plan_total` when there are more).
 
-## In a migration plan
+## A whole migration plan
 
-When the session is in a migration plan (its `migration_plan` is set), don't ask the user here:
-`plan_questions` gathers every question of the plan into one list. The check counts the records the plan's earlier files will create, and a missing master is planned with the `create` fix (the plan creates it when it runs). A group `Comes from a later file` means the plan's order is wrong for that file.
+With `plan` (the plan id) instead of `session`, it checks every file of a **migration plan** again, in the plan's order, and lists every open question of the plan in one list, so the user answers everything before the one approval (`run_migration_plan`), and nothing asks again once the plan runs.
+
+Call it after `plan_migration`, and after mapping the files you were sure of. Show the questions, collect the answers, call it again with `plan` and `answers`. Repeat until `ready` is true. With `plan`, only `answers` go with it: `fixes`, a file and `failed_rows_file` are a single session's.
+
+When a session is in a migration plan (its `migration_plan` is set), don't ask the user about that one file: the plan's check gathers every question of the plan into one list. The check counts the records the plan's earlier files will create, and a missing master is planned with the `create` fix (the plan creates it when it runs). A group `Comes from a later file` means the plan's order is wrong for that file.
+
+### Questions
+
+Each question has `id`, `kind`, and for a file `session` and `file_name`.
+
+| `kind` | What it is | How to answer |
+|---|---|---|
+| `structure` | A file not mapped yet (`columns` lists its headers). | Map it yourself with `get_import_schema` and `set_column_mapping`, asking the user only where you are unsure; or set it up with `set_opening_stock`, `set_opening_invoices` or `set_opening_balances`. Not through `answers`. |
+| `order` | Two files link to each other. | Tell the user: one is imported with the linking columns left out. |
+| `fix` | Rows that would fail, with `explanation`, `fixes` (the engine's suggestion first) and, when a later file needs their records, `needed_by`. | `{id, action, ...}` as `dry_run_import` takes a fix: `map` with `to`, `leave_out` with an optional `reason`, `create` (with an optional `parent`) to have the plan create the missing record when it runs. |
+| `cut_off` | The plan has opening stock, invoices or balances: the cut-off date, asked of the user. `dates` shows the date each opening file is set up with; `choices` are those dates and `another_date`; `file_names_say` lists a file whose name gives another date (Closing Stock 30-Sep): show it, the user checks which is right. | Show it on the one card ("cut-off <date>"), so the user approves the date they see; never take it from a file name or today's date without showing it. If they give another date, or a file's date differs from theirs, set it again first (`set_opening_stock`, `set_opening_invoices`, `set_opening_balances`). Then `{id: "plan:cut_off", date: "YYYY-MM-DD"}`: refused, with nothing applied, unless every opening file has that date. |
+| `failure_rule` | What happens to rows that still fail when their file comes up. | `{id: "plan:failure_rule", rule: "leave_out"}` or `"stop"`. Suggest `leave_out`. |
+| `checking` / `blocked` | A file still being checked, or that can't be checked yet (`message` says why). | Ask again in a moment, or do what `message` says. |
+
+Ask once, with one card. The user is touched twice in a whole migration: the cut-off date at the
+start (`plan_migration`'s `opening_setup`; the company only when the site has more than one), then
+this card. `next` in the result says which of the steps below comes now.
+
+0. Show **`table`** as it is, the text inside its fence: first the plan, each file in its order with
+   what it imports and its `reason` (the user approves the order too); then **every** question with
+   its suggested answer, the cut-off date and the failure rule. Put it **in your message's text**
+   (never only in your thinking, which the user doesn't see) **and as the card's description**, so
+   the user sees it even when the message has no text. Add what `needed_by` says to that question's
+   row: "leaving it out also leaves out <needed_by>"; prefer a fix that keeps it.
+1. The suggested answer of a fix question is its `suggested`: the name it is most likely a
+   misspelling of (`likely`), else creating the missing record, else leaving the rows out.
+2. Then **one single-choice card** (`ask_user`, `single_select`, never `multi_select`), its
+   question one short line ("Apply these answers?"), with two
+   options: **"Apply all suggested answers and start (cut-off <date>)"** first, and **"Let me
+   change some"**. Never one option per answer: a card of checkboxes lets the user pick two
+   answers to one question (map it and create it).
+3. On "Apply all…": answer every question with its `suggested` (and the cut-off and failure rule
+   in the table), and once `ready` is true, call
+   `run_migration_plan` with the `approval` straight away: the user already said start. No
+   "Start the migration?" card after it.
+4. On "Let me change some": ask which, in their words or a card each, then apply all the answers
+   together and show the card again.
+5. A question with nothing to suggest (a value with no close match) gets its own single-choice
+   card in the same turn, with its options and "leave the row out".
+
+Don't write the questions as text for the user to type answers to, and don't ask about column
+mapping: map the columns yourself; a column you can't place is a row of the table.
+
+A row of opening stock or invoices whose item, customer or supplier an earlier file of the plan
+brings isn't a question: it is ready, and checked in full when its file comes up. Don't ask to
+create those records or to leave those rows out.
+
+### Result
+
+| Field | Description |
+|---|---|
+| `files` | The plan's files in order, with their status. |
+| `questions` | What is still open. A fix question has `suggested`: its answer on "Apply all". |
+| `table` | The plan's files in order and every question with its suggested answer, in markdown: show it in your message and as the card's description. |
+| `ready` | True when nothing is open and every file is Ready to Import: the plan is `Ready to Run`. Next: `run_migration_plan`. |
+| `approval` | Once ready: what `run_migration_plan` is given, exactly (files, rows, masters, `cut_off`, `decisions`). Its approval card shows the user every decision. |
+| `applied` | What the answers did. |
+| `next` | What to do now: the table and the one card, map the files first, or run straight away. |

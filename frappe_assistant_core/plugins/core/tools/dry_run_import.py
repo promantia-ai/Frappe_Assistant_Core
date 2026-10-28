@@ -12,16 +12,20 @@ Dry Run Import Tool for Core Plugin.
 Checks every row of an import session's file the way the real import would, and
 writes nothing. The full per-row result goes on the session; the model gets the
 grouped summary.
+
+Given a migration plan instead (#33995), it checks every file of the plan in its order and lists
+every open question of the plan in one list, with the user's answers applied in one call. Once
+nothing is left, the plan is Ready to Run.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import frappe
 from frappe import _
 
 from frappe_assistant_core.core.base_tool import BaseTool, exception_message, permission_error_result
 from frappe_assistant_core.utils import import_dry_run as dry_run
-from frappe_assistant_core.utils import import_failures, import_fixes
+from frappe_assistant_core.utils import import_failures, import_fixes, import_plan
 from frappe_assistant_core.utils.import_mapping import SESSION_DOCTYPE, load_session
 from frappe_assistant_core.utils.import_session import (
     FileProblem,
@@ -69,11 +73,35 @@ class DryRunImport(BaseTool):
             "back as file_id (or file_url), and is checked like any other. When the user fixed "
             "a Google Sheet the session came from, pass its google_sheets_url again: a fresh copy "
             "is checked, and the mapping is kept. For a session in a migration plan, records the "
-            "plan's earlier files create count as there, and the user's questions go through "
-            "plan_questions, not here."
+            "plan's earlier files create count as there, and the user's questions go through the "
+            "plan: pass plan instead of session. "
+            "With plan, it checks every file of a migration plan again, in the plan's order, and "
+            "lists every open question of the plan, so the user answers them all before one "
+            "approval: files still to map (kind structure), files that link to each other (order), "
+            "each group of rows that would fail with the fixes that fit it (fix), the cut-off date "
+            "of opening stock, invoices and balances (cut_off: ask the user, never guess it), and "
+            "what happens to rows that still fail when their file comes up (failure_rule). Ask "
+            "once: 'table' holds the plan's files in order with each one's reason, and every "
+            "question with its suggested answer; show it as it is in your message's text (never "
+            "only in your thinking: the user doesn't see it) and as the card's description, with "
+            "what needed_by says; then ONE single-choice card (ask_user single_select, never "
+            "multi_select): 'Apply all suggested answers and start (cut-off <date>)' or 'Let me "
+            "change some'. 'Apply all' answers each fix question with its 'suggested'. A question "
+            "with nothing suggested gets its own single-choice card. Never questions as text to "
+            "type answers to. Map files yourself where you are sure. Then call again with plan and "
+            "answers: [{id, ...}], a fix's fields as fixes take them (action map/leave_out/"
+            "create...; create plans a missing record that the plan creates when it runs), {id: "
+            "'plan:cut_off', date}, or {id: 'plan:failure_rule', rule}. All answers apply or none. "
+            "When ready is true, the plan is Ready to Run: next run_migration_plan, given approval "
+            "exactly."
         )
         self.requires_permission = None  # checked on the session and the target DocType
-        # what the user's file says reaches the model fenced (#34003)
+        # What the user's file says reaches the model fenced (#34003). A plan's check fences what
+        # the files say: their names, columns and values. FAC's own directions in a question's
+        # message are not (#34438). A fix question's message is ERPNext's refusal quoting the file;
+        # an order, waiting or blocked one names the files. Each decision line of the approval is
+        # fenced on its own, so it is still a list of lines run_migration_plan is given back (it
+        # takes them with or without their fence).
         self.untrusted_fields = (
             "groups",
             "masters_plan",
@@ -82,12 +110,38 @@ class DryRunImport(BaseTool):
             "applied",
             "update",
             "error",
+            "questions[kind=fix].message",
+            "questions[kind=order].message",
+            "questions[kind=waiting].message",
+            "questions[kind=blocked].message",
+            "questions[kind=fix].explanation",
+            "questions[kind=fix].fixes",
+            "questions[kind=fix].suggested",
+            "questions[].file_name",
+            "questions[].columns",
+            "questions[].dates",
+            "questions[].file_names_say",
+            "questions[].needed_by",
+            "files[].file_name",
+            "files[].reason",
+            "approval.decisions[]",
+            "table",
         )
 
         self.inputSchema = {
             "type": "object",
             "properties": {
-                "session": {"type": "string", "description": "The import session id"},
+                "session": {"type": "string", "description": "The import session id: one file"},
+                "plan": {
+                    "type": "string",
+                    "description": "Instead of session: the migration plan id, to check every file of "
+                    "the plan and list all its questions",
+                },
+                "answers": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "With plan: the user's answers, each with the id of its question.",
+                },
                 "file_id": {
                     "type": "string",
                     "description": "When the session's file is just in the chat: the ID of the same "
@@ -131,11 +185,29 @@ class DryRunImport(BaseTool):
                     },
                 },
             },
-            "required": ["session"],
+            "required": [],  # session or plan: execute says which is missing
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         session_name = arguments.get("session")
+        plan_name = arguments.get("plan")
+        if bool(session_name) == bool(plan_name):
+            return {
+                "success": False,
+                "error": _(
+                    "Give session to check one file, or plan to check every file of a migration plan: "
+                    "session or plan, one of them."
+                ),
+            }
+        if plan_name:
+            return self._check_plan(plan_name, arguments)
+        if arguments.get("answers"):
+            return {
+                "success": False,
+                "error": _(
+                    "answers are a plan's: pass plan with them. A session takes its choices as fixes."
+                ),
+            }
         # Clients fill optional inputs in, so an empty list means no fixes, as a missing one does.
         fixes = arguments.get("fixes") or None
         file_id = (arguments.get("file_id") or "").strip()
@@ -240,6 +312,52 @@ class DryRunImport(BaseTool):
             result["notice"] = notice
         return result
 
+    def _check_plan(self, plan_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Every open question of the migration plan, its files checked again first, or the user's
+        answers applied to them."""
+        given = [
+            name
+            for name in ("fixes", "file_id", "file_url", "google_sheets_url", "failed_rows_file")
+            if arguments.get(name)
+        ]
+        if given:
+            return {
+                "success": False,
+                "error": _(
+                    "{0} is for one file's session, not a plan: check the plan with its answers only."
+                ).format(", ".join(given)),
+            }
+        answers = arguments.get("answers") or []
+        if not isinstance(answers, list):
+            return {"success": False, "error": _("answers must be a list.")}
+        try:
+            plan = import_plan.load_plan(plan_name)
+        except frappe.DoesNotExistError:
+            return {"success": False, "error": _("Migration plan '{0}' not found.").format(plan_name)}
+        except frappe.PermissionError as e:
+            return permission_error_result(import_plan.SESSION_DOCTYPE, exception_message(e), name=plan_name)
+        if plan.status not in import_plan.OPEN:
+            return {
+                "success": False,
+                "error": _("Plan {0} is {1}: it has no questions left.").format(plan.name, _(plan.status)),
+            }
+        applied = []
+        try:
+            applied = import_plan.apply_answers(plan, answers) if answers else []
+            plan.reload()
+            result = import_plan.open_questions(plan)
+        except import_fixes.FixProblems as e:
+            return _failed(str(e), applied, problems=e.problems)
+        except (import_plan.PlanProblem, import_fixes.FixProblem) as e:
+            return _failed(str(e), applied)
+        except Exception as e:
+            frappe.log_error(title=_("Plan Check Error"), message=frappe.get_traceback())
+            return _failed(exception_message(e), applied)
+        if applied:
+            result["applied"] = applied
+        result["next"] = _next(result, bool(answers))
+        return {"success": True, **result}
+
     @staticmethod
     def _running(session, applied=None, notice=None) -> Dict[str, Any]:
         progress = frappe.parse_json(session.progress or "{}") or {}
@@ -275,6 +393,44 @@ def _same_content(file_a: str, file_b: str) -> bool:
         return True
     hashes = [frappe.db.get_value("File", name, "content_hash") for name in (file_a, file_b)]
     return bool(hashes[0]) and hashes[0] == hashes[1]
+
+
+def _failed(error: str, applied: List[Any], **extra) -> Dict[str, Any]:
+    """A refusal. Answers apply_answers already applied stay applied (it releases its savepoint),
+    so the reply says so, not that nothing changed (#34438)."""
+    reply = {"success": False, "error": error, **extra}
+    if applied:
+        reply["applied"] = applied
+        reply["error"] = (
+            error
+            + " "
+            + _(
+                "The answers listed in applied were applied before this; call dry_run_import with the plan again."
+            )
+        )
+    return reply
+
+
+def _next(result: Dict[str, Any], answered: bool) -> str:
+    """What to do with the result: FACO otherwise asks again what the one card already asked."""
+    if result.get("ready") and answered:
+        return (
+            "If the user chose 'Apply all suggested answers and start', call run_migration_plan now "
+            "with approval exactly: they already said start, ask nothing more."
+        )
+    if result.get("ready"):
+        return (
+            "Show approval.decisions as a table in your message, then ONE ask_user single_select: "
+            "'Start the migration (cut-off <date>)' or 'Not yet'."
+        )
+    if any(q.get("kind") in ("checking", "structure") for q in result.get("questions") or []):
+        return "Map or wait for the files the questions name, then call dry_run_import with the plan again."
+    return (
+        "Show 'table' as it is (the text inside its fence) in your message, and as the ask_user "
+        "card's description: the user can't choose on questions they haven't seen. Then ONE "
+        "ask_user single_select: 'Apply all suggested answers and start (cut-off <date>)' or 'Let "
+        "me change some'. No other card. 'Apply all' answers each fix question with its 'suggested'."
+    )
 
 
 # Make sure class name matches file name for discovery

@@ -5,7 +5,7 @@ every file in order in the background. Nothing asks the user again.
 
 ## When to use
 
-Only when `plan_questions` says `ready: true` (the plan is `Ready to Run`) and the user approves.
+Only when `dry_run_import` with `plan` says `ready: true` (the plan is `Ready to Run`) and the user approves.
 
 ## Inputs
 
@@ -18,7 +18,7 @@ Only when `plan_questions` says `ready: true` (the plan is `Ready to Run`) and t
 | `cut_off` | string | Yes | The cut-off date of its opening files, `""` when it has none. |
 | `decisions` | list of strings | Yes | Every decision of the plan, one line each: the records it creates, each fix ("Customer Group 'Retal' → 'Retail'"), rows left out, a file name whose date isn't the cut-off, and the failure rule. |
 
-Pass `plan_questions`' last `approval` exactly. The approval card shows it, so the user reads
+Pass the plan check's last `approval` (`dry_run_import` with `plan`) exactly. The approval card shows it, so the user reads
 every decision and the cut-off date before anything is imported. If it isn't what the plan would
 do now, nothing runs and the reply's `approval` is what to pass.
 

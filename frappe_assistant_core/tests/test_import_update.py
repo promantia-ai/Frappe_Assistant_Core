@@ -612,7 +612,7 @@ class TestUpdateInAPlan(UpdateCase):
         plan = self._run("plan_migration", {"sessions": [session], "failure_rule": "leave_out"})["result"]
         plan = plan["plan"]
         answers = [{"id": "plan:failure_rule", "rule": "leave_out"}]
-        ready = self._run("plan_questions", {"plan": plan, "answers": answers})["result"]
+        ready = self._run("dry_run_import", {"plan": plan, "answers": answers})["result"]
         self.assertTrue(ready["ready"], ready)
         figures = {"plan": plan, **import_plan.card_figures(import_plan.get_plan(plan))}
 

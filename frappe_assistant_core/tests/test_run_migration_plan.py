@@ -63,13 +63,13 @@ class TestRunMigrationPlan(ImportRunCase):
             "plan"
         ]
         answered = self._run(
-            "plan_questions", {"plan": plan, "answers": [{"id": "plan:failure_rule", "rule": rule}]}
+            "dry_run_import", {"plan": plan, "answers": [{"id": "plan:failure_rule", "rule": rule}]}
         )["result"]
         self.assertTrue(answered["ready"], answered)
         return plan, groups, items
 
     def _approve(self, plan, **changes):
-        # what plan_questions hands FACO for the approval card, with the changes a test makes to it
+        # what dry_run_import's plan check hands FACO for the approval card, with the changes a test makes to it
         figures = {"plan": plan, **import_plan.card_figures(import_plan.get_plan(plan)), **changes}
         with self._each_row_commits():
             return self._run("run_migration_plan", figures)
@@ -89,7 +89,7 @@ class TestRunMigrationPlan(ImportRunCase):
         )
 
     def test_the_decisions_are_taken_back_in_their_fence(self):
-        # plan_questions fences each decision line, as it quotes the files (#34438): passed back
+        # the plan check fences each decision line, as it quotes the files (#34438): passed back
         # as the model read them, they are still the approval
         from frappe_assistant_core.utils.untrusted_output import fence_fields
 
@@ -388,7 +388,7 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
             "data": {"customer_group_name": name, "parent_customer_group": "All Customer Groups"},
         }
         set_plan(plan, masters=frappe.as_json([entry]))
-        self.assertTrue(self._run("plan_questions", {"plan": plan})["result"]["ready"])
+        self.assertTrue(self._run("dry_run_import", {"plan": plan})["result"]["ready"])
 
         response = self._approve(plan)
 
@@ -453,7 +453,7 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
             ),
         )
         # A new master changes what the files are checked against: they are checked again first.
-        self.assertTrue(self._run("plan_questions", {"plan": plan})["result"]["ready"])
+        self.assertTrue(self._run("dry_run_import", {"plan": plan})["result"]["ready"])
 
         with patch.object(
             import_plan.frappe,
@@ -477,7 +477,7 @@ class TestARunThatGoesWrong(TestRunMigrationPlan):
 
 @unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Brand")
 class TestAPlanWithALargeFile(ImportRunCase):
-    """A file over BACKGROUND_ROWS passes plan_questions in the background, so the plan job's own
+    """A file over BACKGROUND_ROWS passes the plan check in the background, so the plan job's own
     re-check, already in the background, must not refuse it (#34427). Brand: a master with no
     links, cheap to insert."""
 
@@ -496,7 +496,7 @@ class TestAPlanWithALargeFile(ImportRunCase):
         return plan, session
 
     def _ready(self, plan, rows):
-        """plan_questions as the user meets it: a file over 500 rows is checked in a background
+        """The plan check as the user meets it: a file over 500 rows is checked in a background
         job, run here at once, then asked again."""
         user = frappe.session.user
 
@@ -507,11 +507,11 @@ class TestAPlanWithALargeFile(ImportRunCase):
         with self._each_row_commits(), patch.object(
             import_dry_run, "enqueue", side_effect=check_now
         ) as queued:
-            ready = self._run("plan_questions", {"plan": plan, "answers": answers})["result"]
+            ready = self._run("dry_run_import", {"plan": plan, "answers": answers})["result"]
             if rows > import_dry_run.BACKGROUND_ROWS:
                 self.assertFalse(ready["ready"], ready)
                 queued.assert_called_once()
-                ready = self._run("plan_questions", {"plan": plan})["result"]
+                ready = self._run("dry_run_import", {"plan": plan})["result"]
             else:
                 queued.assert_not_called()
         self.assertTrue(ready["ready"], ready)
@@ -571,7 +571,7 @@ class TestAPlanWithALargeFile(ImportRunCase):
         with patch.object(
             import_dry_run, "check_cost", return_value=import_dry_run.BACKGROUND_ROWS + 1
         ), patch.object(import_dry_run, "enqueue") as queued:
-            asked = self._run("plan_questions", {"plan": plan, "answers": answers})["result"]
+            asked = self._run("dry_run_import", {"plan": plan, "answers": answers})["result"]
 
         queued.assert_called_once()
         self.assertIn("checking", [q["kind"] for q in asked["questions"]])
@@ -627,18 +627,18 @@ class TestAPlanThatIsStartedOrEnded(ImportRunCase):
 
     # -- an open path never overwrites a run ------------------------------------------------
 
-    def test_plan_questions_overlapping_the_start_leaves_the_run_alone(self):
+    def test_a_plan_check_overlapping_the_start_leaves_the_run_alone(self):
         plan, _groups, _items = self._ready_plan()
         real = import_plan.arrange
         started = {}
 
         def start_meanwhile(plan_doc):
-            if not started:  # the plan_questions that loaded it Ready to Run is still working
+            if not started:  # the plan check that loaded it Ready to Run is still working
                 started.update(self._start(plan))
             return real(plan_doc)
 
         with patch.object(import_plan, "arrange", side_effect=start_meanwhile):
-            response = self._run("plan_questions", {"plan": plan})
+            response = self._run("dry_run_import", {"plan": plan})
 
         self.assertFalse(response["success"], response)
         self.assertIn("Running", str(response))
