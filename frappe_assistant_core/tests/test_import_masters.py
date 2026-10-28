@@ -43,7 +43,7 @@ class TestImportMasters(BaseAssistantTest):
         super().setUp()
         frappe.set_user("Administrator")
         self.registry = get_tool_registry()
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.tag = frappe.generate_hash(length=6)
         self.group = f"Wholesale {self.tag}"
         self.territory = f"North {self.tag}"
@@ -52,9 +52,7 @@ class TestImportMasters(BaseAssistantTest):
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        # The transaction rollback removes File rows but not the files on disk.
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     # -- helpers -----------------------------------------------------------------------

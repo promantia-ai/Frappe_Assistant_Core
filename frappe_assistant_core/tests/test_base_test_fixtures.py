@@ -9,16 +9,39 @@
 """The shared test fixtures hold on every site the suite runs on (#34430): Frappe v15 and v16,
 with or without India Compliance. A fixture that only works on one of them fails here first."""
 
+import importlib
+import os
 import unittest
 from unittest.mock import patch
 
 import frappe
 from frappe.model.meta import Meta
+from frappe.query_builder import DocType
 
 from frappe_assistant_core.tests.base_test import NO_RIGHTS_ROLE, BaseAssistantTest, item_hsn_fields
 
 # Doctypes the "someone else" users of the import tests must not touch.
 GUARDED = ("Customer", "Supplier", "Customer Group", "Item", "Role", "Data Import")
+
+# The test cases that delete the Files they made, in their tearDown (#34606).
+FILE_CLEANING_CASES = (
+    "test_apply_import_preset.PresetToolCase",
+    "test_import_dry_run.TestDryRunImport",
+    "test_import_file_intake.TestFileIntake",
+    "test_import_file_intake.TestFileIntakeImport",
+    "test_import_fixes.TestImportFixes",
+    "test_import_google_sheet.TestStartFromGoogleSheet",
+    "test_import_google_sheet.TestCheckGoogleSheetAgain",
+    "test_import_mapping.ImportToolTestCase",
+    "test_import_masters.TestImportMasters",
+    "test_import_opening_balances.OpeningBalancesCase",
+    "test_import_opening_invoices.OpeningInvoicesCase",
+    "test_import_opening_stock.OpeningStockCase",
+    "test_import_plan.ImportPlanCase",
+    "test_import_run.ImportRunCase",
+    "test_import_session.TestImportSession",
+    "test_import_tally_xml.XmlCase",
+)
 
 
 class TestTheThrowawayUser(BaseAssistantTest):
@@ -89,3 +112,75 @@ class TestTheItemFixture(BaseAssistantTest):
 
         with patch.object(Meta, "has_field", autospec=True, side_effect=has_field):
             self.assertEqual(item_hsn_fields(), {})
+
+
+class TestTheTestsLeaveOtherFiles(BaseAssistantTest):
+    """The suite runs on a dev or demo site while people use it: a test deletes only its own Files."""
+
+    def _upload_elsewhere(self, name: str) -> None:
+        """A user's upload, committed by another process while a test runs. Not through File's
+        insert: a test notes the Files inserted in its own process."""
+        file_name = f"{name}.csv"
+        with open(frappe.get_site_path("private", "files", file_name), "w") as f:
+            f.write("Customer Name\nA real customer\n")
+        file, now = DocType("File"), frappe.utils.now()
+        with self.secondary_connection():
+            frappe.qb.into(file).columns(
+                file.name,
+                file.file_name,
+                file.file_url,
+                file.is_private,
+                file.folder,
+                file.owner,
+                file.modified_by,
+                file.creation,
+                file.modified,
+            ).insert(
+                name,
+                file_name,
+                f"/private/files/{file_name}",
+                1,
+                "Home",
+                "Administrator",
+                "Administrator",
+                now,
+                now,
+            ).run()
+            frappe.db.sql("commit")  # commit() does nothing in these tests
+
+    def _remove_elsewhere(self, name: str, path: str) -> None:
+        file = DocType("File")
+        with self.secondary_connection():
+            frappe.qb.from_(file).delete().where(file.name == name).run()
+            frappe.db.sql("commit")
+        if os.path.exists(path):
+            os.remove(path)
+
+    def test_no_import_test_deletes_a_file_uploaded_while_it_runs(self):
+        # #34606: each took a snapshot of every File on the site in setUp and deleted the rest in
+        # tearDown, so a user's upload meanwhile lost its file on disk.
+        for case_path in FILE_CLEANING_CASES:
+            module, class_name = case_path.rsplit(".", 1)
+            # Imported here, so the runner doesn't collect the cases' own tests into this module.
+            case_class = getattr(importlib.import_module(f"frappe_assistant_core.tests.{module}"), class_name)
+            if getattr(case_class, "__unittest_skip__", False):
+                continue
+            with self.subTest(case=case_path):
+                name = f"fac-34606-{frappe.generate_hash(length=8)}"
+                path = frappe.get_site_path("private", "files", f"{name}.csv")
+                case = case_class()
+                try:
+                    case.setUp()
+                    self._upload_elsewhere(name)
+                    # An import rolls back on the way (import_run, import_dry_run), and from then
+                    # on the test reads what others committed: the upload too.
+                    frappe.db.rollback()
+                    case.tearDown()
+
+                    self.assertTrue(frappe.db.exists("File", name))
+                    self.assertTrue(os.path.exists(path))
+                finally:
+                    case.doCleanups()
+                    frappe.db.rollback()
+                    self._remove_elsewhere(name, path)
+                    frappe.set_user("Administrator")

@@ -28,7 +28,7 @@ class OpeningStockCase(BaseAssistantTest):
         self.tag = frappe.generate_hash(length=6)
         self.company = frappe.get_all("Company", pluck="name", order_by="creation", limit=1)[0]
         self.abbr = frappe.db.get_value("Company", self.company, "abbr")
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.temporary = self._temporary_account()
         self.stores = self._warehouse(f"OS Stores {self.tag}")
         self.shop = self._warehouse(f"OS Shop {self.tag}")
@@ -38,8 +38,7 @@ class OpeningStockCase(BaseAssistantTest):
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     # -- fixtures ------------------------------------------------------------------------
