@@ -1735,8 +1735,10 @@ def fingerprint(session, file_doc) -> str:
 
 #: What other steps keep in template_options that no check reads: the plan and result a removed
 #: undo feature left on older sessions (key "undo"), and the failures of the last opening invoices import (reset as an
-#: import starts). The records an import made stay in: the check leaves those rows out.
-_NOT_CHECKED = {"undo": None, "opening_invoices": ("failed",)}
+#: import starts). The records an import made stay in: the check leaves those rows out. And the
+#: fingerprint the session's last fixes left it at (UNCHECKED_FIXES, import_fixes.fixed_unchecked).
+UNCHECKED_FIXES = "unchecked_fixes"
+_NOT_CHECKED = {"undo": None, "opening_invoices": ("failed",), UNCHECKED_FIXES: None}
 
 
 def _checked_options(session) -> Dict[str, Any]:
