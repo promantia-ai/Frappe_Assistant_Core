@@ -304,22 +304,22 @@ class StartImportSession(BaseTool):
                 reused = engine_write(reused)
                 reused.target_doctype = target_doctype
                 reused.save()
+            note = _(
+                "This file already has an open import session in this chat, {0} ({1}): carry on "
+                "with it. To start over, give another sheet or header_row."
+            ).format(reused.name, _(reused.status))
             return {
                 "success": True,
                 "session_id": reused.name,
                 "reused": True,
                 "file_name": file_doc.file_name,
-                "sheet": chosen.name,
+                **_sheet_fields(chosen, sheets),
                 "columns": chosen.columns,
                 "row_count": chosen.row_count,
                 "sample_rows": chosen.sample_rows,
-                "sheets": [s.as_dict() for s in sheets],
                 "target_doctype": reused.target_doctype,
                 "status": reused.status,
-                "note": _(
-                    "This file already has an open import session in this chat, {0} ({1}): carry on "
-                    "with it. To start over, give another sheet or header_row."
-                ).format(reused.name, _(reused.status)),
+                "note": note,
             }
 
         copy = None
@@ -338,11 +338,10 @@ class StartImportSession(BaseTool):
             "success": True,
             "session_id": session.name,
             "file_name": file_doc.file_name,
-            "sheet": chosen.name,
+            **_sheet_fields(chosen, sheets),
             "columns": chosen.columns,
             "row_count": chosen.row_count,
             "sample_rows": chosen.sample_rows,  # for the assistant to show; never stored
-            "sheets": [s.as_dict() for s in sheets],
             "target_doctype": target_doctype,
             "status": session.status,
         }
@@ -892,6 +891,15 @@ def _dropped_text(dropped: Dict[str, int]) -> str:
     return _("Removed rows: {0}.").format(", ".join(parts)) if parts else _("No rows removed.")
 
 
+def _sheet_fields(chosen, sheets) -> Dict[str, Any]:
+    """The sheet read and, for a workbook of several, every sheet. A CSV's one sheet has no name,
+    and its columns and row count are the reply's own already."""
+    fields = {"sheet": chosen.name} if chosen.name else {}
+    if len(sheets) > 1:
+        fields["sheets"] = [s.as_dict() for s in sheets]
+    return fields
+
+
 def _preset_arguments_problem(arguments: Dict[str, Any]) -> Optional[str]:
     """Why the preset inputs can't be used, or None. The framework's schema check refuses most of
     these first; a list holding a name that is not a string passes it."""
@@ -904,11 +912,6 @@ def _preset_arguments_problem(arguments: Dict[str, Any]) -> Optional[str]:
     if parts is not None and not (isinstance(parts, list) and all(isinstance(p, str) for p in parts)):
         return _("parts must be a list of part names")
     return None
-
-
-def _dropped_text(dropped: Dict[str, int]) -> str:
-    parts = [f"{count} {reason.replace('_', ' ')}" for reason, count in dropped.items() if count]
-    return _("Removed rows: {0}.").format(", ".join(parts)) if parts else _("No rows removed.")
 
 
 # Make sure class name matches file name for discovery

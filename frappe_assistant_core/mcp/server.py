@@ -439,11 +439,14 @@ class MCPServer:
                 image_content = result.pop("_image_content", None)
 
             # The user's file content, fenced so the model reads it as data (#34003).
-            if isinstance(result, dict) and tool.get("untrustedFields"):
-                from frappe_assistant_core.utils.untrusted_output import fence_fields
+            if isinstance(result, dict):
+                from frappe_assistant_core.utils.untrusted_output import fence_fields, with_notice
 
-                fenced = [f for f in tool["untrustedFields"] if not (own_message and f == "error")]
-                result = fence_fields(result, fenced)
+                if tool.get("untrustedFields"):
+                    fenced = [f for f in tool["untrustedFields"] if not (own_message and f == "error")]
+                    result = fence_fields(result, fenced)
+                # once per reply, for its fields and the records get_document fenced itself
+                result = with_notice(result)
 
             # Serialize the text result (default=str handles datetime, Decimal, etc.)
             if isinstance(result, str):

@@ -86,13 +86,15 @@ export function isTextList(value) {
  * record identity key (`data.name` on an update) is kept as `new_<key>`.
  */
 // A value the server fenced as file content (untrusted_output.py), passed back by the model as it
-// read it: the card shows the file's text, not the fence's tags and preamble (#34438).
+// read it: the card shows the file's text, not the fence's tags and preamble (#34438). A fence is
+// just its tags now, the reply saying the preamble once; one with it inside is still read.
 const FENCED = /^\s*<import_file_content>\n[^\n]*\n([\s\S]*)\n<\/import_file_content>\s*$/;
+const TAGS_ONLY = /^\s*<import_file_content>([\s\S]*)<\/import_file_content>\s*$/;
 
 function unfenced(value) {
 	if (Array.isArray(value)) return value.map(unfenced);
 	if (typeof value !== "string") return value;
-	const match = FENCED.exec(value);
+	const match = FENCED.exec(value) || TAGS_ONLY.exec(value);
 	return match ? match[1] : value;
 }
 

@@ -53,7 +53,6 @@ Supported files: `.csv`, `.xlsx`, `.xls`, and a Tally XML masters export (`.xml`
   "columns": ["Customer Name", "Customer Group", "Territory"],
   "row_count": 15,
   "sample_rows": [["Grant Plastics", "Commercial", "India"]],
-  "sheets": [{"name": "Customers", "columns": ["Customer Name", "Customer Group", "Territory"], "row_count": 15}],
   "target_doctype": null,
   "status": "File Read"
 }
@@ -62,6 +61,7 @@ Supported files: `.csv`, `.xlsx`, `.xls`, and a Tally XML masters export (`.xml`
 With headings below a title row, the reply also has `"header_row": 3` and a `note` saying so.
 
 - `sample_rows` (up to 10) come back so you can show the user what was read. They are text the way Data Import will read it: dates as `YYYY-MM-DD`, whole numbers without `.0`. A cell longer than 200 characters is cut, ending in `…`; the file keeps it whole. They are **not stored** on the session. `row_count` skips blank rows.
+- `sheet` is the sheet that was read; a CSV has none. `sheets` appears only for a workbook of several sheets: each one's name, columns and row count.
 - `header_row` appears when the headings aren't on row 1. Later replies (dry run, failures, import) count rows from the heading row: row 2 is the first row under the headings. Tell the user once.
 - `note` appears when the headings aren't on row 1, when the file isn't UTF-8 (it names the encoding it was read in: ask the user to check that the accented letters in the sample rows look right), or when other sheets of a workbook also have rows (their names are in `other_sheets`). Only one sheet is used per session. For a Google Sheets link, it says that only one tab was read: to import another tab, the user opens it and copies the link again.
 

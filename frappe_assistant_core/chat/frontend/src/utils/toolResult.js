@@ -81,11 +81,12 @@ function plainText(text) {
 
 /** One short sentence saying why a step failed, or "" when there is nothing safe to show. */
 // An error a tool fenced as file content (untrusted_output.py): its text is the reason, not the
-// fence's tag and preamble (#34550).
+// fence's tag and preamble (#34550). A fence of just its tags, without the preamble, too.
 const FENCED = /^\s*<([a-z_]+)>\n[^\n]*\n([\s\S]*?)\n<\/\1>\s*$/;
+const TAGS_ONLY = /^\s*<([a-z_]+)>([\s\S]*)<\/\1>\s*$/;
 
 function unfenced(text) {
-	const match = FENCED.exec(text);
+	const match = FENCED.exec(text) || TAGS_ONLY.exec(text);
 	return match ? match[2] : text;
 }
 
