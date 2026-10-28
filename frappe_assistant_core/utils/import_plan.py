@@ -32,6 +32,7 @@ from frappe import _
 from frappe.utils import add_months, cint, cstr, get_datetime, get_last_day, getdate, now_datetime, today
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import plan_runner
 from frappe_assistant_core.utils.untrusted_output import unfenced
 
 SESSION_DOCTYPE = dry_run.SESSION_DOCTYPE
@@ -255,6 +256,21 @@ def _created_names(session) -> List[str]:
     ]
 
 
+def _created_old_ids(session) -> List[str]:
+    """The old IDs of the records the session's last check creates (#34244): a later file of the plan
+    refers to them by those IDs before the records, and so their names, exist."""
+    from frappe_assistant_core.utils import import_key_setup, import_run
+
+    keys = import_key_setup.keys_by_row(session)
+    if not keys:
+        return []
+    return [
+        keys[row["row"]]
+        for row in import_run._checked_rows(session)
+        if row.get("status") in ("ready", "failed") and row.get("row") in keys
+    ]
+
+
 def masters(plan) -> List[Dict[str, Any]]:
     """The records the plan creates before any file is imported."""
     return frappe.parse_json(plan.masters or "[]") or []
@@ -315,7 +331,7 @@ def _names(sessions: List[Any], plan=None) -> Dict[str, Dict[str, str]]:
     for session in sessions:
         if session.status in IMPORTED:  # its records are in ERPNext now, or genuinely missing
             continue
-        for name in _created_names(session):
+        for name in _created_names(session) + _created_old_ids(session):
             names.setdefault(session.target_doctype, {}).setdefault(
                 name.strip().casefold(), session.file_name
             )
@@ -442,10 +458,46 @@ def _engine_rank(session) -> int:
     return {None: 0, stock: 1, invoices: 2, balances: 3}.get(engine, 3)
 
 
+#: A delta run's order among files free to go (M-D6): new masters, stock movements, delivery notes and
+#: purchase receipts, invoices, payments, journals, so a document comes after the ones it refers to.
+DELTA_RANK = {
+    "Stock Entry": 1,
+    "Delivery Note": 2,
+    "Purchase Receipt": 2,
+    "Sales Invoice": 3,
+    "Purchase Invoice": 3,
+    "Payment Entry": 4,
+    "Journal Entry": 5,
+}
+
+
+def delta_since(session) -> Optional[str]:
+    """The cut-off of the delta run ``session``'s plan is, or None when its plan isn't one (#34420)."""
+    plan = session.get("migration_plan")
+    if not plan:
+        return None
+    try:
+        return _progress(get_plan(plan)).get("delta_since") or None
+    except frappe.DoesNotExistError:
+        return None
+
+
+def refuse_in_delta(session) -> None:
+    """A delta run never posts an opening entry: the opening engines refuse a file of one (M-D5)."""
+    if delta_since(session):
+        raise dry_run.DryRunProblem(
+            _(
+                "{0} is part of a delta run, which brings in what happened after the cut-off. An opening "
+                "file would post an opening entry again: leave it out."
+            ).format(session.file_name)
+        )
+
+
 def order(sessions: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """The sessions in the order they are imported, each with its position and the reason, and a
     problem for every pair of files that link to each other. Among files free to go, the one given
     first goes first."""
+    delta = bool(sessions) and bool(delta_since(sessions[0]))
     plain = [s for s in sessions if not _engine_rank(s)]
     opening = sorted((s for s in sessions if _engine_rank(s)), key=_engine_rank)
 
@@ -456,23 +508,17 @@ def order(sessions: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
             other for other in plain if other.name != session.name and other.target_doctype in wanted
         ]
 
-    ordered, placed, problems = [], set(), []
-    waiting = list(plain)
-    while waiting:
-        free = next((s for s in waiting if all(o.name in placed for o in needs[s.name])), None)
-        if free is None:  # every file left waits on another: they link to each other
-            first = waiting[0]
-            other = next(o for o in needs[first.name] if o.name not in placed)
-            problems.append(
-                _(
-                    "{0} and {1} link to each other: map the linking columns of one to Don't Import "
-                    "(and import them later), or set the order with plan_migration's order."
-                ).format(first.file_name, other.file_name)
-            )
-            free = first
-        waiting.remove(free)
-        placed.add(free.name)
-        before = needs[free.name]
+    in_order, cycles = plan_runner.topological(
+        plain, needs, rank=(lambda s: DELTA_RANK.get(s.target_doctype, 0)) if delta else None
+    )
+    # every file left waits on another: they link to each other
+    each_other = _(
+        "{0} and {1} link to each other: map the linking columns of one to Don't Import "
+        "(and import them later), or set the order with plan_migration's order."
+    )
+    problems = [each_other.format(first.file_name, other.file_name) for first, other in cycles]
+    ordered = []
+    for free, before in in_order:
         if before:
             reason = _("After {0}: it needs the {1} records from there.").format(
                 ", ".join(o.file_name for o in before),
@@ -608,6 +654,7 @@ def open_questions(plan) -> Dict[str, Any]:
             first_unchecked = session.file_name
         questions += asked
     progress = frappe.parse_json(plan.progress or "{}") or {}
+    questions += _recipe_questions(progress)
     dates = cut_offs(children(plan))
     said = name_dates(children(plan)) if dates else {}
     if dates and not (len(set(dates.values())) == 1 and progress.get("cut_off") in dates.values()):
@@ -662,6 +709,32 @@ def open_questions(plan) -> Dict[str, Any]:
     if ready:  # what run_migration_plan is given, so its approval card shows it
         result["approval"] = card_figures(plan)
     return result
+
+
+RECIPE_PREFIX = "recipe:new:"
+
+
+def _recipe_questions(progress: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """What a recipe run found new on its files (a column, a column gone, a field not on this site),
+    until the user answers each (#34420 RC-3). A plan that isn't from a recipe has none."""
+    recipe = progress.get("recipe") or {}
+    answered = set(recipe.get("answered") or [])
+    return [q for q in recipe.get("questions") or [] if q["id"] not in answered]
+
+
+def _answer_recipe(plan, ids: List[str]) -> List[str]:
+    """Mark the recipe questions in ``ids`` as answered. Raises PlanProblem for one the plan doesn't have."""
+    progress = _progress(plan)
+    recipe = progress.get("recipe") or {}
+    known = {q["id"] for q in recipe.get("questions") or []}
+    for question in ids:
+        if question not in known:
+            raise PlanProblem(_("There is no question {0} in this plan.").format(question))
+    recipe["answered"] = sorted({*(recipe.get("answered") or []), *ids})
+    progress["recipe"] = recipe
+    plan.progress = frappe.as_json(progress)
+    plan.log_step("Questions", "Success", _("Recipe: {0} answered.").format(len(ids)))
+    return [_("Recipe question answered: {0}.").format(question) for question in ids]
 
 
 def suggested_fix(question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -794,6 +867,7 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
     files = {session.name: session for session in children(plan)}
     fixes: Dict[str, List[Dict[str, Any]]] = {}
     rule = cut_off = None
+    recipe_answers: List[str] = []
     for answer in answers:
         if not isinstance(answer, dict):
             raise PlanProblem(_("Each answer is an object with the id of its question."))
@@ -801,6 +875,10 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
         if question == CUT_OFF_ID:
             _check_keys(question, answer, ("date",))
             cut_off = as_date(answer.get("date"))
+            continue
+        if question.startswith(RECIPE_PREFIX):
+            _check_keys(question, answer, ("ok",))
+            recipe_answers.append(question)
             continue
         if question == FAILURE_RULE_ID:
             # failure_rule is the plan's own name for it, which FACO sends too (#34547)
@@ -836,6 +914,10 @@ def apply_answers(plan, answers: List[Dict[str, Any]]) -> List[str]:
             done += import_fixes.apply_fixes(session, import_fixes.last_groups(session), session_fixes)
             session.save()
         plan.require_open()  # not after the plan started: its files' fixes roll back with the savepoint
+        if recipe_answers:
+            plan.reload()
+            done += _answer_recipe(plan, recipe_answers)
+            plan.save_open()
         if rule or cut_off:
             plan.reload()
             progress = _progress(plan)
@@ -912,7 +994,7 @@ MASTERS_SAVEPOINT = "fac_plan_masters"
 
 
 def _progress(plan) -> Dict[str, Any]:
-    return frappe.parse_json(plan.progress or "{}") or {}
+    return plan_runner.read_progress(plan.progress)
 
 
 def _update(plan_name: str, status: Optional[str] = None, step: Optional[Tuple[str, str]] = None, **progress):
@@ -1225,18 +1307,15 @@ def _end_if_dead(name: str) -> bool:
 def _guarded(plan_name: str, work) -> None:
     """Run a step of the plan. Whatever goes wrong in it ends the plan, saying why, instead of
     leaving it Running with nothing to carry it on."""
-    frappe.db.savepoint(STEP_SAVEPOINT)
     try:
-        work()
-    except Exception as e:
-        try:
-            frappe.db.rollback(save_point=STEP_SAVEPOINT)
-        except Exception:
-            if frappe.flags.in_test:
-                raise
-            frappe.db.rollback()  # a commit inside the step released the savepoint
-        frappe.log_error(title=_("FAC migration plan stopped"), message=frappe.get_traceback())
-        _end(plan_name, "Failed" if isinstance(e, PlanProblem) else "Stopped", str(e) or type(e).__name__)
+        plan_runner.guarded(
+            work,
+            STEP_SAVEPOINT,
+            _("FAC migration plan stopped"),
+            lambda e: _end(
+                plan_name, "Failed" if isinstance(e, PlanProblem) else "Stopped", str(e) or type(e).__name__
+            ),
+        )
     finally:
         frappe.local.fac_plan_running = None
 
@@ -1443,6 +1522,9 @@ def _finish(plan_name: str) -> None:
 def _end(plan_name: str, status: str, message: str) -> None:
     outcome = {"Completed": "Success", "Partially Completed": "Warning"}.get(status, "Failed")
     _update(plan_name, status=status, step=(outcome, message), current=None)
+    from frappe_assistant_core.utils import migration_recipe
+
+    migration_recipe.record_run(plan_name, status, message)
 
 
 def result(plan) -> Dict[str, Any]:

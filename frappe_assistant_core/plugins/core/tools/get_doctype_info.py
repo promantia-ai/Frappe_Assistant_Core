@@ -56,6 +56,15 @@ class GetDoctypeInfo(BaseTool):
                         "Ignored when doctype is given."
                     ),
                 },
+                "setup": {
+                    "type": "boolean",
+                    "description": (
+                        "With doctype: also return what a user of this site must know to make one, "
+                        "for a role guide: mandatory fields (custom ones marked, with their conditions), "
+                        "mandatory child-table fields, naming series, the active approval workflow and "
+                        "print formats."
+                    ),
+                },
             },
         }
 
@@ -66,7 +75,12 @@ class GetDoctypeInfo(BaseTool):
             from .metadata_tools import MetadataTools
 
             if arguments.get("doctype"):
-                return MetadataTools.get_doctype_metadata(doctype=arguments["doctype"])
+                result = MetadataTools.get_doctype_metadata(doctype=arguments["doctype"])
+                if arguments.get("setup") and result.get("success"):
+                    from frappe_assistant_core.utils.role_guide import setup_facts
+
+                    result["setup"] = setup_facts(result["doctype"])
+                return result
             if arguments.get("topic"):
                 return MetadataTools.find_doctypes_for_topic(topic=arguments["topic"])
             return {"success": False, "error": _("Provide either a doctype or a topic")}

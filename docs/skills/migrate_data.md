@@ -6,6 +6,29 @@ attaches a spreadsheet and says to import it. Follow this workflow every time, h
 is worded. Each tool has its own skill page with the details; this page is the order and the rules
 that hold across them.
 
+## Two kinds of file that are not a plain import
+
+The user only says "import this". Look at what each file holds (`start_import_session` gives the
+columns and sample rows) and take these two another way, without asking the user which way:
+
+- **The client's chart of accounts** (accounts or ledgers with the group each is under, often a
+  Tally or Zoho export): never a plain import of `Account`. Open it and map it to Account as usual,
+  then follow `get_skill("import-chart-of-accounts-usage")`: the check
+  (`dry_run_import(session, chart={"company": ...})`) places every account and asks only about the
+  ones it can't, and `import_chart_of_accounts` or `replace_chart_of_accounts` puts it on the company.
+  It goes before every other file, and is not part of a migration plan.
+- **A staff list** (people with their email and what they do): never an import of `User`. Follow
+  `get_skill("staff-setup")`: the people become groups with role profiles, roles and limits, created
+  by the setup plan on one approval.
+
+The other files of the same upload go on through a migration plan as below.
+
+**A migration done before.** After opening the sessions, `list_documents` on `FAC Migration Recipe`.
+If one was saved, the files may be a fresher export of the same migration: run it
+(`migration_recipe(action="run", recipe, sessions)`, see `get_skill("migration-recipe-usage")`)
+instead of mapping again. It matches the files itself and asks only what is new. With several
+recipes, ask which one; with none, or when no file matches, go on as below.
+
 ## Two ways through a migration
 
 - **Several files, or the user wants to approve once**: make a **migration plan** (below). Every
@@ -88,10 +111,9 @@ Records must exist before the records that link to them. In a migration plan, `p
 orders the files this way for you. Without one, show this order as the plan, and work through it
 one file at a time:
 
-1. **Chart of accounts.** The accounts must be right before any transaction is posted. Replacing
-   the chart is possible only on a company with no transactions yet, with ERPNext's **Chart of
-   Accounts Importer** in Desk. No import tool does that. Adding missing accounts to an existing
-   chart is a normal import of `Account`.
+1. **Chart of accounts.** The accounts must be right before any transaction is posted. The
+   client's chart goes through its own check and import (see "Two kinds of file" above); replacing
+   the chart is possible only on a company with no transactions yet.
 2. **Setup masters**: Payment Terms, Customer Groups, Supplier Groups, Item Groups, Territories,
    Warehouses, UOMs, Price Lists.
 3. **Parties and items**: Customers, Suppliers, Items.
@@ -220,3 +242,11 @@ migration plan names it in `migration_plan`: the plan's id, the session of its f
   together, still grouped: one list, so the user answers once.
 - Say what each step will do before an approval card, and what it did afterwards, with the counts.
 - After each file, say what's next in the order above.
+
+## When the file has the old system's IDs
+
+If a file carries the old system's own ID for each row (an Odoo id, a Zoho Customer ID, a Tally
+ledger's name), mark it when you map (`set_column_mapping`, with source_key_column and
+source_system; a preset does it itself), and before the dry run ask where to keep the IDs
+(the old_id_storage answer to `set_column_mapping`). Later files that refer to the records by those IDs can then be translated
+instead of corrected by hand.

@@ -49,6 +49,8 @@ PRIVILEGED_TOOLS = {
     "delete_document",
     "document_action",  # can cancel, which reverses accounting and stock entries
     "run_migration_plan",  # creates masters and imports every file of a plan, submitting opening entries
+    "run_setup_plan",  # creates and updates every record and setting of a setup plan, on one approval
+    "replace_chart_of_accounts",  # deletes a company's accounts and creates the client's chart
 }
 
 # Tools that are always categorized as read_only (hardcoded list)
@@ -87,6 +89,9 @@ READ_ONLY_TOOLS = {
     "sandbox_reference",  # Lists sandbox names; calls nothing
     "recent_errors",  # Reads Error Log and Scheduled Job Log rows; never logs
     "check_build_plan",  # Checks a build plan against the site; never writes
+    # Submits a test purchase and sale as the user, inside one savepoint it rolls back, holding back
+    # what a submit sends out (as dry_run_import does): nothing it makes is kept.
+    "go_live_test_run",
     # Approval tools
     "get_pending_approvals",  # Reads the workflow approval queue, no mutation
     # Browser tools (read the page or move the user's view; no data mutation)
@@ -102,6 +107,13 @@ READ_ONLY_TOOLS = {
     "start_import_session",
     # Writes only the session's mapping; as a write tool every correction would raise a card.
     "set_column_mapping",
+    # Writes only recipes, records of FAC's own that hold how a migration was mapped, never a row
+    # (#34420): save one, make the plan of a run as plan_migration does (imports nothing), or move a
+    # recipe between sites as a private file.
+    "migration_recipe",
+    # The setup interview: reads what the site has, and keeps the decisions in a plan of FAC's own. A
+    # Draft plan writes nothing to the site; run_setup_plan is what does, on one approval.
+    "setup_plan",
     # Writes only the session's settings and mapping, as set_column_mapping does.
     "set_opening_stock",
     "set_opening_invoices",
@@ -119,6 +131,7 @@ READ_ONLY_TOOLS = {
 WRITE_TOOLS = {
     # Document tools
     "create_document",
+    "import_chart_of_accounts",  # creates accounts under the right parents, or maps onto the existing ones
     "start_import",  # imports the checked file through Data Import
     "stop_migration_plan",  # stops a running plan after its current file
     "import_opening_stock",  # creates and submits Stock Reconciliations

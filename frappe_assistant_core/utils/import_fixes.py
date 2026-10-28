@@ -37,6 +37,7 @@ from frappe.utils import cint, cstr
 from frappe.utils.nestedset import get_root_of
 
 from frappe_assistant_core.utils import import_dry_run as dry_run
+from frappe_assistant_core.utils import import_keys
 from frappe_assistant_core.utils.import_session import readable_session_file
 
 MAP = "map"
@@ -148,7 +149,9 @@ def _range(start: int, end: int) -> str:
 
 
 def apply_value_maps(session, rows: List[List[str]]) -> List[List[str]]:
-    """The file's rows (header first) with every value map applied to its columns."""
+    """The file's rows (header first) with each old ID column translated (#34244) and every value map
+    applied to its columns. Every reader of the file's rows comes through here."""
+    rows = import_keys.translate(session, rows)
     maps = value_maps(session)
     if not maps or not rows:
         return rows
@@ -578,6 +581,9 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
         "post_at_cutoff": post_at_cutoff,
     }
     rules = {key: value for key, value in rules.items() if value}
+    # what the fixes don't own stays: the column that holds the old ID, and the references it translates
+    kept = {key: value for key, value in _rules(session).items() if key in import_keys.RULE_KEYS and value}
+    rules = {**rules, **kept}
     session.transformation_rules = frappe.as_json(rules) if rules else None
     session.excluded_rows = frappe.as_json(sorted(int(row) for row in reasons)) if reasons else None
     session.log_step("Fix Errors", "Success", " ".join(done))

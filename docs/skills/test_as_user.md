@@ -19,7 +19,7 @@ The result never contains a field value of the record.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `user` | string | Yes | Email of an enabled user. A missing or disabled user checks nothing and returns `success: false` |
-| `checks` | array | Yes | 1 to 20 checks |
+| `checks` | array | No | 1 to 20 checks. Leave it out for the summary below |
 
 Each check:
 
@@ -29,6 +29,17 @@ Each check:
 | `doctype` | string | Yes | DocType to check |
 | `name` | string | No | A record name. Omit it for the DocType-level answer |
 | `parent_doctype` | string | No | The parent DocType, when `doctype` is a child table |
+
+## What can this person see and do?
+
+Without `checks`, the result is a `summary` of the user's access, asked of Frappe's permission checks:
+
+- `roles` and `role_profiles`.
+- `can`: by module, every DocType their roles name, as `create and submit`, `create`, `edit` or `read only`.
+- `approves`: the workflow steps their roles can act on ("Pending: Approve to Approved").
+- `limited_to`: the records User Permissions limit them to, by DocType (Company, Warehouse, Territory, Branch); "(only on X)" when the limit applies to one DocType.
+
+Answer in plain words, the client's daily work first: "Ravi can create and submit Quotations, Sales Orders and Sales Invoices, only edit Customers, and only read Items and Stock. They approve nothing, and see only company ABC and the Mumbai warehouse." Don't list every setup DocType; say "and N setup records they can only read".
 
 ## Reading roles_that_allow
 

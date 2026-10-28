@@ -57,6 +57,53 @@ the field(s) that find each row's record, mapped from the file's key column(s): 
 (`name`) is the match on its own. The key columns are only used to find records; they are never
 written. Child-table columns can't be updated from a file: map them to "Don't Import".
 
+## The old system's ID column
+
+Many exports carry the old system's own ID for each row: an Odoo `id` or `External ID`, a Zoho
+`Customer ID`, a Tally ledger's name. Later files (orders, invoices, payments) refer to records by
+that ID, and ERPNext names the record differently, so the ID has to be kept when the record is
+created. When the file has such a column, pass it as `source_key_column` (its header or position)
+with `source_system` (`odoo`, `zoho`, `tally`, `quickbooks`... the system's short name, in lower
+case; ask the user when you can't tell). The call marks it; the result's `old_ids` says so.
+
+- The key column is **not imported** unless you also map it to a field (an Item code is both).
+- Pass `{}` as `mapping` to set only the key column on a session that is already mapped. Pass the
+  column again to change it; the system is kept when you leave it out.
+- Don't guess a column from a name like `ref`: ask the user, and never mark one when no column
+  holds an ID.
+- Changing the target DocType drops the key column, like the rest of the mapping.
+- A recognised export (`start_import_session`'s presets) marks its own key column: nothing to do.
+
+### Where the old IDs are kept
+
+The dry run is refused until the user says where the IDs are kept: ask before it. The result's
+`old_ids.storage` says what to ask; `set_column_mapping(session)` with nothing else returns it as
+`storage` again (after a recipe run marked the column, for example). Read its `offer`:
+
+1. **`existing_field`**: a field of the record already holds these IDs (a custom field the client
+   made, or a standard one such as an Item's code or a customer's tax ID). Ask `question` with
+   `ask_user` ("These IDs are already kept in Customer > Tax ID (38 of 40 match). Use this
+   field?"). On yes: `set_column_mapping(session, old_id_storage="field", old_id_field=...)`.
+2. **`new_field`**: nothing holds them. Ask `question` ("Keep the old IDs in a new field Old System ID
+   on Customer? If you'd rather not add a field, I'll keep them in FAC's key map instead."). On
+   yes: create the field with `create_document`, **exactly the input in `new_field.record`**, on its
+   own, never in a list (it is a customisation: it gets its own approval card). Then
+   `set_column_mapping(session, old_id_storage="field", old_id_field="fac_old_system_id")`.
+3. **The user doesn't want a field** (or says so in answer to either question):
+   `set_column_mapping(session, old_id_storage="key_map")`. The IDs are then kept in FAC's own key
+   map and nothing is added to the DocType. Say so in one sentence and don't ask again.
+4. `offer` is `null` and `storage` is set: it was answered before, for this DocType and source
+   system. Don't ask again; go on to the dry run.
+
+Pass `old_id_storage` on a call of its own, without `mapping`: only the answer is recorded.
+
+- Never pick for the user, and never use a field the result didn't list: a field that doesn't hold
+  this file's IDs is refused.
+- A field is read-only for people: the IDs are written by the import, never typed.
+- Records keep their old ID after an import creates them, including retries and each level of a
+  tree file. A field value goes with its record; a key-map row of a deleted record is swept daily.
+- The answer is kept for the site, so the next session of the same DocType and system doesn't ask.
+
 ## When the mapping can't change
 
 While the session's import is running (**Importing**) the mapping is kept: wait for the import to finish, or continue it with `start_import`. A session that was cancelled keeps its mapping too: start a new session for the file.

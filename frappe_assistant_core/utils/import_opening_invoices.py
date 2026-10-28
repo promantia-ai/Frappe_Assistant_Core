@@ -196,7 +196,9 @@ def setup(session, company: str, invoice_type: str, cut_off: str, columns: Dict[
 
 def check_can_run(session) -> None:
     from frappe_assistant_core.utils import import_dry_run as dry_run
+    from frappe_assistant_core.utils import import_plan
 
+    import_plan.refuse_in_delta(session)
     dry_run.check_status(session)
     invoices = settings(session)
     problem = setup_problem(invoices.get("company"), invoices.get("invoice_type"), invoices.get("cut_off"))

@@ -177,7 +177,7 @@ def my_endpoint(doctype: str, filters: dict | None = None):
 
 | Path | What |
 |---|---|
-| `frappe_assistant_core/plugins/*/tools/` | the MCP tools, one file per tool, grouped by plugin (`core`, `data_science`, `faco`, `visualization`) |
+| `frappe_assistant_core/plugins/*/tools/` | the MCP tools, one file per tool, grouped by plugin (`core`, `data_science`, `faco`, `migration`, `visualization`) |
 | `frappe_assistant_core/core/` | `BaseTool`, the tool registry, security config |
 | `frappe_assistant_core/mcp/` | the MCP server and the JSON-RPC request handling |
 | `frappe_assistant_core/api/` | whitelisted HTTP endpoints, including the MCP endpoint |

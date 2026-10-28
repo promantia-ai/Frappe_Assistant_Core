@@ -22,6 +22,9 @@
   "content",
   "tool_section",
   "linked_tool",
+  "guide_section",
+  "guide_doctypes",
+  "setup_snapshot",
   "organization_section",
   "column_break_org",
   "use_count",
@@ -98,7 +101,7 @@
    "fieldtype": "Select",
    "in_standard_filter": 1,
    "label": "Skill Type",
-   "options": "Tool Usage\nWorkflow"
+   "options": "Tool Usage\nWorkflow\nRole Guide"
   },
   {
    "fieldname": "category",
@@ -145,6 +148,29 @@
    "fieldname": "linked_tool",
    "fieldtype": "Data",
    "label": "Linked Tool"
+  },
+  {
+   "collapsible": 0,
+   "depends_on": "eval:doc.skill_type=='Role Guide'",
+   "fieldname": "guide_section",
+   "fieldtype": "Section Break",
+   "label": "Role Guide"
+  },
+  {
+   "depends_on": "eval:doc.skill_type=='Role Guide'",
+   "mandatory_depends_on": "eval:doc.skill_type=='Role Guide'",
+   "description": "The DocTypes this guide walks through, one per line. Saving the guide records their setup, so it can say when the setup has changed since.",
+   "fieldname": "guide_doctypes",
+   "fieldtype": "Small Text",
+   "label": "DocTypes Covered"
+  },
+  {
+   "fieldname": "setup_snapshot",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Setup When Written",
+   "no_copy": 1,
+   "read_only": 1
   },
   {
    "fieldname": "organization_section",
@@ -203,7 +229,7 @@
   }
  ],
  "links": [],
- "modified": "2025-01-01 00:00:00.000000",
+ "modified": "2026-10-28 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Assistant Core",
  "name": "FAC Skill",

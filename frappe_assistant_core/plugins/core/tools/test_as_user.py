@@ -27,6 +27,7 @@ from frappe import _
 
 from frappe_assistant_core.api.fac_page import can_open_page, roles_that_open_page
 from frappe_assistant_core.core.base_tool import BaseTool
+from frappe_assistant_core.utils.staff_setup import access_summary
 
 PERMISSION_TYPES = [
     "read",
@@ -160,6 +161,10 @@ class TestAsUser(BaseTool):
             "the roles that grant that permission on the DocType at permission level 0. "
             "Reading a named FAC Page answers whether the user can open that page, and lists "
             "the roles that open it; a personal page opens for its owner only, with no roles. "
+            "Without checks it answers 'what can this person see and do?': their roles and role "
+            "profiles, every DocType their roles name as create and submit, create, edit or read only "
+            "(by module), the workflow steps they can act on, and the records they are limited to "
+            "(company, warehouse, territory). Say it in plain words. "
             "Never returns field values."
         )
         self.category = "Builder checks"
@@ -177,7 +182,8 @@ class TestAsUser(BaseTool):
                     "type": "array",
                     "minItems": MIN_CHECKS,
                     "maxItems": MAX_CHECKS,
-                    "description": "Permission checks to answer, 1 to 20.",
+                    "description": "Permission checks to answer, 1 to 20. Leave out for the "
+                    "summary of everything the user can see and do.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -196,13 +202,13 @@ class TestAsUser(BaseTool):
                     },
                 },
             },
-            "required": ["user", "checks"],
+            "required": ["user"],
         }
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Answer each permission check for the named user."""
-        checks = arguments["checks"]
-        if not MIN_CHECKS <= len(checks) <= MAX_CHECKS:
+        """Answer each permission check for the named user, or sum up what they can do."""
+        checks = arguments.get("checks")
+        if checks is not None and not MIN_CHECKS <= len(checks) <= MAX_CHECKS:
             return {
                 "success": False,
                 "error": _("Provide between {0} and {1} checks.").format(MIN_CHECKS, MAX_CHECKS),
@@ -213,6 +219,8 @@ class TestAsUser(BaseTool):
         if not row or not row.enabled:
             return {"success": False, "error": _("User {0} not found or disabled.").format(arguments["user"])}
 
+        if checks is None:
+            return {"success": True, "user": row.name, "summary": access_summary(row.name)}
         return {"success": True, "user": row.name, "results": _run_checks(row.name, checks)}
 
 

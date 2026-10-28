@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import frappe
 from frappe import _
 
+from frappe_assistant_core.utils import role_guide
 from frappe_assistant_core.utils.logger import api_logger
 
 _SKILL_URI_PREFIX = "fac://skills/"
@@ -156,7 +157,14 @@ class SkillManager:
         # TODO: batch usage-counter writes if traffic grows.
         self.increment_usage(skill_name)
 
-        return skill_doc.content
+        # A role guide says so when the setup it was written from has changed (#34425). The note
+        # is extra: if it can't be worked out, the guide is still served.
+        try:
+            note = role_guide.stale_note(skill_doc)
+        except Exception:
+            frappe.logger("skill_manager").exception(f"Role guide check failed for {skill_id}")
+            note = ""
+        return note + skill_doc.content
 
     def get_skill_by_tool(self, tool_name: str, user: str = None) -> Optional[Dict[str, Any]]:
         """

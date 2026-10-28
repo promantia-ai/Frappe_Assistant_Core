@@ -150,10 +150,20 @@ doc_events = {
 
 scheduler_events = {
     "cron": {
-        "0 0 * * *": ["frappe_assistant_core.assistant_core.server.cleanup_old_logs"],
+        "0 0 * * *": [
+            "frappe_assistant_core.assistant_core.server.cleanup_old_logs",
+            # old-ID rows whose record was deleted by hand since (#34244)
+            "frappe_assistant_core.utils.import_keys.sweep_orphans",
+        ],
         "*/30 * * * *": ["frappe_assistant_core.utils.cache.warm_cache"],
         # a migration plan whose worker died is Running for ever: end it (#34431)
-        "*/10 * * * *": ["frappe_assistant_core.utils.import_plan.sweep_dead_plans"],
+        "*/10 * * * *": [
+            "frappe_assistant_core.utils.import_plan.sweep_dead_plans",
+            # a setup plan whose worker died is Running for ever: end it (#34421)
+            "frappe_assistant_core.utils.setup_plan.sweep_dead_plans",
+        ],
+        # hypercare after go-live: each week's summary to the consultant, and the end of the period (#34426)
+        "0 6 * * *": ["frappe_assistant_core.utils.hypercare.send_due_summaries"],
     },
     # Hourly tasks removed - no longer needed after Assistant Connection Log removal
 }
@@ -200,6 +210,10 @@ page_renderer = [
 # -----------------------------------------------------------
 
 # ignore_links_on_delete = ["Communication", "ToDo"]
+
+# A record an import made (a customer, an item) can be deleted although the import key map
+# still names it: the map never blocks that, and a row whose record is gone stops resolving (#34244).
+ignore_links_on_delete = ["FAC Import Key Map"]
 
 
 # User Data Protection

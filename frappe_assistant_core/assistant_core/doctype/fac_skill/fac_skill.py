@@ -18,6 +18,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from frappe_assistant_core.utils import role_guide
 from frappe_assistant_core.utils.permissions import check_assistant_admin_permission
 
 #: Fields an admin implicitly signs off on when publishing a skill beyond its
@@ -38,6 +39,8 @@ class FACSkill(Document):
         self.validate_visibility_settings()
         self.validate_linked_tool()
         self.validate_publish_permission()
+        if self.skill_type == role_guide.ROLE_GUIDE:
+            role_guide.record(self)
 
     def validate_publish_permission(self):
         """

@@ -214,7 +214,8 @@ class DocumentUpdate(BaseTool):
             "RECORDS OF SEVERAL DOCTYPES AT ONCE: instead of doctype, name and data, pass documents, a list of "
             "{doctype, name, data} (up to 100): one approval for all, and all are updated or none. "
             "Customisations (Custom Field, Property Setter, Server Script, Role, Workflow and the "
-            "like) and records that change the database schema are not for a list: update them one "
+            "like), users and permissions (User, Role Profile, User Permission, Has Role) and records "
+            "that change the database schema are not for a list: update them one "
             "at a time, each with doctype, name and data. "
             "Show the user the changes as a table first; the approval card then lists each one."
         )
@@ -246,7 +247,7 @@ class DocumentUpdate(BaseTool):
                 },
                 "documents": {
                     "type": "array",
-                    "description": "Several records in one call, instead of doctype, name and data: each {doctype, name, data}, updated in order. All are updated or none. Customisations and records that change the database schema are refused here: update them one at a time.",
+                    "description": "Several records in one call, instead of doctype, name and data: each {doctype, name, data}, updated in order. All are updated or none. Customisations, users and permissions (User, Role Profile, User Permission, Has Role), and records that change the database schema are refused here: update them one at a time.",
                     "items": {
                         "type": "object",
                         "properties": {

@@ -120,6 +120,26 @@
     "content_file": "set_column_mapping.md"
   },
   {
+    "skill_id": "migration-recipe-usage",
+    "title": "How to Use migration_recipe",
+    "description": "Keep a finished migration as a recipe (how each file was mapped, no rows, no dates), run it again on new files, on another site or on the transactions after the cut-off, and move it between sites as a file",
+    "skill_type": "Tool Usage",
+    "linked_tool": "migration_recipe",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "migration_recipe.md"
+  },
+  {
+    "skill_id": "import-chart-of-accounts-usage",
+    "title": "How to Use import_chart_of_accounts and replace_chart_of_accounts",
+    "description": "Put the client's own chart of accounts on a company: read and classify it, then map onto the accounts it has, add under the right parents, or replace the standard chart of a company with no transactions",
+    "skill_type": "Tool Usage",
+    "linked_tool": "import_chart_of_accounts",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "import_chart_of_accounts.md"
+  },
+  {
     "skill_id": "dry-run-import-usage",
     "title": "How to Use dry_run_import",
     "description": "Checking every row of a migration file before importing: the grouped failures explained in plain words, fixing them with the user, large files in the background, re-checking only the rows an import left, the failed rows as a file to correct; with a plan, every file of a migration plan checked and all its questions in one list, with the answers applied in one call",
@@ -222,7 +242,7 @@
   {
     "skill_id": "migrate-data",
     "title": "Migrate Data",
-    "description": "Use when the user wants to migrate data into ERPNext or import a file: \"migrate my data\", \"import my customers\", \"import my items\", \"bring my data from Tally\" or another system, \"load my opening stock\" or opening balances, or attaches a spreadsheet to import. Follow its workflow every time: session, mapping, cleaning, dry run, fixes, import, failed rows, report.",
+    "description": "Use when the user wants to migrate data into ERPNext or import a file: \"migrate my data\", \"import my customers\", \"import my items\", \"bring my data from Tally\" or another system, \"load my opening stock\" or opening balances, or attaches a spreadsheet to import (a chart of accounts or a staff list too: it says where those go). Follow its workflow every time: session, mapping, cleaning, dry run, fixes, import, failed rows, report.",
     "skill_type": "Workflow",
     "status": "Published",
     "visibility": "Public",
@@ -409,7 +429,7 @@
   {
     "skill_id": "site-health-check",
     "title": "Site Health Check",
-    "description": "Use when asked to check, audit or health-check the site's setup, find what's missing or misconfigured before go-live, or review a site someone else set up.",
+    "description": "Use when asked to check, audit or health-check the site's setup, find what's missing or misconfigured before go-live, run the go-live readiness check or test run, or review a site someone else set up.",
     "skill_type": "Workflow",
     "status": "Published",
     "visibility": "Public",
@@ -686,5 +706,42 @@
     "status": "Published",
     "visibility": "Public",
     "content_file": "recent_errors.md"
+  },
+  {
+    "skill_id": "go-live-test-run-usage",
+    "title": "How to Use go_live_test_run",
+    "description": "Running the client's buying and selling flows end to end before go-live, rolled back, to find the steps that fail",
+    "skill_type": "Tool Usage",
+    "linked_tool": "go_live_test_run",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "go_live_test_run.md"
+  },
+  {
+    "skill_id": "role-guides",
+    "title": "Role Guides",
+    "description": "Use when the consultant asks for a guide or training notes for a role (\"write a guide for the sales team\"), when a role guide you open says it is out of date, or to update one. Guides are written from this site's own fields, workflows, naming series and print formats, and kept as FAC Skills shared with the role.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "role_guides.md"
+  },
+  {
+    "skill_id": "hypercare",
+    "title": "Hypercare",
+    "description": "Use after go-live: to switch on the weekly hypercare summary for a consultant (\"watch the site for the first month\"), or to read and act on a summary (\"what went wrong this week?\", \"open the hypercare summary\").",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "hypercare.md"
+  },
+  {
+    "skill_id": "staff-setup",
+    "title": "Staff Setup",
+    "description": "Use when the consultant gives the client's staff list (\"set up these users\", \"create users from this sheet\", or a staff list attached with \"import this\"): propose role profiles, roles and user permissions by group, adjust them in chat, then create them as the Users and roles area of the setup plan, on one approval. Also for \"what can this person see and do?\".",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "staff_setup.md"
   }
 ]

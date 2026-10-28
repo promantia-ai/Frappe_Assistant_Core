@@ -1,0 +1,109 @@
+{
+ "actions": [],
+ "autoname": "format:HYP-{YYYY}-{#####}",
+ "creation": "2026-10-28 12:00:00.000000",
+ "description": "Hypercare after go-live: a weekly summary of what is going wrong on the site, sent to the consultant until the period ends.",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "consultant",
+  "start_date",
+  "days",
+  "end_date",
+  "column_break_period",
+  "status",
+  "stuck_after_days",
+  "last_summary_on"
+ ],
+ "fields": [
+  {
+   "fieldname": "consultant",
+   "fieldtype": "Link",
+   "options": "User",
+   "label": "Consultant",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "Receives the weekly summary by email and in the notification bell."
+  },
+  {
+   "fieldname": "start_date",
+   "fieldtype": "Date",
+   "label": "Start Date",
+   "reqd": 1,
+   "default": "Today",
+   "in_list_view": 1,
+   "description": "Usually the go-live day."
+  },
+  {
+   "fieldname": "days",
+   "fieldtype": "Int",
+   "label": "Days",
+   "reqd": 1,
+   "default": "30",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "end_date",
+   "fieldtype": "Date",
+   "label": "End Date",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "column_break_period",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Active\nEnded",
+   "default": "Active",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "stuck_after_days",
+   "fieldtype": "Int",
+   "label": "Approval Stuck After (Days)",
+   "default": "3",
+   "non_negative": 1,
+   "description": "A workflow approval waiting longer than this is listed in the summary."
+  },
+  {
+   "fieldname": "last_summary_on",
+   "fieldtype": "Date",
+   "label": "Last Summary Up To",
+   "read_only": 1,
+   "no_copy": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-28 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Assistant Core",
+ "name": "FAC Hypercare",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "consultant",
+ "track_changes": 1
+}

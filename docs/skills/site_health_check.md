@@ -88,6 +88,15 @@ When the user asks what has been customised, list custom fields, property setter
 
 Count only the first group as "your customisations". Don't count standard naming series, and don't list app-installed fields as something the user added. If you can't tell which group a record belongs to, say so rather than guessing.
 
+## Go-live
+
+When the user is about to take the client live ("are we ready to go live?", "go-live check"), use the **Go-Live Readiness** report instead of the checks above. It checks the same areas and more, every one Pass, Warn or Fail with the fix: company default accounts, fiscal year, tax templates and categories, naming series (the next number isn't taken by an imported document), warehouses and stock settings, price lists, print formats and letterhead, email account, scheduler, backups, users without roles, and draft opening entries.
+
+1. `generate_report` with `report_name: "Go-Live Readiness"` and `filters: {"company": <name>}` (leave `company` out for every company). It needs the System Manager role. The message is the headline ("2 fail, 3 warn and 18 pass. Not ready to go live."). Show the Fail and Warn rows as a table (Status | Check | Detail | Fix) and the number of Pass rows.
+2. **Fixing an item:** when the user asks, propose the change and apply it after approval through `get_skill("setup-change-protocol")`, one item at a time. Then run the report again.
+3. **Test run:** `go_live_test_run` runs the buying and selling flows end to end and rolls them back (`get_skill("go-live-test-run-usage")`).
+4. **The PDF for the client to sign:** run the report again with `"document": 1` in the filters; its message is the whole checklist as markdown with a sign-off block. Pass it unchanged as `content` to `generate_document` (title "Go-Live Checklist") and share the link.
+
 ## Reporting
 
 1. One line: "**2 critical**, 3 warnings and 4 notes across 6 areas."
