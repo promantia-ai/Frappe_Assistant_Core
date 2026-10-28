@@ -22,11 +22,17 @@ TOOLS = ("preview_import_undo", "undo_import")
 
 
 def execute():
+    delete_configurations(TOOLS)
+
+
+def delete_configurations(tools) -> None:
+    """Delete the FAC Tool Configuration rows of removed tools, and the registry's cached copies.
+    Also used by the patches of the import tools merged into others."""
     if not frappe.db.table_exists(DOCTYPE):
         return
 
     removed = False
-    for tool in TOOLS:
+    for tool in tools:
         if frappe.db.exists(DOCTYPE, tool):
             frappe.delete_doc(DOCTYPE, tool, force=True, ignore_permissions=True)
             removed = True
@@ -35,5 +41,5 @@ def execute():
         # The registry caches the configurations (60 seconds) and each row by name.
         frappe.cache.delete_value("fac_tool_registry_configs")
         frappe.cache.delete_value("fac_tool_configurations")
-        for tool in TOOLS:
+        for tool in tools:
             frappe.cache.delete_value(f"fac_tool_config_{tool}")

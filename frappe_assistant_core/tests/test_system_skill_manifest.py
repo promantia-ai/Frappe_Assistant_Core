@@ -333,7 +333,6 @@ class TestSystemSkillManifest(BaseAssistantTest):
     def test_migrate_data_stops_and_reports_when_an_import_tool_fails(self):
         rule = self._tool_failure_rule()
         for tool in (
-            "apply_import_preset",
             "start_import_session",
             "set_column_mapping",
             "dry_run_import",

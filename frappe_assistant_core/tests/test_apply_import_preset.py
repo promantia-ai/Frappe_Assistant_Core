@@ -1,7 +1,8 @@
 """
-apply_import_preset (#34000): an export recognised by a preset is cleaned into one file per
-target, and each opens an ordinary import session with the mapping applied. These tests use a
-preset patched in; the shipped presets are tested at the end of this file.
+Import presets through start_import_session (#34000): an export recognised by a preset is cleaned
+into one file per target, and each opens an ordinary import session with the mapping applied; a
+file no preset recognises opens the normal way, in the same call. These tests use a preset patched
+in; the shipped presets are tested at the end of this file.
 """
 
 import csv
@@ -15,7 +16,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment
 
 from frappe_assistant_core.core.tool_registry import get_tool_registry
-from frappe_assistant_core.plugins.core.tools import apply_import_preset as tool_module
+from frappe_assistant_core.plugins.core.tools import start_import_session as tool_module
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
 from frappe_assistant_core.tests.test_import_opening_balances import OpeningBalancesCase
 from frappe_assistant_core.tests.test_import_presets import LEDGERS, TB
@@ -110,7 +111,7 @@ class PresetToolCase(BaseAssistantTest):
 
     def _run(self, arguments, use=(LEDGERS,)):
         with patch.object(presets, "load_presets", return_value=list(use)):
-            return self.registry.get_tool("apply_import_preset")._safe_execute(arguments)
+            return self.registry.get_tool("start_import_session")._safe_execute(arguments)
 
     def _apply(self, arguments, use=(LEDGERS,)):
         reply = self._run(arguments, use)
@@ -210,13 +211,44 @@ class TestApply(PresetToolCase):
         self.assertEqual(doc.status, "File Read")
         self.assertIsNone(doc.target_doctype)
 
-    def test_no_match_writes_nothing(self):
+    def test_no_match_opens_the_file_the_normal_way(self):
+        # One call per file: a file no preset recognises gets its session from the same call.
         file_doc = self._upload(f"plain-{self.tag}.csv", b"Customer Name,Customer Group\nA,Retail\n")
-        before = frappe.db.count("FAC Import Session"), frappe.db.count("File")
+        before = frappe.db.count("FAC Import Session")
         result = self._apply({"file_id": file_doc.name})
-        self.assertFalse(result["matched"])
-        self.assertIn("start_import_session", result["message"])
-        self.assertEqual((frappe.db.count("FAC Import Session"), frappe.db.count("File")), before)
+        self.assertNotIn("matched", result)
+        self.assertEqual(result["columns"], ["Customer Name", "Customer Group"])
+        self.assertEqual(result["row_count"], 1)
+        self.assertEqual(frappe.db.count("FAC Import Session"), before + 1)
+        session = frappe.get_doc("FAC Import Session", result["session_id"])
+        self.assertEqual(session.status, "File Read")
+        self.assertEqual([s.step for s in session.steps], ["Read File"])
+
+    def test_preset_none_opens_a_recognised_export_the_normal_way(self):
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        result = self._apply({"file_id": file_doc.name, "preset": "none"})
+        self.assertNotIn("matched", result)
+        self.assertEqual(result["columns"], ["Name", "Under", "GSTIN", "Opening Balance"])
+        self.assertEqual(result["header_row"], 4)
+
+    def test_a_heading_row_given_by_the_user_opens_the_file_the_normal_way(self):
+        # header_row is the user's answer about this file's headings: no preset second-guesses it.
+        file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
+        result = self._apply({"file_id": file_doc.name, "header_row": 4})
+        self.assertNotIn("matched", result)
+        self.assertEqual(result["columns"], ["Name", "Under", "GSTIN", "Opening Balance"])
+
+    def test_a_google_sheet_is_never_matched_against_a_preset(self):
+        for arguments in ({"preset": "test.ledgers"}, {"parts": ["ledgers"]}):
+            reply = self._run({"google_sheets_url": "https://docs.google.com/spreadsheets/d/x", **arguments})
+            self.assertFalse(reply["success"], arguments)
+            self.assertIn("a file on this site", reply["error"])
+
+    def test_the_preset_tool_is_gone_and_start_import_session_takes_its_inputs(self):
+        self.assertIsNone(self.registry.get_tool("apply_import_preset"))
+        inputs = self.registry.get_tool("start_import_session").inputSchema["properties"]
+        for name in ("preset", "values", "targets", "parts"):
+            self.assertIn(name, inputs)
 
     def test_a_named_preset_that_does_not_fit_says_which_headers_are_missing(self):
         file_doc = self._upload(f"plain-{self.tag}.csv", b"Name,GSTIN\nA,B\n")
@@ -254,7 +286,7 @@ class TestApply(PresetToolCase):
         self.assertIn("no data rows", reply["error"])
         self.assertTrue(
             reply["error"].endswith(
-                "If this is not a Test export, map it the normal way: call start_import_session."
+                "If this is not a Test export, call start_import_session again with preset 'none'."
             ),
             reply["error"],
         )
@@ -264,8 +296,9 @@ class TestApply(PresetToolCase):
         file_doc = self._upload(f"plain-{self.tag}.csv", "\n".join(",".join(r) for r in rows).encode())
         with patch.object(presets, "read_sheet", side_effect=AssertionError("read the whole sheet")):
             result = self._apply({"file_id": file_doc.name})
-        self.assertFalse(result["matched"])
+        self.assertNotIn("matched", result)
         self.assertEqual(result["file_name"], f"plain-{self.tag}.csv")
+        self.assertEqual(result["row_count"], 300)
 
     def test_only_the_matched_sheet_is_read_in_full(self):
         workbook_rows = {"Notes": [["Nothing here"]], "Ledgers": self._rows(LEDGER_ROWS)}
@@ -293,7 +326,8 @@ class TestApply(PresetToolCase):
             reply = self._run({"file_id": file_doc.name})
         self.assertFalse(reply["success"])
         self.assertIn(
-            "This sheet has more than 5 rows. Split it into smaller files, or use start_import_session.",
+            "This sheet has more than 5 rows. Split it into smaller files, or call start_import_session "
+            "again with preset 'none'.",
             reply["error"],
         )
         self.assertEqual(frappe.db.count("FAC Import Session"), before)
@@ -314,7 +348,7 @@ class TestApply(PresetToolCase):
     def test_values_and_targets_of_the_wrong_type_are_refused(self):
         file_doc = self._upload(f"ledgers-{self.tag}.xlsx", xlsx(self._rows(LEDGER_ROWS)))
         before = frappe.db.count("FAC Import Session"), frappe.db.count("File")
-        tool = self.registry.get_tool("apply_import_preset")
+        tool = self.registry.get_tool("start_import_session")
         # The tool's own check. Through _safe_execute the schema check refuses a value that is not
         # an object or a list before execute runs, so execute is called directly here.
         for arguments, error in (
@@ -967,7 +1001,7 @@ class TestShippedPresets(PresetToolCase):
 
     def _check(self, preset_id, rows, expected):
         file_doc = as_xlsx_file(self, f"{preset_id}-{self.tag}.xlsx", rows)
-        reply = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})
+        reply = self.registry.get_tool("start_import_session")._safe_execute({"file_id": file_doc.name})
         self.assertTrue(reply["success"], (preset_id, reply))
         result = reply["result"]
         self.assertTrue(result["matched"], (preset_id, result))
@@ -1066,7 +1100,7 @@ class TestShippedPresets(PresetToolCase):
         buffer = io.BytesIO()
         workbook.save(buffer)
         file_doc = self._upload(f"tb-indent-{self.tag}.xlsx", buffer.getvalue())
-        reply = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})
+        reply = self.registry.get_tool("start_import_session")._safe_execute({"file_id": file_doc.name})
         self.assertTrue(reply["success"], reply)
         result = reply["result"]
         self.assertEqual(result["preset"]["id"], "tally_prime.trial_balance")
@@ -1099,7 +1133,7 @@ class TestShippedPresets(PresetToolCase):
         rows, _ = SHIPPED["tally_prime.stock_summary"]
         result, file_doc = self._check("tally_prime.stock_summary", rows, {})
         self.assertEqual(result["needs"][0]["name"], "warehouse")
-        again = self.registry.get_tool("apply_import_preset")._safe_execute(
+        again = self.registry.get_tool("start_import_session")._safe_execute(
             {"file_id": file_doc.name, "values": {"warehouse": "Stores - X"}}
         )["result"]
         session = again["sessions"][0]
@@ -1123,7 +1157,7 @@ class TestShippedPresets(PresetToolCase):
         )
         file_doc = self._upload(f"stock-{self.tag}.csv", buffer.getvalue().encode("utf-8"))
         with patch.object(opening_stock, "decimal_comma", return_value=True):
-            reply = self.registry.get_tool("apply_import_preset")._safe_execute(
+            reply = self.registry.get_tool("start_import_session")._safe_execute(
                 {"file_id": file_doc.name, "values": {"warehouse": "Stores - X"}}
             )
             self.assertTrue(reply["success"], reply)
@@ -1168,7 +1202,7 @@ class TestShippedPresets(PresetToolCase):
         # Both Zoho contact presets have 2 required and 5 optional groups, so headers common to both tie.
         rows = [["Display Name", "EmailID", "Status"], ["Ravi Traders", "", "Active"]]
         file_doc = as_xlsx_file(self, f"zoho-contacts-{self.tag}.xlsx", rows)
-        result = self.registry.get_tool("apply_import_preset")._safe_execute({"file_id": file_doc.name})[
+        result = self.registry.get_tool("start_import_session")._safe_execute({"file_id": file_doc.name})[
             "result"
         ]
         self.assertEqual(result["preset"]["id"], "zoho_books.customers")
@@ -1177,7 +1211,7 @@ class TestShippedPresets(PresetToolCase):
     def test_a_named_preset_settles_the_zoho_contacts_tie(self):
         rows = [["Display Name", "EmailID", "Status"], ["Ravi Traders", "", "Active"]]
         file_doc = as_xlsx_file(self, f"zoho-contacts-{self.tag}.xlsx", rows)
-        reply = self.registry.get_tool("apply_import_preset")._safe_execute(
+        reply = self.registry.get_tool("start_import_session")._safe_execute(
             {"file_id": file_doc.name, "preset": "zoho_books.vendors"}
         )
         self.assertTrue(reply["success"], reply)
@@ -1262,11 +1296,12 @@ class TestShippedPresets(PresetToolCase):
         ):
             with self.subTest(content.split(b"\n")[0]):
                 file_doc = self._upload(f"plain-{self.tag}.csv", content)
-                reply = self.registry.get_tool("apply_import_preset")._safe_execute(
+                reply = self.registry.get_tool("start_import_session")._safe_execute(
                     {"file_id": file_doc.name}
                 )
                 self.assertTrue(reply["success"], reply)
-                self.assertFalse(reply["result"]["matched"], reply["result"])
+                self.assertNotIn("matched", reply["result"])
+                self.assertTrue(reply["result"]["session_id"], reply["result"])
 
     def test_tally_ledgers_customers_pass_the_dry_run(self):
         result, _ = self._check("tally_prime.ledgers", *SHIPPED["tally_prime.ledgers"])
@@ -1320,7 +1355,7 @@ class TestPresetIntoTheEngines(OpeningBalancesCase):
             }
         ).insert()
         presets.clear_cache()
-        result = self._run("apply_import_preset", {"file_id": file_doc.name})["result"]
+        result = self._run("start_import_session", {"file_id": file_doc.name})["result"]
         session = result["sessions"][0]
         self.assertEqual(result["preset"]["id"], "quickbooks_online.trial_balance")
         self.assertEqual(session["rows"], 2)

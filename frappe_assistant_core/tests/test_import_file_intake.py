@@ -255,7 +255,7 @@ class TestFileIntake(BaseAssistantTest):
         self.assertEqual(self._start(file_id=original.name)["columns"][0], "Cust Name")
 
     def test_a_preset_reads_a_utf16_export_too(self):
-        # apply_import_preset reads the same files, through its own CSV reader.
+        # The presets read the same files, through their own CSV reader.
         from frappe_assistant_core.utils import import_presets
 
         original = self._upload(

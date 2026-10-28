@@ -196,7 +196,7 @@ class Typed(str):
     own format, where '1.500' on a site that writes 1.500,00 is fifteen hundred."""
 
 
-PRESET_FILE = "preset_file"  # template_options: the CSV apply_import_preset wrote for the session
+PRESET_FILE = "preset_file"  # template_options: the CSV a preset wrote for the session (start_import_session)
 
 
 def shown_mapping(mapping: Dict[str, str], extra: Dict[str, int]) -> Dict[str, str]:
@@ -207,7 +207,7 @@ def shown_mapping(mapping: Dict[str, str], extra: Dict[str, int]) -> Dict[str, s
 
 
 def typed_file(session, file_doc) -> bool:
-    """Whether the file's cells are the user's typing: a CSV, but not the one apply_import_preset
+    """Whether the file's cells are the user's typing: a CSV, but not the one a preset
     wrote, whose numbers it already read and wrote as Python does ('2.125')."""
     if (file_doc.get_extension()[1] or "").lstrip(".").lower() != "csv":
         return False
