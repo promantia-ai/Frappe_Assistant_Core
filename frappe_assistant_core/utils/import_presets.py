@@ -12,7 +12,7 @@ Import presets (#34000): recognise a source system's export by its headers, and 
 A preset is data: the headers that identify an export, how each column is read, and which
 ERPNext record or opening import the rows become. FAC ships presets in data/import_presets/;
 other apps add theirs through the assistant_import_presets hook. This module reads, matches and
-cleans. It writes nothing: apply_import_preset writes the cleaned files and opens the sessions.
+cleans. It writes nothing: start_import_session writes the cleaned files and opens the sessions.
 """
 
 import csv
@@ -564,8 +564,8 @@ def read_sheet(file_doc, sheet_name: Optional[str]) -> Sheet:
             if len(rows) > MAX_PRESET_ROWS:
                 raise FileProblem(
                     _(
-                        "This sheet has more than {0} rows. Split it into smaller files, or use "
-                        "start_import_session."
+                        "This sheet has more than {0} rows. Split it into smaller files, or call "
+                        "start_import_session again with preset 'none'."
                     ).format(f"{MAX_PRESET_ROWS:,}")
                 )
             return Sheet(name, rows)

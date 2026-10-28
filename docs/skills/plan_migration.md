@@ -15,7 +15,7 @@ For one file the user is happy to take step by step, the plain path (`start_impo
 
 | Input | Type | Required | Description |
 |---|---|---|---|
-| `sessions` | list of strings | Yes | The import session ids to add. Open every file's session first (`apply_import_preset`, else `start_import_session`). |
+| `sessions` | list of strings | Yes | The import session ids to add. Open every file's session first (`start_import_session`, once per file). |
 | `plan` | string | No | An existing plan to add them to: it orders all its files again. Left out, a new plan is made. |
 | `cut_off` | string | No | The cut-off date the user picked from `opening_setup`, `YYYY-MM-DD`. Pass it with `plan` (no new sessions) once they pick: `plan_questions` then doesn't ask it again. |
 | `failure_rule` | `leave_out` or `stop` | No | What happens to rows that fail when their file comes up. `leave_out` (default) leaves them out with their reason; `stop` stops the plan before that file. `plan_questions` asks it if the user hasn't said. |

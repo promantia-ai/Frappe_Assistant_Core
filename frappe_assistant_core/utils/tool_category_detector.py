@@ -96,9 +96,8 @@ READ_ONLY_TOOLS = {
     "browser_capture_diagnostics",  # Reads console/network buffers + captures the page
     "browser_wait_for_page",  # Waits for load; no-op on data
     "browser_navigate_to",  # Changes the viewed page only, not data
-    # Writes only cleaned copies of the user's file and import sessions, never business data.
-    "apply_import_preset",
-    # Writes only the import session, never business data.
+    # Writes only import sessions and cleaned copies of the user's file (a preset's), never
+    # business data.
     # As a write tool it would put an approval card on starting every import.
     "start_import_session",
     # Writes only the session's mapping; as a write tool every correction would raise a card.

@@ -131,7 +131,7 @@ For many records of **one DocType**, pass `records` instead of `data`. Each reco
 
 For records of **several DocTypes** (or an import's missing masters), pass `documents` instead of `doctype` and `data`: one call, so the user approves **once** for all of them.
 
-**`documents` is not a way to import a user's file.** A file goes through the import tools: `start_import_session` (or `apply_import_preset`), `dry_run_import`, then `start_import`; if they fail, stop and tell the user what failed and the error. Never create the file's records here instead, one by one or as a list. The one exception is a session's missing masters, with `import_session` (see **Missing masters of an import**).
+**`documents` is not a way to import a user's file.** A file goes through the import tools: `start_import_session`, `dry_run_import`, then `start_import`; if they fail, stop and tell the user what failed and the error. Never create the file's records here instead, one by one or as a list. The one exception is a session's missing masters, with `import_session` (see **Missing masters of an import**).
 
 ```json
 {

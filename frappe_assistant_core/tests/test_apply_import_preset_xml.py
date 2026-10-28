@@ -1,5 +1,5 @@
 """
-apply_import_preset on a Tally XML export (#34001): listing its parts (AC1), and opening one
+start_import_session on a Tally XML export (#34001): listing its parts (AC1), and opening one
 import session per target for the parts the user chooses, with the Tally presets (AC2).
 """
 
@@ -57,7 +57,7 @@ class TallyXmlToolCase(XmlCase):
         return self._upload(export(*[r.replace("{tag}", self.tag) for r in records]))
 
     def _run(self, arguments):
-        return self.registry.get_tool("apply_import_preset")._safe_execute(arguments)
+        return self.registry.get_tool("start_import_session")._safe_execute(arguments)
 
     def _ok(self, arguments):
         reply = self._run(arguments)
@@ -334,7 +334,7 @@ class TestRefusals(TallyXmlToolCase):
         # The framework's schema check answers a string first; the tool's own guard is called directly.
         doc = self._file(ledger("A {tag}", "Sundry Debtors"))
         before = self._counts()
-        reply = self.registry.get_tool("apply_import_preset").execute(
+        reply = self.registry.get_tool("start_import_session").execute(
             {"file_id": doc.name, "parts": "ledgers"}
         )
         self.assertFalse(reply["success"], reply)

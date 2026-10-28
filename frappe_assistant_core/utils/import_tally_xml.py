@@ -8,7 +8,7 @@
 
 """
 Tally XML exports (#34001): read a Tally masters export, count its parts, and turn ledgers and
-stock items into rows the #34000 Tally presets match, so apply_import_preset opens their sessions
+stock items into rows the #34000 Tally presets match, so start_import_session opens their sessions
 the same way it does for a spreadsheet. Groups are counted, not imported. This module writes
 nothing.
 

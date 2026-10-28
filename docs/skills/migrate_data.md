@@ -19,7 +19,7 @@ When unsure, ask the user which they prefer. A plan is the better default for tw
 
 | # | Step | Tool | Done when |
 |---|---|---|---|
-| 1 | **Sessions**: open one per file | `apply_import_preset`, else `start_import_session` | Every file has a `session_id` |
+| 1 | **Sessions**: open one per file | `start_import_session`, once per file | Every file has a `session_id` |
 | 2 | **Plan**: group and order them | `plan_migration` with all the sessions | The user has seen the files in order, each with its reason; with opening files, the cut-off picked on one card from `opening_setup` |
 | 3 | **Map** every file | `get_import_schema`, `set_column_mapping` (opening files: `set_opening_stock`, `set_opening_invoices`, `set_opening_balances`) | Every file is mapped. Map yourself where you are sure; ask only where you aren't |
 | 4 | **Questions**: all of them at once | `plan_questions` | Show every question together, grouped by file, the suggested answer first; send all the answers in one call. Repeat until ready is true |
@@ -50,7 +50,7 @@ check says the file is ready.
 
 | # | Step | Tool | Done when |
 |---|---|---|---|
-| 1 | **Session**: open one for the file | `apply_import_preset` first; `start_import_session` when it answers `matched: false` | You have the `session_id`, sheet, columns and row count |
+| 1 | **Session**: open one for the file | `start_import_session` | You have the `session_id`, sheet, columns and row count |
 | 2 | **Mapping**: file columns to ERPNext fields | `get_import_schema`, then `set_column_mapping` | The user agreed the mapping table |
 | 3 | **Cleaning**: value fixes the user picks (map a value, leave rows out) | `dry_run_import` once to find the groups, then again with `fixes` | Every group has a decision |
 | 4 | **Dry run**: check every row, nothing written | `dry_run_import` | `status` is `Ready to Import` |
@@ -59,10 +59,11 @@ check says the file is ready.
 | 7 | **Failed rows**: explain, try again, or give them as a file | `dry_run_import`, then `start_import`; or `dry_run_import` with `failed_rows_file` | Every row is imported or left out with a reason |
 | 8 | **Report**: what the migration brought in | `get_skill("migration-sign-off")` | The user has the report and its PDF |
 
-**Step 1 starts with `apply_import_preset`** for any spreadsheet or Tally XML file. It recognises
-exports from Tally, Zoho Books, Busy, Marg and QuickBooks, cleans them (title rows, totals,
-`8,45,000 Dr` amounts) and opens the sessions with the mapping already made, so step 2 is only
-checking that mapping with the user. Anything it doesn't recognise goes to `start_import_session`.
+**Step 1 is one `start_import_session` call per file**, for a spreadsheet or a Tally XML file. It
+recognises exports from Tally, Zoho Books, Busy, Marg and QuickBooks, cleans them (title rows,
+totals, `8,45,000 Dr` amounts) and opens the sessions with the mapping already made (`matched:
+true`), so step 2 is only checking that mapping with the user. Any other file opens one session
+the normal way, in the same call.
 
 Steps 3 to 5 repeat until nothing fails: explain each group in its own words, offer only its
 `fixes`, apply the user's choices in one call, and give the new count.
@@ -108,8 +109,8 @@ doesn't bring itself.
 ## When an import tool fails
 
 When an import tool fails or isn't available, tell the user it failed and what the error was, in
-the tool's own words. Then stop. This holds for every one of them: `apply_import_preset`,
-`start_import_session`, `get_import_schema`, `set_column_mapping`, `dry_run_import`, `start_import`,
+the tool's own words. Then stop. This holds for every one of them: `start_import_session`,
+`get_import_schema`, `set_column_mapping`, `dry_run_import`, `start_import`,
 the plan tools (`plan_migration`, `plan_questions`, `run_migration_plan`) and the opening tools
 (`set_opening_stock`, `set_opening_invoices`, `set_opening_balances`, `import_opening_stock`,
 `import_opening_invoices`, `import_opening_balances`).
@@ -166,7 +167,7 @@ workbook with several sheets is one session per sheet.
 - **A Google Sheets link**: pass it to `start_import_session` as `google_sheets_url`; one tab per
   session. When the user fixes the sheet, pass the link to `dry_run_import` again.
 - **A `.zip`**: ask the user to unzip it and attach the files.
-- **A Tally XML export** (`.xml`): `apply_import_preset` reads it and opens a session per target
+- **A Tally XML export** (`.xml`): `start_import_session` reads it and opens a session per target
   (Customers, Suppliers, Accounts from a ledger list).
 - **A file larger than Max Rows per Import**: refused with the limit. Ask the user to split it.
 
