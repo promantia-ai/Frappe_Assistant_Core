@@ -156,6 +156,64 @@ class TestImportFixes(BaseAssistantTest):
         self.assertIn("Check it first", response["error"])
         self.assertIsNone(self._doc(session).excluded_rows)
 
+    UNCHECKED = "Your fixes are already applied but weren't checked yet. Check again without fixes."
+
+    def _leave_out_robot(self, result):
+        group = self._group(result, "Not an allowed option")
+        return {"group": group["id"], "action": "leave_out", "reason": "Not a customer"}
+
+    def test_fixes_whose_check_failed_are_said_to_be_applied_not_the_file_changed(self):
+        # #34607: the fixes were saved, then the check failed. Sent again, the call was told the
+        # file changed: it hadn't, only the fixes had, and no check had finished since.
+        session, result = self._session()
+        fix = self._leave_out_robot(result)
+        with patch.object(import_fixes, "check", side_effect=ConnectionError("Redis went away")):
+            self._fix_fails(session, fix)
+        self.assertEqual(json.loads(self._doc(session).excluded_rows), [5])  # the fixes stayed
+
+        response = self._fix_fails(session, fix)
+
+        self.assertEqual(response["error"], self.UNCHECKED)
+        # Checked again without fixes, as it says: the check is of the fixes already applied.
+        checked = self._run("dry_run_import", {"session": session})
+        self.assertTrue(checked["success"], checked)
+        self.assertNotIn("Not an allowed option", [g["cause"] for g in checked["result"]["groups"]])
+        self.assertTrue(import_fixes.checked_as_is(self._doc(session)))
+
+    def test_fixes_whose_background_check_died_are_said_to_be_applied(self):
+        session, result = self._session()
+        fix = self._leave_out_robot(result)
+        with (
+            patch.object(import_dry_run, "check_cost", return_value=import_dry_run.BACKGROUND_ROWS + 1),
+            patch.object(import_dry_run, "enqueue"),  # the worker died before it ran the check
+        ):
+            self.assertEqual(self._fix(session, fix)["state"], "running")
+
+        self.assertEqual(self._fix_fails(session, fix)["error"], self.UNCHECKED)
+
+    def test_a_new_file_after_fixes_whose_check_failed_is_still_a_changed_file(self):
+        session, result = self._session()
+        fix = self._leave_out_robot(result)
+        with patch.object(import_fixes, "check", side_effect=ConnectionError("Redis went away")):
+            self._fix_fails(session, fix)
+        lines = [
+            "Customer Name,Customer Group,Customer Type,Notes,Represents Company",
+            f"Eta {self.tag},{self.missing},Robot,,",
+        ]
+        other = frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": "other.csv",
+                "content": ("\n".join(lines) + "\n").encode(),
+                "is_private": 1,
+            }
+        ).insert()
+        import_dry_run.link_site_file(self._doc(session), other)
+
+        response = self._fix_fails(session, fix)
+
+        self.assertIn("The file changed since its last check", response["error"])
+
     # -- registration ------------------------------------------------------------------
 
     def test_fixes_are_an_input_of_the_dry_run_and_raise_no_approval_card(self):

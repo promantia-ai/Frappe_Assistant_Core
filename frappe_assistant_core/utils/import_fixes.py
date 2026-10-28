@@ -586,6 +586,11 @@ def apply_fixes(session, groups: Dict[str, Dict[str, Any]], fixes: List[Dict[str
     rules = {**rules, **kept}
     session.transformation_rules = frappe.as_json(rules) if rules else None
     session.excluded_rows = frappe.as_json(sorted(int(row) for row in reasons)) if reasons else None
+    if session.source_file:
+        # Until a check of them, the fixes are why the session isn't what was checked (#34607)
+        options = frappe.parse_json(session.template_options or "{}") or {}
+        options[dry_run.UNCHECKED_FIXES] = dry_run.fingerprint(session, readable_session_file(session))
+        session.template_options = frappe.as_json(options)
     session.log_step("Fix Errors", "Success", " ".join(done))
     return done
 
@@ -1181,6 +1186,15 @@ def checked_as_is(session) -> bool:
         return False
     file_doc = readable_session_file(session)
     return dry_run.fingerprint(session, file_doc) == session.validated_fingerprint
+
+
+def fixed_unchecked(session) -> bool:
+    """Whether the session is as its last fixes left it, and no check of it finished: the check
+    after them failed (a lost connection, a worker restart), so the fixes stay applied (#34607)."""
+    fixed = (frappe.parse_json(session.template_options or "{}") or {}).get(dry_run.UNCHECKED_FIXES)
+    if not fixed or not session.source_file or fixed == session.validated_fingerprint:
+        return False
+    return dry_run.fingerprint(session, readable_session_file(session)) == fixed
 
 
 def last_groups(session) -> Dict[str, Dict[str, Any]]:
