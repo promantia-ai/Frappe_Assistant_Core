@@ -69,7 +69,7 @@ class ImportRunCase(BaseAssistantTest):
         super().setUp()
         frappe.set_user("Administrator")
         self.registry = get_tool_registry()
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.tag = frappe.generate_hash(length=6)
         self.group = f"Imported {self.tag}"
         frappe.get_doc(
@@ -82,9 +82,7 @@ class ImportRunCase(BaseAssistantTest):
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        # The transaction rollback removes File rows but not the files on disk.
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     # -- helpers -----------------------------------------------------------------------
@@ -315,7 +313,7 @@ class TestImportRun(ImportRunCase):
         from frappe.core.doctype.data_import.data_import import DataImport
 
         session, checked = self._ready_session()
-        files_before = set(frappe.get_all("File", pluck="name"))
+        files_before = self.new_files()
 
         with patch.object(
             DataImport, "validate", autospec=True, side_effect=frappe.ValidationError("refused")
@@ -323,7 +321,7 @@ class TestImportRun(ImportRunCase):
             response = self._import(session, checked)
 
         self.assertFalse(response["success"], response)
-        self.assertEqual(set(frappe.get_all("File", pluck="name")), files_before)
+        self.assertEqual(self.new_files(), files_before)
         self.assertEqual(self._doc(session).status, "Ready to Import")
 
     def test_the_cleaned_file_keeps_the_users_row_numbers(self):
@@ -622,7 +620,7 @@ class TestImportRun(ImportRunCase):
     def test_a_start_that_fails_half_way_leaves_no_data_import_behind(self):
         session, checked = self._ready_session()
         imports_before = frappe.db.count("Data Import")
-        files_before = set(frappe.get_all("File", pluck="name"))
+        files_before = self.new_files()
 
         with patch.object(
             import_run, "_record_start", autospec=True, side_effect=frappe.TimestampMismatchError
@@ -631,7 +629,7 @@ class TestImportRun(ImportRunCase):
 
         self.assertFalse(response["success"], response)
         self.assertEqual(frappe.db.count("Data Import"), imports_before)
-        self.assertEqual(set(frappe.get_all("File", pluck="name")), files_before)
+        self.assertEqual(self.new_files(), files_before)
         # The rollback takes the File row; its content on disk goes too.
         self.assertFalse(os.path.exists(frappe.get_site_path("private", "files", f"{session}-import.csv")))
 

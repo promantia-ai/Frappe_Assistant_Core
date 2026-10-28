@@ -48,13 +48,11 @@ class ImportToolTestCase(BaseAssistantTest):
     def setUp(self):
         super().setUp()
         self.registry = get_tool_registry()
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        # The transaction rollback removes File rows but not the files on disk.
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     def _run(self, tool_name, arguments):

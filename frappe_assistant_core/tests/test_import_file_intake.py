@@ -21,6 +21,7 @@ import base64
 import codecs
 import csv
 import io
+import os
 import unittest
 from unittest.mock import patch
 
@@ -68,14 +69,12 @@ class TestFileIntake(BaseAssistantTest):
         # A plain desk user: owns the files they upload, holds no import rights.
         self.user = self.make_desk_user("intake")
         frappe.set_user(self.user)
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.sessions_before = frappe.db.count("FAC Import Session")
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        # The transaction rollback removes File rows but not the files on disk.
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     # -- helpers ---------------------------------------------------------------------------
@@ -109,9 +108,6 @@ class TestFileIntake(BaseAssistantTest):
 
     def _new_sessions(self):
         return frappe.db.count("FAC Import Session") - self.sessions_before
-
-    def _new_files(self):
-        return set(frappe.get_all("File", pluck="name")) - self.files_before
 
     @staticmethod
     def _session_rows(session_id):
@@ -205,7 +201,7 @@ class TestFileIntake(BaseAssistantTest):
         )
         self.assertEqual(result["header_row_guess"], 3)
         self.assertEqual(self._new_sessions(), 0)
-        self.assertEqual(self._new_files(), {original.name})
+        self.assertEqual(self.new_files(), {original.name})
 
     def test_header_row_names_the_heading_row(self):
         rows = [["Company", "Acme Traders"], ["Period", "2026-27"], HEADINGS, ["A", "Retail", "India"]]
@@ -289,7 +285,7 @@ class TestFileIntake(BaseAssistantTest):
             (copy.attached_to_doctype, copy.attached_to_name), ("FAC Import Session", session_id)
         )
         self.assertTrue(copy.file_name.endswith(".csv"))
-        self.assertEqual(self._new_files(), {original.name, copy.name})
+        self.assertEqual(self.new_files(), {original.name, copy.name})
 
     def test_repeated_headings_are_made_unique(self):
         rows = [["Name", "Name", "Group"], ["Acme", "Acme Traders", "Retail"]]
@@ -379,8 +375,6 @@ class TestFileIntake(BaseAssistantTest):
         )
 
     def test_retention_deletes_an_ended_sessions_files_and_keeps_the_session(self):
-        from frappe_assistant_core.utils import import_retention
-
         old, recent = self._ended_session(days_ago=400), self._ended_session()
         still_open = self._start(
             file_id=self._upload("open.csv", _csv([HEADINGS[:3], ["D", "E", "F"]]).encode()).name
@@ -394,7 +388,7 @@ class TestFileIntake(BaseAssistantTest):
             update_modified=False,
         )
 
-        import_retention.purge_old_sessions()
+        self.run_retention_on(old, recent, still_open)
 
         self.assertFalse(self._files_of(old))
         self.assertEqual(frappe.get_doc("FAC Import Session", old).steps[-1].step, "Retention")
@@ -403,16 +397,27 @@ class TestFileIntake(BaseAssistantTest):
 
     def test_retention_cancels_an_abandoned_failed_session(self):
         # #34541: a Failed session is held for a retry, but nothing ended one nobody came back to
-        from frappe_assistant_core.utils import import_retention
-
         session_id = self._ended_session(days_ago=400)
         frappe.set_user("Administrator")
         frappe.db.set_value("FAC Import Session", session_id, "status", "Failed", update_modified=False)
 
-        import_retention.purge_old_sessions()
+        self.run_retention_on(session_id)
 
         self.assertEqual(frappe.db.get_value("FAC Import Session", session_id, "status"), "Cancelled")
         self.assertFalse(self._files_of(session_id))
+
+    def test_the_retention_tests_leave_the_sites_own_sessions(self):
+        # #34606: they purged every ended session on the site. The rollback brings the rows back,
+        # not the files on disk, so a user's session was left pointing at files that were gone.
+        theirs = self._ended_session(days_ago=400)
+        on_disk = [frappe.get_doc("File", f.name).get_full_path() for f in self._files_of(theirs)]
+
+        self.test_retention_deletes_an_ended_sessions_files_and_keeps_the_session()
+        self.test_retention_cancels_an_abandoned_failed_session()
+
+        self.assertTrue(self._files_of(theirs))
+        self.assertTrue(on_disk)
+        self.assertTrue(all(os.path.exists(path) for path in on_disk))
 
     def test_a_personal_data_deletion_deletes_the_users_session_files(self):
         from frappe_assistant_core.utils import import_retention
@@ -489,7 +494,7 @@ class TestFileIntake(BaseAssistantTest):
         with patch.object(import_session, "max_import_rows", autospec=True, return_value=1):
             self._start_fails("more than the 1 one import may have", file_id=original.name)
 
-        self.assertEqual(self._new_files(), {original.name})
+        self.assertEqual(self.new_files(), {original.name})
         self.assertEqual(self._new_sessions(), 0)
 
 
@@ -503,7 +508,7 @@ class TestFileIntakeImport(BaseAssistantTest):
         super().setUp()
         frappe.set_user("Administrator")
         self.registry = get_tool_registry()
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.tag = frappe.generate_hash(length=6)
         if not frappe.db.exists("Customer Group", self.GROUP):
             frappe.get_doc(
@@ -517,8 +522,7 @@ class TestFileIntakeImport(BaseAssistantTest):
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     def _run(self, tool_name, arguments):

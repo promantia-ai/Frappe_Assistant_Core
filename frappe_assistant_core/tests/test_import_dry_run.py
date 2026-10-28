@@ -49,7 +49,7 @@ class TestDryRunImport(BaseAssistantTest):
         super().setUp()
         frappe.set_user("Administrator")
         self.registry = get_tool_registry()
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.tag = frappe.generate_hash(length=6)
         # The test transaction is rolled back once per class. Each test undoes its own rows
         # instead, so the one test that commits for real (the series lock) doesn't make the
@@ -78,9 +78,7 @@ class TestDryRunImport(BaseAssistantTest):
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        # The transaction rollback removes File rows but not the files on disk.
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         try:
             frappe.db.rollback(save_point=TEST_SAVEPOINT)
         except Exception as e:
@@ -252,7 +250,7 @@ class TestDryRunImport(BaseAssistantTest):
         before = {dt: frappe.db.count(dt) for dt in doctypes}
         queued = self._queue_lengths()
         private = self._private_files()
-        files = set(frappe.get_all("File", pluck="name"))
+        files = self.new_files()
         inserted, real_db_insert = [], Document.db_insert
 
         def db_insert(doc, *args, **kwargs):
@@ -275,7 +273,7 @@ class TestDryRunImport(BaseAssistantTest):
         self.assertEqual(frappe.db.count("Customer", {"customer_name": self.existing}), 1)
         self.assertEqual(self._queue_lengths(), queued)
         # The only File is the check's own result, attached to the session.
-        new_files = set(frappe.get_all("File", pluck="name")) - files
+        new_files = self.new_files() - files
         url = frappe.db.get_value("FAC Import Session", session, "validation_results")
         results = frappe.get_doc("File", {"file_url": url})
         self.assertEqual(new_files, {results.name})

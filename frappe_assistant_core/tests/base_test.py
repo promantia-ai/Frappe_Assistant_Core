@@ -337,6 +337,47 @@ class BaseAssistantTest(IntegrationTestCase):
         self.assertEqual(frappe.db.get_value("User", email, "user_type"), "System User")
         return email
 
+    def track_test_files(self) -> None:
+        """Note each File this test inserts, for ``delete_test_files`` and ``new_files``.
+
+        Only the test's own: a File a user uploads to the site while the suite runs is theirs,
+        and a snapshot of every File on the site took it too (#34606).
+        """
+        from frappe.core.doctype.file.file import File
+
+        self.test_files = []
+        after_insert = File.after_insert
+
+        def noted(doc, *args, **kwargs):
+            self.test_files.append(doc.name)
+            return after_insert(doc, *args, **kwargs)
+
+        patcher = patch.object(File, "after_insert", noted)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def new_files(self) -> set:
+        """The Files this test inserted that are still there."""
+        return {name for name in self.test_files if frappe.db.exists("File", name)}
+
+    def delete_test_files(self) -> None:
+        """Delete the Files this test inserted. The rollback removes their rows, not the files on disk."""
+        for name in self.new_files():
+            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+
+    def run_retention_on(self, *sessions: str) -> int:
+        """Chat retention's daily purge_old_sessions, which picks the ended sessions it purges,
+        purging only ``sessions``: the site's real ones are not the test's to delete (#34606)."""
+        from frappe_assistant_core.utils import import_retention
+
+        purge = import_retention.purge
+
+        def purge_only_these(names, *args, **kwargs):
+            return purge([name for name in names if name in sessions], *args, **kwargs)
+
+        with patch.object(import_retention, "purge", purge_only_these):
+            return import_retention.purge_old_sessions()
+
     def assert_cannot(self, user: str, ptype: str, doctype: str, doc: str | None = None):
         """``user`` lacks ``ptype`` on ``doctype`` (or on the record ``doc``), by Frappe's own rules.
 

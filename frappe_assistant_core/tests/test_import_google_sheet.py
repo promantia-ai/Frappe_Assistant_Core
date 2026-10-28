@@ -73,14 +73,12 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
         self.user = self.make_desk_user("sheets")
         self.assert_cannot(self.user, "create", "Data Import")
         frappe.set_user(self.user)
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.sessions_before = frappe.db.count("FAC Import Session")
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        # The transaction rollback removes File rows but not the files on disk.
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     def _run(self, arguments):
@@ -91,9 +89,6 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
         self.assertFalse(response["success"], response)
         self.assertIn(expected_text, response["error"])
         return response
-
-    def _new_files(self):
-        return set(frappe.get_all("File", pluck="name")) - self.files_before
 
     def _new_sessions(self):
         return frappe.db.count("FAC Import Session") - self.sessions_before
@@ -138,7 +133,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
                 response = self._start_fails(SHARE_ADVICE, google_sheets_url=LINK)
                 self.assertNotIn("Client Error", response["error"])
 
-            self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+            self.assertEqual((self._new_sessions(), self.new_files()), (0, set()))
         # Frappe's own "not publicly accessible" pop-up is not left for the page to show.
         self.assertFalse(frappe.local.message_log)
 
@@ -151,7 +146,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
             with self.subTest(case), _google(reply):
                 self._start_fails("try again", google_sheets_url=LINK)
 
-            self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+            self.assertEqual((self._new_sessions(), self.new_files()), (0, set()))
 
     # -- the download is bounded: a huge or slow sheet can't hold the server up -----------
 
@@ -170,7 +165,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
             self._start_fails("larger than", google_sheets_url=LINK)
 
         self.assertEqual(read, [])
-        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+        self.assertEqual((self._new_sessions(), self.new_files()), (0, set()))
 
     def test_reading_stops_once_the_sheet_passes_the_size_limit(self):
         reply = _reply(200, b"")
@@ -179,7 +174,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
             self._start_fails("larger than", google_sheets_url=LINK)
 
         self.assertLess(sum(len(chunk) for chunk in read), 10_000 + len(read[0]) + 1)
-        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+        self.assertEqual((self._new_sessions(), self.new_files()), (0, set()))
 
     def test_reading_stops_at_the_sites_own_file_size_limit(self):
         # Frappe's File refuses anything over System Settings' Max File Size (25 MB by default):
@@ -219,7 +214,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
             self._start_fails("try again", google_sheets_url=LINK)
 
         self.assertEqual(len(read), 1)
-        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+        self.assertEqual((self._new_sessions(), self.new_files()), (0, set()))
 
     def test_a_link_that_isnt_a_google_sheet_is_refused_without_downloading(self):
         for link in (
@@ -257,7 +252,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
         with _google(_reply(200, CSV_CONTENT)):
             self._start_fails("more than the 10", google_sheets_url=LINK)
 
-        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+        self.assertEqual((self._new_sessions(), self.new_files()), (0, set()))
 
     def test_a_session_that_cant_be_saved_leaves_no_copy_behind(self):
         from frappe_assistant_core.plugins.migration.tools.start_import_session import StartImportSession
@@ -274,7 +269,7 @@ class TestStartFromGoogleSheet(BaseAssistantTest):
             response = self._run({"google_sheets_url": LINK})
 
         self.assertFalse(response["success"], response)
-        self.assertEqual((self._new_sessions(), self._new_files()), (0, set()))
+        self.assertEqual((self._new_sessions(), self.new_files()), (0, set()))
 
 
 GROUP = "FAC Sheets Group"
@@ -289,7 +284,7 @@ class TestCheckGoogleSheetAgain(BaseAssistantTest):
         super().setUp()
         frappe.set_user("Administrator")
         self.registry = get_tool_registry()
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.tag = frappe.generate_hash(length=6)
         if not frappe.db.exists("Customer Group", GROUP):
             frappe.get_doc(
@@ -303,8 +298,7 @@ class TestCheckGoogleSheetAgain(BaseAssistantTest):
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     def _run(self, tool_name, arguments):

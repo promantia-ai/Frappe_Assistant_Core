@@ -42,7 +42,7 @@ class OpeningBalancesCase(BaseAssistantTest):
         self.date = nowdate()
         if not opening_invoices.in_fiscal_year(self.date, self.company):
             self.skipTest("today is in no fiscal year of the test company")
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.made_accounts, self.made_entries = [], []
         self.temporary = self._temporary_account()
         self.bank = self._account("Bank", "Asset", "Bank")
@@ -63,8 +63,7 @@ class OpeningBalancesCase(BaseAssistantTest):
                 frappe.delete_doc("Account", name, force=True, ignore_permissions=True)
             except Exception:
                 frappe.clear_messages()
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     # -- fixtures ------------------------------------------------------------------------

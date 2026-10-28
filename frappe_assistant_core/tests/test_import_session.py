@@ -48,15 +48,13 @@ class TestImportSession(BaseAssistantTest):
         self.user = self.make_desk_user("importer")
         self.assert_cannot(self.user, "create", "Data Import")
         frappe.set_user(self.user)
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.sessions_before = frappe.db.count("FAC Import Session")
 
     def tearDown(self):
         frappe.local.ar_session_id = None
         frappe.set_user("Administrator")
-        # The transaction rollback removes File rows but not the files on disk.
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     # -- helpers ---------------------------------------------------------------
@@ -105,9 +103,6 @@ class TestImportSession(BaseAssistantTest):
     def _new_sessions(self):
         """Sessions created since this test began (the rollback runs per class, not per test)."""
         return frappe.db.count("FAC Import Session") - self.sessions_before
-
-    def _new_files(self):
-        return set(frappe.get_all("File", pluck="name")) - self.files_before
 
     # -- registration ------------------------------------------------------------
 
@@ -249,7 +244,7 @@ class TestImportSession(BaseAssistantTest):
         session_id = self._start(file_url=file_doc.file_url)["session_id"]
 
         doc = frappe.get_doc("FAC Import Session", session_id)
-        self.assertEqual(self._new_files(), {file_doc.name, doc.source_file})
+        self.assertEqual(self.new_files(), {file_doc.name, doc.source_file})
         self.assertEqual((doc.original_file, doc.file_source), (file_doc.name, "Site File"))
 
     def test_no_row_of_the_file_is_stored_on_the_session(self):
@@ -295,7 +290,7 @@ class TestImportSession(BaseAssistantTest):
         )
 
         self.assertEqual(self._new_sessions(), 0)
-        self.assertEqual(set(frappe.get_all("File", pluck="name")) - self.files_before, {file_doc.name})
+        self.assertEqual(self.new_files(), {file_doc.name})
 
     def test_target_without_import_permission_is_refused(self):
         # Any desk user may create a Contact (role All, if owner); only System
@@ -410,7 +405,7 @@ class TestImportSession(BaseAssistantTest):
             )
             copies.add(doc.source_file)
         # Each session reads its own copy of the chat's file (#34405): chat retention may delete it.
-        self.assertEqual(self._new_files(), {upload["name"], *copies})
+        self.assertEqual(self.new_files(), {upload["name"], *copies})
         self.assertNotIn(upload["name"], copies)
 
     def test_another_users_chat_file_cannot_open_a_session(self):

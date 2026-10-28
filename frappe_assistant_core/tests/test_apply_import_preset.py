@@ -92,14 +92,13 @@ class PresetToolCase(BaseAssistantTest):
         frappe.set_user("Administrator")
         self.registry = get_tool_registry()
         self.tag = frappe.generate_hash(length=6)
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         presets.clear_cache()
 
     def tearDown(self):
         frappe.set_user("Administrator")
         presets.clear_cache()
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     def _upload(self, file_name, content):

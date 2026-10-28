@@ -45,7 +45,7 @@ class OpeningInvoicesCase(BaseAssistantTest):
         self.date = nowdate()
         if not opening_invoices.in_fiscal_year(self.date, self.company):
             self.skipTest("today is in no fiscal year of the test company")
-        self.files_before = set(frappe.get_all("File", pluck="name"))
+        self.track_test_files()
         self.temporary = self._temporary_account()
         self.customer = self._party("Customer", f"OI Cust {self.tag}")
         self.customer2 = self._party("Customer", f"OI Cust2 {self.tag}")
@@ -54,8 +54,7 @@ class OpeningInvoicesCase(BaseAssistantTest):
 
     def tearDown(self):
         frappe.set_user("Administrator")
-        for name in set(frappe.get_all("File", pluck="name")) - self.files_before:
-            frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+        self.delete_test_files()
         super().tearDown()
 
     # -- fixtures ------------------------------------------------------------------------
