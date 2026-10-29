@@ -142,7 +142,21 @@ permission_query_conditions = {
 
 doc_events = {
     "Assistant Core Settings": {"on_update": "frappe_assistant_core.utils.cache.invalidate_settings_cache"},
-    "Assistant Audit Log": {"after_insert": "frappe_assistant_core.utils.cache.invalidate_dashboard_cache"},
+    "Assistant Audit Log": {
+        "after_insert": [
+            "frappe_assistant_core.utils.cache.invalidate_dashboard_cache",
+            "frappe_assistant_core.onboarding.entry.clear_cache_for_audit",
+        ]
+    },
+}
+
+# The go-live entry check caches the stage for a few minutes; the records it is read from clear it (#34419)
+_GO_LIVE_CLEAR = "frappe_assistant_core.onboarding.entry.clear_cache"
+for _doctype in ("FAC Setup Plan", "FAC Hypercare", "FAC Go-Live"):
+    doc_events[_doctype] = {event: _GO_LIVE_CLEAR for event in ("after_insert", "on_update", "on_trash")}
+doc_events["FAC Import Session"] = {
+    event: "frappe_assistant_core.onboarding.entry.clear_cache_for_import_session"
+    for event in ("after_insert", "on_update", "on_trash")
 }
 
 # Scheduled Tasks

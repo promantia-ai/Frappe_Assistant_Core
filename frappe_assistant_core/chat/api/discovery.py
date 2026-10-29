@@ -49,7 +49,12 @@ def should_show_banner() -> bool:
         return False
     user = frappe.session.user
     dismissed = frappe.db.exists("FAC Chat Banner Dismissal", {"user": user})
-    return not dismissed
+    if dismissed:
+        return False
+    # one FAC banner at a time: while the site is being taken live, the go-live banner shows (#34419)
+    from frappe_assistant_core.onboarding.entry import get_state
+
+    return not get_state(user).get("show")
 
 
 @frappe.whitelist(methods=["POST"])

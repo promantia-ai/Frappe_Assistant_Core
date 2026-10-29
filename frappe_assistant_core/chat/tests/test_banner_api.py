@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from unittest.mock import patch
+
 import frappe
 
 from frappe_assistant_core.tests.base_test import BaseAssistantTest
@@ -33,6 +35,13 @@ class TestBannerAPI(BaseAssistantTest):
         clear_chat_gate_cache()
         frappe.clear_cache()
         frappe.set_user("Administrator")
+        # A site being taken live shows the go-live banner instead (#34419); these tests are about
+        # a site that isn't, which is every site the go-live check hides itself on.
+        patcher = patch(
+            "frappe_assistant_core.onboarding.entry.get_state", autospec=True, return_value={"show": False}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         frappe.db.delete("FAC Chat Banner Dismissal", {"user": "Administrator"})

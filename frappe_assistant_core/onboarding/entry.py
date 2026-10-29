@@ -277,6 +277,38 @@ def clear_cache(*args, **kwargs) -> None:
     frappe.cache().delete_keys(CACHE_KEY)
 
 
+def clear_cache_for_import_session(doc, method=None) -> None:
+    # only a migration plan changes the stage; a file's own session is saved at every step
+    if doc.get("plan_status"):
+        clear_cache()
+
+
+def clear_cache_for_audit(doc, method=None) -> None:
+    # step 5 is read from the latest go_live_test_run call
+    if doc.get("tool_name") == "go_live_test_run":
+        clear_cache()
+
+
+def record_tools_switch(enabled: bool) -> None:
+    """Who switched the Migration plugin off in FAC Admin, so the entry check doesn't switch it back on
+    (6.5); switching it on clears it. Kept on every company's FAC Go-Live."""
+    names = frappe.get_all("FAC Go-Live", pluck="name")
+    if not names and not enabled:
+        company = pick_company(frappe.session.user)
+        if company:
+            from frappe_assistant_core.assistant_core.doctype.fac_go_live.fac_go_live import get_or_create
+
+            names = [get_or_create(company).name]
+    values = (
+        {"tools_disabled_by": None, "tools_disabled_on": None}
+        if enabled
+        else {"tools_disabled_by": frappe.session.user, "tools_disabled_on": frappe.utils.now_datetime()}
+    )
+    for name in names:
+        frappe.db.set_value("FAC Go-Live", name, values)
+    clear_cache()
+
+
 def _hypercare_weeks(care) -> Dict[str, Any]:
     days_since = max(frappe.utils.date_diff(frappe.utils.nowdate(), care.start_date), 0)
     total = max(-(-int(care.days or 0) // 7), 1)

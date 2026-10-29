@@ -213,27 +213,6 @@ class TestStage(GoLiveCase):
 
         return entry.stage(self.company)
 
-    def gl_entries(self, count, days_old=0):
-        # Posted entries, written straight to the table: the rules only count them and read their
-        # age, and posting real vouchers would take minutes for the larger counts.
-        created = frappe.utils.add_days(frappe.utils.now_datetime(), -days_old)
-        for _i in range(count):
-            doc = frappe.new_doc("GL Entry")
-            doc.update(
-                {
-                    "name": frappe.generate_hash(length=12),
-                    "company": self.company,
-                    "posting_date": frappe.utils.nowdate(),
-                    "account": f"Cash - {self.abbr}",
-                    "debit": 1,
-                    "docstatus": 1,
-                    "is_cancelled": 0,
-                    "creation": created,
-                    "modified": created,
-                }
-            )
-            doc.db_insert()
-
     def migration_plan(self):
         # run_migration_plan's plan is an import session with plan_status set
         doc = frappe.new_doc("FAC Import Session")
@@ -511,7 +490,7 @@ class TestEntryCheck(GoLiveCase):
     def test_established_with_plugin_off_sees_nothing(self):
         self.manager.get_enabled_plugins.return_value = {"core"}
         frappe.db.set_value("FAC Go-Live", {"company": self.company}, "intent", "Own business")
-        TestStage.gl_entries(self, 50)
+        self.gl_entries(50)
         self.assertEqual(self.state(), {"show": False})
         self.manager.enable_plugin.assert_not_called()
 
@@ -528,7 +507,7 @@ class TestEntryCheck(GoLiveCase):
 
     def test_checklist_view_shows_established(self):
         frappe.db.set_value("FAC Go-Live", {"company": self.company}, "intent", "Own business")
-        TestStage.gl_entries(self, 50)
+        self.gl_entries(50)
         state = self.state(view="checklist")
         self.assertTrue(state["show"])
         self.assertEqual(state["stage"], "established")

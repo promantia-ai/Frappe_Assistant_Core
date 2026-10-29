@@ -122,6 +122,12 @@ def toggle_plugin(plugin_name: str, enable: bool):
 
         plugin_manager.refresh_plugins()
 
+        if plugin_name == "migration":
+            # an administrator's choice: the go-live entry check doesn't switch it back on (#34419)
+            from frappe_assistant_core.onboarding.entry import record_tools_switch
+
+            record_tools_switch(bool(enable))
+
         return {"success": True, "message": _(message)}
     except Exception as e:
         frappe.log_error(f"Failed to toggle plugin '{plugin_name}': {str(e)}")

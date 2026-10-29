@@ -95,6 +95,27 @@ class GoLiveCase(BaseAssistantTest):
             doc.db_set("status", status)
         return doc
 
+    def gl_entries(self, count, days_old=0):
+        # Posted entries, written straight to the table: the rules only count them and read their
+        # age, and posting real vouchers would take minutes for the larger counts.
+        created = frappe.utils.add_days(now_datetime(), -days_old)
+        for _i in range(count):
+            doc = frappe.new_doc("GL Entry")
+            doc.update(
+                {
+                    "name": frappe.generate_hash(length=12),
+                    "company": self.company,
+                    "posting_date": frappe.utils.nowdate(),
+                    "account": f"Cash - {self.abbr}",
+                    "debit": 1,
+                    "docstatus": 1,
+                    "is_cancelled": 0,
+                    "creation": created,
+                    "modified": created,
+                }
+            )
+            doc.db_insert()
+
     def go_live(self, company=None, **fields):
         from frappe_assistant_core.assistant_core.doctype.fac_go_live.fac_go_live import get_or_create
 
