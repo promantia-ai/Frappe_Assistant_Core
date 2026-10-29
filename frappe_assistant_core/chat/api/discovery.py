@@ -54,7 +54,7 @@ def should_show_banner() -> bool:
     # one FAC banner at a time: while the site is being taken live, the go-live banner shows (#34419)
     from frappe_assistant_core.onboarding.entry import get_state
 
-    return not get_state(user).get("show")
+    return not get_state(user, may_write=False).get("show")
 
 
 @frappe.whitelist(methods=["POST"])

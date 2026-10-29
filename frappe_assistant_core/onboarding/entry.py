@@ -513,7 +513,7 @@ def _mcp_endpoint() -> str:
 def mcp_instructions(user: str) -> Optional[str]:
     """The paragraph an MCP client gets in the initialize result while the company isn't live yet,
     so Claude or ChatGPT offers what the banner offers. None otherwise."""
-    state = get_state(user)
+    state = get_state(user, may_write=False)
     if not state.get("show") or state["stage"] not in ("not_started", "in_progress", "ready_to_go_live"):
         return None
     step = STEP_LABELS.get(state["next_step"]) if state["next_step"] else None
@@ -529,7 +529,9 @@ def mcp_instructions(user: str) -> Optional[str]:
     return text
 
 
-def get_state(user: str, view: str = "banner", company: Optional[str] = None) -> Dict[str, Any]:
+def get_state(
+    user: str, view: str = "banner", company: Optional[str] = None, may_write: bool = True
+) -> Dict[str, Any]:
     """What the Desk banner (view "banner") or the checklist (view "checklist") shows this user.
 
     Checks run in order and the first that fails hides everything: S1-S4, U1-U3, then for the banner
@@ -537,15 +539,18 @@ def get_state(user: str, view: str = "banner", company: Optional[str] = None) ->
     stage. The checklist, on the Go-Live Readiness report and FAC Admin, ignores S5, U4 and the stage,
     so "Already live" can be undone and an established site can still start. Never raises: any error
     hides the banner and is logged.
+
+    may_write False only reads: the FAC Chat banner and the MCP server ask too, and only the go-live
+    endpoint switches the tools on (two requests doing it at once deadlock).
     """
     try:
-        return _get_state(user, view, company)
+        return _get_state(user, view, company, may_write)
     except Exception:
         frappe.log_error(title=ERROR_TITLE, message=frappe.get_traceback())
         return dict(HIDDEN)
 
 
-def _get_state(user: str, view: str, company: Optional[str]) -> Dict[str, Any]:
+def _get_state(user: str, view: str, company: Optional[str], may_write: bool = True) -> Dict[str, Any]:
     if _site_hidden() or _user_hidden(user):
         return dict(HIDDEN)
     banner = view != "checklist"
@@ -572,7 +577,7 @@ def _get_state(user: str, view: str, company: Optional[str]) -> Dict[str, Any]:
         if (
             variant == "checklist"
             and not state["plugin_on"]
-            and (marked_live or not maybe_enable_tools(state, user))
+            and (marked_live or not may_write or not maybe_enable_tools(state, user))
         ):
             variant = "enable_tools"
     text, primary, buttons = _text(variant, current, company, state, can_enable)

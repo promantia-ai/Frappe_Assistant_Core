@@ -185,3 +185,23 @@ class TestGoLiveApi(GoLiveCase):
 
         entry.clear_cache()
         self.assertTrue(should_show_banner())
+
+    def test_chat_banner_check_never_switches_tools_on(self):
+        # Desk asks for both banners at once: two requests switching the plugin on deadlocked
+        # on a new site, and the go-live check failing closed let both banners show
+        from frappe_assistant_core.chat.api.discovery import should_show_banner
+        from frappe_assistant_core.chat.gate import clear_chat_gate_cache
+
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        frappe.db.set_single_value("Assistant Core Settings", "enable_fac_chat", 0)
+        clear_chat_gate_cache()
+        self.assertFalse(should_show_banner())
+        self.manager.enable_plugin.assert_not_called()
+        self.assertFalse(frappe.db.exists("Assistant Audit Log", {"action": "enable plugin"}))
+
+    def test_mcp_instructions_never_switch_tools_on(self):
+        from frappe_assistant_core.onboarding.entry import mcp_instructions
+
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        self.assertIn(self.company, mcp_instructions(self.user))
+        self.manager.enable_plugin.assert_not_called()
