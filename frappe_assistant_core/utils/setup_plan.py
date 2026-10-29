@@ -21,13 +21,18 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt, getdate
 
+from frappe_assistant_core.core.security_config import WRITE_PROTECTED_DOCTYPES
 from frappe_assistant_core.utils import compat
-from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES
+from frappe_assistant_core.utils.customisation import CUSTOMISATION_DOCTYPES, SECURITY_DOCTYPES
 
 PLAN = "FAC Setup Plan"
 ITEM = "FAC Setup Plan Item"
 #: Single DocTypes and records a plan changes are those of the interview's areas; this is every area.
 MAX_ITEMS = 300
+#: Who may do what: never written by an item, which the model may compose itself and the card sums up in
+#: a line. Users and roles come through the staff area and its checks; the rest is set by hand.
+#: A customisation is not here: it is made beforehand on its own approval, and the plan only checks it.
+NOT_PLANNED = (frozenset(WRITE_PROTECTED_DOCTYPES) | SECURITY_DOCTYPES) - CUSTOMISATION_DOCTYPES
 
 
 class SetupProblem(Exception):
@@ -358,13 +363,19 @@ def _from_answers(company: str, answers: Dict[str, Any]) -> List[Dict[str, Any]]
         )
     for entry in _typed(answers, "price_lists", list) or []:
         name = entry["name"]
-        values = {
-            "price_list_name": name,
-            "currency": entry.get("currency") or frappe.db.get_value("Company", company, "default_currency"),
-            "selling": cint(entry.get("selling", 1)),
-            "buying": cint(entry.get("buying", 0)),
-            "enabled": 1,
-        }
+        if frappe.db.exists("Price List", name):
+            # an existing list keeps what nobody asked to change: its currency above all, which its
+            # item prices are in
+            values = {"enabled": 1, **{k: entry[k] for k in ("currency", "selling", "buying") if k in entry}}
+        else:
+            values = {
+                "price_list_name": name,
+                "currency": entry.get("currency")
+                or frappe.db.get_value("Company", company, "default_currency"),
+                "selling": cint(entry.get("selling", 1)),
+                "buying": cint(entry.get("buying", 0)),
+                "enabled": 1,
+            }
         items.append(_item("pricing", _("Price list {0}").format(name), "Price List", name, values))
     for key, doctype, field in (
         ("default_selling_price_list", "Selling Settings", "selling_price_list"),
@@ -509,6 +520,14 @@ def check_items(
             if not staff_problems:
                 good.append(item)
             continue
+        if doctype in NOT_PLANNED:
+            problems.append(
+                _(
+                    "Item {0}: a setup plan doesn't write {1}. Users and roles go in the Users and roles area; "
+                    "permissions are set by hand."
+                ).format(index, _(doctype))
+            )
+            continue
         if not frappe.db.exists("DocType", doctype):
             problems.append(_("Item {0}: {1} isn't on this site.").format(index, doctype))
             continue
@@ -646,6 +665,13 @@ def edit(plan_name: str, changes: Dict[str, Any]):
         target = row(number)
         if not isinstance(change, dict):
             raise SetupProblem(_("Item {0}: say the decision or the values to change.").format(number))
+        if change.get("values") and not change.get("decision") and target.area != STAFF:
+            # the card and the setup record say the decision: it must say the new values too
+            raise SetupProblem(
+                _("Item {0}: give its decision again with the new values, saying what it now does.").format(
+                    number
+                )
+            )
         if change.get("decision"):
             target.decision = cstr(change["decision"])
         if change.get("values"):
@@ -745,10 +771,38 @@ def decisions(doc) -> List[str]:
             how = _("already created: {0}").format(item.created_record or _("not created yet"))
         elif already_set(_as_dict(item)):
             how = _("already set")
+        elif item.area != STAFF and _exists(item):
+            how = _("changes the existing one")
         else:
             how = _("new")
-        lines.append(f"{_(_title(item.area))}: {item.decision} ({how})")
+        writes = writes_line(item)
+        lines.append(f"{_(_title(item.area))}: {item.decision} ({how})" + (f" [{writes}]" if writes else ""))
     return lines
+
+
+def _exists(item) -> bool:
+    """Whether the record an item writes is on the site already: a setting always is."""
+    if frappe.get_meta(item.target_doctype).issingle:
+        return True
+    return bool(item.target_name and frappe.db.exists(item.target_doctype, item.target_name))
+
+
+def _short(value: Any) -> str:
+    text = cstr(value) if isinstance(value, (str, int, float)) else json.dumps(value, default=str)
+    return text if len(text) <= 60 else text[:57] + "..."
+
+
+def writes_line(item) -> Optional[str]:
+    """What an item writes, read from its values, not from its decision: the card and the setup record
+    show both, so a decision that says something else (the model's own words, or a value changed since)
+    can be seen. None for a staff group, whose decision is made from its values, and a customisation,
+    which the run only checks."""
+    if item.area == STAFF or item.is_customisation or item.target_doctype in CUSTOMISATION_DOCTYPES:
+        return None
+    values = json.loads(item.values or "{}")
+    target = f"{_(item.target_doctype)} {item.target_name}" if item.target_name else _(item.target_doctype)
+    shown = ", ".join(f"{key} {_short(value)}" for key, value in sorted(values.items()))
+    return f"{target}: {shown}"
 
 
 def card_figures(doc) -> Dict[str, Any]:
@@ -1040,7 +1094,9 @@ def record(doc) -> Any:
         lines += ["", f"## {_(_title(area))}", ""]
         for item in by_area[area]:
             lines.append(
-                f"- {item['decision']}: {_(item['state'])}"
+                f"- {item['decision']}"
+                + (f" [{item['writes']}]" if item["writes"] else "")
+                + f": {_(item['state'])}"
                 + (f" ({item['message']})" if item["message"] else "")
             )
     if facts["fit_gap"]:
@@ -1077,6 +1133,7 @@ def describe(doc) -> Dict[str, Any]:
                 "number": item.idx,
                 "area": item.area,
                 "decision": item.decision,
+                "writes": writes_line(item),
                 "target": f"{item.target_doctype}: {item.target_name}"
                 if item.target_name
                 else item.target_doctype,

@@ -354,8 +354,8 @@ class TestRunSetupPlan(ImportRunCase):
         lines = plan["approval"]["decisions"]
 
         self.assertEqual(len(lines), 3)
-        self.assertTrue(any(line.endswith("(already set)") for line in lines), lines)
-        self.assertTrue(any(line.endswith("(new)") for line in lines), lines)
+        self.assertTrue(any("(already set)" in line for line in lines), lines)
+        self.assertTrue(any("(new)" in line for line in lines), lines)
         self.assertTrue(lines[0].startswith("What they sell and buy"), lines)
 
     def test_a_plan_changed_after_the_approval_card_is_refused_and_says_why(self):

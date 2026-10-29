@@ -22,7 +22,7 @@ from typing import Any, Dict, List
 import frappe
 from frappe import _
 from frappe.permissions import AUTOMATIC_ROLES
-from frappe.utils import validate_email_address
+from frappe.utils import cstr, validate_email_address
 
 from frappe_assistant_core.utils.permissions import ASSISTANT_ACCESS_ROLES
 
@@ -100,6 +100,12 @@ def _names(full_name: str) -> Dict[str, str]:
     return {"first_name": first, "last_name": last.strip()}
 
 
+def is_refused_role(role: Any) -> bool:
+    """True for a role a staff list never hands out, in any case or spacing: the database finds
+    "system manager" as System Manager, and saving stores the role's own spelling."""
+    return " ".join(cstr(role).split()).casefold() in {r.casefold() for r in REFUSED_ROLES}
+
+
 def check_group(index: int, group: Dict[str, Any], seen: set, planned: frozenset = frozenset()) -> List[str]:
     """Every problem of one group; ``seen`` holds the emails of the groups before it, and ``planned``
     the (DocType, name) records a setup plan makes before its staff, which a limit may name."""
@@ -111,7 +117,7 @@ def check_group(index: int, group: Dict[str, Any], seen: set, planned: frozenset
     if not roles:
         problems.append(_("{0}: no roles.").format(where))
     for role in roles:
-        if role in REFUSED_ROLES:
+        if is_refused_role(role):
             problems.append(
                 _("{0}: {1} is not given from a staff list; give it by hand.").format(where, role)
             )

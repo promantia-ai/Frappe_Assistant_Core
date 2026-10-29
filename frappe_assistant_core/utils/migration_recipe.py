@@ -14,6 +14,7 @@ settings, never a row of the file and never a date (M-D1). The run state of the 
 (progress, stop flag, fingerprints, left-out rows, file ids) is not copied.
 """
 
+import datetime
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
+from frappe.utils import cstr
 
 from frappe_assistant_core.assistant_core.doctype.fac_migration_recipe.fac_migration_recipe import (
     FORMAT_VERSION,
@@ -362,6 +364,30 @@ def whats_new(step, session) -> List[Dict[str, Any]]:
     return out
 
 
+def _checked_mapping(step, headers: List[str], mapping: Dict[str, str], import_type: Optional[str]):
+    """The step's mapping as set_column_mapping would save it, checked the same way: the user may import
+    into its DocType, and each field is one the import can fill, once. A recipe can come from another
+    site's file, so nothing in it is taken as checked. Raises RecipeProblem."""
+    from frappe_assistant_core.utils import import_mapping, import_update
+    from frappe_assistant_core.utils.import_session import import_target_problem
+
+    if import_type and import_type not in ("Insert New Records", import_update.UPDATE):
+        raise RecipeProblem(
+            _("Step {0}: import type {1} isn't one ERPNext has.").format(step.position, import_type)
+        )
+    problem = import_target_problem(step.target_doctype, import_type or "Insert New Records")
+    if problem:
+        raise RecipeProblem(_("Step {0}: {1}").format(step.position, problem))
+    schema = import_mapping.build_import_schema(step.target_doctype)
+    resolved, problems = import_mapping.resolve_mapping(step.target_doctype, schema, headers, mapping)
+    problems += import_mapping.duplicate_targets(resolved, headers)
+    if problems:
+        raise RecipeProblem(
+            _("Step {0}'s mapping can't be used: {1}").format(step.position, " ".join(problems))
+        )
+    return resolved
+
+
 def apply_step(step, session_name: str) -> Dict[str, Any]:
     """Write the step's mapping, value maps, source key and old ID translations onto the new file's
     session, then report what was new (RC-3). An opening step is not mapped here: its settings are
@@ -396,6 +422,7 @@ def apply_step(step, session_name: str) -> Dict[str, Any]:
             for i, h in enumerate(headers)
             if _norm(h) in by_header and by_header[_norm(h)] not in missing
         }
+        mapping = _checked_mapping(step, headers, mapping, step.import_type or session.import_type)
         session.import_type = step.import_type or session.import_type
         import_mapping.save_mapping(
             session,
@@ -430,22 +457,71 @@ def apply_step(step, session_name: str) -> Dict[str, Any]:
 
 LEFT_OUT_BEFORE = "Before the cut-off: the opening migration brought it in."
 LEFT_OUT_OPENING = "An opening journal entry: a delta run never posts an opening entry."
+LEFT_OUT_AGAIN = "Imported by an earlier delta run of this recipe."
+LEFT_OUT_EXISTING = "Already in ERPNext: a delta run brings in only the new ones."
 YES = ("yes", "1", "true", "y")
 
 
-def _parse_date(value: Any):
+def _date_format(session, position: int, cells: List[Any]) -> Optional[str]:
+    """The format the import reads the date column in: the session's own for the column (Frappe 16),
+    or the one most of its dates are in, as Data Import guesses it. Read cell by cell, 11-10-2026 was
+    10 November, while the import posts it on 11 October."""
+    options = frappe.parse_json(session.template_options or "{}") or {}
+    chosen = (options.get("column_to_date_format_map") or {}).get(str(position))
+    if chosen:
+        return chosen
+    found = [frappe.utils.guess_date_format(cstr(c).strip()) for c in cells if cstr(c).strip()]
+    found = [f for f in found if f]
+    return max(set(found), key=found.count) if found else None
+
+
+def _parse_date(value: Any, date_format: Optional[str] = None):
+    text = str(value or "").strip()
+    if not text:
+        return None
     try:
-        return frappe.utils.getdate(value) if str(value or "").strip() else None
+        if isinstance(value, (datetime.date, datetime.datetime)):
+            return frappe.utils.getdate(value)
+        if date_format:
+            return datetime.datetime.strptime(text, date_format).date()
+        return frappe.utils.getdate(text)
     except Exception:
         return None  # a date nobody can read is the dry run's to report, not a reason to leave the row out
 
 
-def leave_out_before(session, since: str) -> Dict[str, int]:
+def _earlier_delta_imports(recipe: str, doctype: str) -> List[str]:
+    """The Data Imports into ``doctype`` of the delta runs of ``recipe`` made before: a plan keeps its
+    recipe and its cut-off in the progress of its first file's session."""
+    from frappe_assistant_core.utils import import_failures
+
+    imports: List[str] = []
+    for plan in frappe.get_all(
+        import_plan.SESSION_DOCTYPE,
+        filters={"plan_settings": ["like", f"%{recipe}%"]},
+        fields=["name", "plan_settings"],
+    ):
+        progress = (frappe.parse_json(plan.plan_settings or "{}") or {}).get("progress") or {}
+        if not progress.get("delta_since") or (progress.get("recipe") or {}).get("name") != recipe:
+            continue
+        for member in frappe.get_all(
+            import_plan.SESSION_DOCTYPE,
+            filters={"migration_plan": plan.name, "target_doctype": doctype},
+            pluck="name",
+        ):
+            imports += [
+                link.data_import
+                for link in import_failures.own_links(frappe.get_doc(import_plan.SESSION_DOCTYPE, member))
+            ]
+    return imports
+
+
+def leave_out_before(session, since: str, recipe: Optional[str] = None) -> Dict[str, int]:
     """Leave out the rows of ``session``'s file dated on or before the cut-off, with the reason (RC-5,
     M-D5). The date is the parent row's, and the child rows under it follow it (M-D6); a row whose date
-    can't be read stays for the dry run to report. A journal entry of the opening is left out too.
+    can't be read stays for the dry run to report. A journal entry of the opening is left out too, and
+    a record an earlier delta run of ``recipe`` imported: the same delta run twice posted it twice.
     Raises RecipeProblem when the file's date column isn't mapped: nothing could be told apart."""
-    from frappe_assistant_core.utils import import_fixes
+    from frappe_assistant_core.utils import import_failures, import_fixes
 
     mapping = {int(p): f for p, f in dry_run.column_to_field_map(session).items() if str(p).isdigit()}
     date_at = next((p for p, f in mapping.items() if f == "posting_date"), None)
@@ -460,21 +536,29 @@ def leave_out_before(session, since: str) -> Dict[str, int]:
     cut_off = frappe.utils.getdate(since)
     rows = dry_run.read_sheet_rows(dry_run.readable_session_file(session), session.sheet or None)
     reasons = {str(entry["row"]): entry["reason"] for entry in import_fixes.left_out(session)}
-    counts = {"before": 0, "opening": 0}
+    date_format = _date_format(session, date_at, [r[date_at] for r in rows[1:] if date_at < len(r)])
+    counts = {"before": 0, "opening": 0, "again": 0}
+    again = (
+        import_failures.rows_imported_by(session, _earlier_delta_imports(recipe, session.target_doctype))
+        if recipe
+        else set()
+    )
     leaving = None  # the reason the current parent row's rows are left out for, or None
     for index, row in enumerate(rows[1:], start=2):  # row 1 is the header
         cell = row[date_at] if date_at < len(row) else ""
         if str(cell or "").strip():  # a parent row: its date decides for it and the rows under it
-            date = _parse_date(cell)
+            date = _parse_date(cell, date_format)
             opening = opening_at is not None and str(row[opening_at]).strip().lower() in YES
             leaving = None
             if opening:
                 leaving = LEFT_OUT_OPENING
             elif date and date <= cut_off:
                 leaving = LEFT_OUT_BEFORE
+            elif index in again:
+                leaving = LEFT_OUT_AGAIN
         if leaving:
             reasons.setdefault(str(index), _(leaving))
-            counts["opening" if leaving == LEFT_OUT_OPENING else "before"] += 1
+            counts[{LEFT_OUT_OPENING: "opening", LEFT_OUT_AGAIN: "again"}.get(leaving, "before")] += 1
     rules = frappe.parse_json(session.transformation_rules or "{}") or {}
     if reasons:
         rules["left_out"] = reasons
@@ -483,6 +567,52 @@ def leave_out_before(session, since: str) -> Dict[str, int]:
     session.submit_after_import = 1  # every delta document is submitted (M-D6)
     session.save()
     return counts
+
+
+def _leave_out(session, rows: set, reason: str) -> None:
+    """Add ``rows`` to the session's rows left out, each with ``reason`` unless it has one."""
+    from frappe_assistant_core.utils import import_fixes
+
+    reasons = {str(entry["row"]): entry["reason"] for entry in import_fixes.left_out(session)}
+    for row in rows:
+        reasons.setdefault(str(row), _(reason))
+    rules = frappe.parse_json(session.transformation_rules or "{}") or {}
+    if reasons:
+        rules["left_out"] = reasons
+        session.excluded_rows = frappe.as_json(sorted(int(row) for row in reasons))
+    session.transformation_rules = frappe.as_json(rules) if rules else None
+
+
+def leave_out_existing(session) -> int:
+    """Leave out the rows of a master's file whose record ERPNext has already, found as the dry run
+    finds it: by the old ID an earlier import kept, by the field that names the record, or by a unique
+    field. A delta run brings in only the new masters; checked as new, each one already there was
+    asked about as a failure. Returns how many rows were left out."""
+    from frappe_assistant_core.utils import import_fixes
+
+    source = dry_run.readable_session_file(session)
+    rows = import_fixes.apply_value_maps(session, dry_run.read_sheet_rows(source, session.sheet or None))
+    if len(rows) < 2:
+        return 0
+    column_map = dry_run.only_mapped(dry_run.column_to_field_map(session), len(rows[0]))
+    parsed = dry_run._parse(session, source, rows, column_map)
+    key_df = dry_run._key_field(session, parsed.header)
+    named_df = None if key_df else dry_run._named_field(session, parsed.header)
+    old_ids = set(dry_run._imported_old_ids(session))
+    doctype, there = session.target_doctype, set()
+    for payload in parsed.get_payloads_for_import():
+        numbers = {row.row_number for row in payload.rows}
+        key = cstr(payload.doc.get(key_df.fieldname)).strip() if key_df else ""
+        name = cstr(payload.doc.get(named_df.fieldname)).strip() if named_df else ""
+        if (
+            numbers & old_ids
+            or (key and frappe.db.exists(doctype, {key_df.fieldname: key}))
+            or (name and frappe.db.exists(doctype, name))
+        ):
+            there |= numbers
+    if there:
+        _leave_out(session, there, LEFT_OUT_EXISTING)
+    return len(there)
 
 
 def run(
@@ -535,9 +665,10 @@ def run(
             step = steps[entry["step"]]
             session = import_mapping.load_session(entry["session"])
             if step.target_doctype in TRANSACTION_DOCTYPES:
-                entry["left_out"] = leave_out_before(session, since)
+                entry["left_out"] = leave_out_before(session, since, doc.name)
             else:  # a master: only the new ones, and nothing is submitted
                 session.import_type = "Insert New Records"
+                entry["left_out"] = {"existing": leave_out_existing(session)}
                 session.save()
     # An opening step is set up by its own tool, so it can't be planned yet: it joins when it is set.
     planned = [a["session"] for a in applied if "opening" not in a]
@@ -728,7 +859,7 @@ def import_recipe(file_doc):
         frappe.session.user,
         frappe.utils.now_datetime().strftime("%Y-%m-%d %H:%M"),
         file_doc.file_name,
-        data.get("fac_version") or "?",
+        _text(data.get("fac_version"), "fac_version", 40) or "?",
     )
     doc = frappe.get_doc(
         {

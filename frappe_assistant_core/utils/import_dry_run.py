@@ -414,6 +414,11 @@ def run(session_name: str, commit_progress: bool = False, in_background: bool = 
         coming=import_plan.planned_names(session),
         later=import_plan.later_names(session),
     )
+    # an old ID nobody keeps, still in the cell once the value maps are applied
+    for (number, position), value in import_keys.not_kept(session, sheet_rows).items():
+        if number <= len(rows) and position < len(rows[number - 1]):
+            if cstr(rows[number - 1][position]).strip() == value:
+                checker.not_kept.setdefault(number, {})[position] = value
     excluded = _excluded_rows(session)
     imported = imported_rows(session)
     total = len(payloads)
@@ -653,6 +658,7 @@ class _Checker:
         self.later: Dict[str, Dict[str, str]] = later or {}
         # Fields an old ID column is mapped to (#34244): a value left in them is an ID not imported yet
         self.translated = import_keys.translated_fields(session)
+        self.not_kept: Dict[int, Dict[int, str]] = {}  # set by run: row → column → old ID nobody keeps
         self.preview = {"records_changing": 0, "fields_changing": 0, "by_field": {}, "samples": []}
         if matches is not None:
             from frappe_assistant_core.utils import import_update
@@ -676,6 +682,7 @@ class _Checker:
             # Checked beside the row's other problems too: a duplicate under a row with a typo would
             # otherwise show only once the typo is fixed, a second round of questions.
             problems += self._duplicate_problems(payload)
+            problems += self._not_kept_problems(payload)
             problems += self._fetched_problems(payload)
             problems += self._required_problems(payload, {info.get("field") for _key, info in problems})
         record, changed = self._record(payload), []
@@ -1071,6 +1078,37 @@ class _Checker:
                     {"cause": CAUSE_FETCHED, "field": field, "label": _(df.label), "message": message},
                 )
             )
+        return problems
+
+    def _not_kept_problems(self, payload) -> List[Tuple[Tuple, Dict]]:
+        """An old ID no record keeps, left in a link column, where a record of that very name exists:
+        Data Import would link that record, which is another one. Reported as an ID not imported yet,
+        unless an earlier file of the plan brings it. (One no record is named is Data Import's warning.)"""
+        problems = []
+        for row in payload.rows:
+            for position, value in self.not_kept.get(row.row_number, {}).items():
+                column = self.header.columns[position] if position < len(self.header.columns) else None
+                df = getattr(column, "df", None)
+                if not df or df.fieldtype != "Link" or column.skip_import:
+                    continue
+                if value.casefold() in self.coming.get(df.options, {}) or not frappe.db.exists(
+                    df.options, value
+                ):
+                    continue
+                message = _(
+                    "{0} '{1}' isn't imported yet: no record keeps this old ID, and the {0} called '{1}' is "
+                    "another record. Import the file that creates it first, map it to an existing record, or "
+                    "leave these rows out."
+                ).format(_(df.options), value)
+                info = {
+                    "cause": CAUSE_MISSING_LINK,
+                    "parent": df.parent,
+                    "field": df.fieldname,
+                    "label": _(df.label),
+                    "value": value,
+                    "message": message,
+                }
+                problems.append(((CAUSE_MISSING_LINK, df.parent, df.fieldname, value), info))
         return problems
 
     def _named_duplicate(self, payload) -> List[Tuple[Tuple, Dict]]:

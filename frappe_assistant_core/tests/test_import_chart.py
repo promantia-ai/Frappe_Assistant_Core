@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import frappe
 
-from frappe_assistant_core.tests.chart_case import ChartCase
+from frappe_assistant_core.tests.chart_case import CLIENT_CHART, ChartCase
 from frappe_assistant_core.utils import import_chart
 from frappe_assistant_core.utils.tool_category_detector import PRIVILEGED_TOOLS, READ_ONLY_TOOLS, WRITE_TOOLS
 
@@ -81,6 +81,15 @@ class TestReadChart(ChartCase):
         self.assertEqual(nodes["Acme Customers"]["account_type"], "Receivable")
         self.assertEqual(nodes["Vendor Pool"]["account_type"], "Payable")
         self.assertEqual(nodes["Vendor Pool"]["root_type"], "Liability")
+
+    def test_a_word_in_the_name_does_not_outrank_the_parents_root_type(self):
+        names, classes = self._classified([*CLIENT_CHART, "Bank Fees,5100,Client Expenses,,,"])
+        by_name = dict(zip([n["name"] for n in names], classes))
+
+        self.assertEqual(
+            (by_name["Bank Fees"]["root_type"], by_name["Bank Fees"]["account_type"]), ("Expense", "")
+        )
+        self.assertEqual(by_name["HDFC Current"]["account_type"], "Bank")  # a bank under assets still is
 
     def _classified(self, rows=None, root_type_column=None):
         nodes = import_chart.read_chart(

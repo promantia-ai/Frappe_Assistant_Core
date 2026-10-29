@@ -207,19 +207,9 @@ def translate(session, rows: List[List[Any]]) -> List[List[Any]]:
     """The file's rows (header first) with each old ID column's values replaced by the names of the
     records they stand for. An ID that is not kept stays as it is, so the check reports it. Nothing is
     written back: the rule is the session's, the names are looked up each time the rows are read."""
-    maps = key_maps(session)
-    if not maps or not rows:
+    found = _found(session, rows)
+    if not found:
         return rows
-    user = frappe.session.user
-    found = {
-        position: resolve(
-            spec["doctype"],
-            spec["system"],
-            [row[position] for row in rows[1:] if position < len(row)],
-            user=user,
-        )
-        for position, spec in maps.items()
-    }
     out = [rows[0]]
     for row in rows[1:]:
         row = list(row)
@@ -229,6 +219,36 @@ def translate(session, rows: List[List[Any]]) -> List[List[Any]]:
                 if name:
                     row[position] = name
         out.append(row)
+    return out
+
+
+def _found(session, rows: List[List[Any]]) -> Dict[int, Dict[str, Optional[str]]]:
+    """Each old ID column's position → {old ID: the record it stands for, or None}."""
+    maps = key_maps(session)
+    if not maps or not rows:
+        return {}
+    user = frappe.session.user
+    return {
+        position: resolve(
+            spec["doctype"],
+            spec["system"],
+            [row[position] for row in rows[1:] if position < len(row)],
+            user=user,
+        )
+        for position, spec in maps.items()
+    }
+
+
+def not_kept(session, rows: List[List[Any]]) -> Dict[Tuple[int, int], str]:
+    """``{(row number, column position): old ID}`` for each old ID in the file (header first, row 1) that
+    no record keeps: translate leaves it as it is, so a record that happens to have that name would be
+    linked."""
+    out = {}
+    for position, names in _found(session, rows).items():
+        for number, row in enumerate(rows[1:], start=2):
+            value = cstr(row[position]).strip() if position < len(row) else ""
+            if value and not names.get(normalise(row[position])):
+                out[(number, position)] = value
     return out
 
 

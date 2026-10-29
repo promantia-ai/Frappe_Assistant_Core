@@ -264,6 +264,26 @@ class TestHypercare(BaseAssistantTest):
             [c for c in sendmail.call_args_list if c.kwargs.get("reference_name") == record.name]
         )
 
+    def test_a_site_that_cannot_send_email_still_gets_the_bell_and_the_hypercare_ends(self):
+        record = self._hypercare(add_days(self.today, -30), days=30, last_summary_on=add_days(self.today, -4))
+        record.db_set("status", "Active")
+        # what frappe.sendmail raises on a site with no outgoing email account (Frappe 16)
+        refused = frappe.OutgoingEmailError("Please setup default outgoing Email Account")
+        with patch("frappe.sendmail", autospec=True, side_effect=refused):
+            hypercare.send_due_summaries()
+
+        self.assertTrue(
+            frappe.db.exists(
+                "Notification Log",
+                {"for_user": self.consultant, "document_name": record.name, "type": "Alert"},
+            )
+        )
+        self.assertEqual(
+            getdate(frappe.db.get_value("FAC Hypercare", record.name, "last_summary_on")),
+            add_days(self.today, -1),
+        )
+        self.assertEqual(frappe.db.get_value("FAC Hypercare", record.name, "status"), "Ended")
+
     def test_less_than_a_week_in_nothing_is_sent(self):
         record = self._hypercare(add_days(self.today, -3))
         sendmail = self._send()

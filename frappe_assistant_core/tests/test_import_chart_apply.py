@@ -185,6 +185,31 @@ class TestImportChart(ChartCase):
         )
         self.assertGreaterEqual(result["old_ids_kept"], 13)
 
+    def test_a_second_company_of_the_client_keeps_its_old_ids_too(self):
+        self._added()
+        abbr = "S" + frappe.generate_hash(length=4).upper()
+        second = frappe.get_doc(
+            {
+                "doctype": "Company",
+                "company_name": f"Second Co {self.tag}",
+                "abbr": abbr,
+                "default_currency": "JPY",
+                "country": "Japan",
+                "create_chart_of_accounts_based_on": "Standard Template",
+                "chart_of_accounts": "Standard",
+            }
+        ).insert()
+        self.company, self.abbr = second.name, abbr
+
+        _session, result = self._added()  # the same chart: the same names and numbers
+
+        own = f"{self.system} {abbr.lower()}"
+        hdfc = self._account("HDFC Current").name
+        self.assertGreaterEqual(result["old_ids_kept"], 13)
+        self.assertEqual(result["old_id_systems"], [own])
+        self.assertIn(own, result["message"])
+        self.assertEqual(keys.resolve("Account", own, ["1010"]), {"1010": hdfc})
+
     def test_the_opening_balances_find_an_account_by_the_clients_number_or_name(self):
         self._added()
         hdfc = self._account("HDFC Current").name

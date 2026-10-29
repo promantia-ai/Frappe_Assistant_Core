@@ -49,14 +49,21 @@ class MigrationRecipe(BaseTool):
             "make a recipe from such a file (file_id or file_url); nothing is run."
         )
         self.requires_permission = RECIPE
-        # a run quotes the client's files; an imported recipe comes from another site (#34003)
+        # a run quotes the client's files; an imported recipe comes from another site (#34003), its
+        # origin and note included
         self.untrusted_fields = (
             "applied",
             "unmatched_steps",
+            "skipped_steps",
             "problems",
             "title",
             "steps",
             "origin",
+            "source_site",
+            "source_plan",
+            "created_by",
+            "created_on",
+            "imported_note",
             "error",
         )
         self.inputSchema = {

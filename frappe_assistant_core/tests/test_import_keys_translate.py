@@ -214,6 +214,26 @@ class TestTranslateOldIds(ImportToolTestCase):
         self.assertIn("isn't imported yet", group["message"])
         self.assertEqual(checked["ready"], 3)
 
+    def test_an_unknown_id_that_names_another_record_is_not_linked_to_it(self):
+        # no record keeps G-…-7, but a group happens to be called that: Data Import would link it
+        unknown = f"G-{self.tag}-7"
+        frappe.get_doc(
+            {
+                "doctype": "Customer Group",
+                "customer_group_name": unknown,
+                "parent_customer_group": "All Customer Groups",
+            }
+        ).insert()
+        session = self._customers_file([*self.groups, unknown])
+        self._map_with_translation(session)
+
+        checked = self._run("dry_run_import", {"session": session})["result"]
+
+        group = next((g for g in checked["groups"] if g.get("value") == unknown), None)
+        self.assertTrue(group, checked["groups"])
+        self.assertIn("isn't imported yet", group["message"])
+        self.assertEqual(checked["ready"], 3)
+
     def test_an_unknown_id_can_be_mapped_to_an_existing_record_or_left_out(self):
         unknown = f"G-{self.tag}-9"
         session = self._customers_file([*self.groups, unknown])

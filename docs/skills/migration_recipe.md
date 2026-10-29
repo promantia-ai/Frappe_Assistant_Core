@@ -77,9 +77,14 @@ recipe again with `since`.
   Sales and Purchase Invoice, Payment Entry, Journal Entry, Stock Entry, Delivery Note, Purchase Receipt.
 - Rows dated on or before the cut-off are left out with the reason "Before the cut-off". The date is the
   parent row's; the child rows under it go with it. A journal entry marked as an opening entry is left
-  out whatever its date.
+  out whatever its date. Dates are read the way the import reads the column (11-10-2026 is 11 October on a
+  day-first file).
+- A record an earlier delta run of the same recipe imported is left out with the reason "Imported by an
+  earlier delta run", so running the same delta again posts nothing twice (`left_out.again`).
 - Masters (customers, items) are skipped. If the user wants the new ones, ask, then pass the positions of
-  those steps in `masters`; they come in insert-only (nothing existing is changed).
+  those steps in `masters`; they come in insert-only (nothing existing is changed). The ones already in
+  ERPNext are left out before the check with the reason "Already in ERPNext" (`left_out.existing`): say how
+  many, and don't ask about them.
 - Opening steps are never run in a delta run, and the opening engines refuse a file of one: no opening
   entry is posted twice.
 - Everything is submitted. The files go in this order: new masters, stock movements, delivery notes and

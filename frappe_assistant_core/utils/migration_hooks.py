@@ -147,6 +147,9 @@ def after_install():
     # Set default values for Assistant Core Settings
     _set_settings_defaults()
 
+    # Switch on the plugins a new site starts with
+    _enable_default_plugins()
+
 
 def after_uninstall():
     """
@@ -913,6 +916,32 @@ def _sync_plugin_configurations():
 
     except Exception as e:
         frappe.logger("migration_hooks").error(f"Failed to sync plugin configurations: {str(e)}")
+
+
+#: The plugins a new site starts with: core, and the data migration, which was part of core until v3.2
+DEFAULT_PLUGINS = ("core", "migration")
+
+
+def _enable_default_plugins():
+    """Give a new site its default plugins.
+
+    The plugin manager reads the plugin list in Assistant Core Settings, which is empty on a new
+    site, so no tool was on until an administrator switched core on. That used to bring the data
+    migration with it; since v3.2 it is a plugin of its own, so both are named here. Upgraded sites
+    get the migration plugin from the patch move_migration_tools_to_their_plugin. A list that
+    already names plugins is left as it is.
+    """
+    import json
+
+    current = frappe.db.get_single_value("Assistant Core Settings", "enabled_plugins_list")
+    try:
+        if current and json.loads(current):
+            return
+    except (ValueError, TypeError):
+        return
+    frappe.db.set_single_value(
+        "Assistant Core Settings", "enabled_plugins_list", json.dumps(list(DEFAULT_PLUGINS))
+    )
 
 
 def _set_settings_defaults():

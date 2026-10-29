@@ -266,7 +266,7 @@ def _from_name(name: str) -> Optional[Tuple[str, str]]:
 def classify(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Each account's proposed root type and account type, and where it came from, in the order of C-D3:
     the file's own columns, Tally's primary groups (the nearest of the account and its parents), words in
-    the name, then the parent's root type. An account none of these places is ``unclassified``. An
+    the name unless they say another root type than the parent's, then the parent's root type. An account none of these places is ``unclassified``. An
     account type goes on ledgers only. The nodes are not changed."""
     valid_types = set(_account_types())
     out: Dict[int, Dict[str, Any]] = {}
@@ -300,12 +300,16 @@ def classify(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if node["index"] in out:
             return out[node["index"]]
         found = own(node) or tally(node)
+        above = None
+        if node["parent"] is not None and node["parent"] not in seen:
+            above = resolve(nodes[node["parent"]], (*seen, node["index"]))
         if not found:
             guess = _from_name(node["name"])
-            if guess:
+            # a word in the name never outranks the parent's root type: "Bank Fees" under Expenses is an
+            # expense, not a bank
+            if guess and not (above and above["root_type"] and above["root_type"] != guess[0]):
                 found = {"root_type": guess[0], "account_type": guess[1], "source": "name"}
-        if not found and node["parent"] is not None and node["parent"] not in seen:
-            above = resolve(nodes[node["parent"]], (*seen, node["index"]))
+        if not found and above:
             if above["root_type"]:
                 # a ledger under "Bank Accounts" is a bank; a group below it only carries the root type
                 kind = raw[node["parent"]]["account_type"] if not node["is_group"] else ""
@@ -597,16 +601,43 @@ def keep_old_ids(
     session_name: Optional[str], system: str, nodes, accounts: Dict[int, str]
 ) -> Dict[str, List[str]]:
     """Keep the client's account number and name as the old IDs of the accounts they are (C-D5), so the
-    opening trial balance resolves by them."""
+    opening trial balance resolves by them. Returns ``written``, ``conflicts`` and the ``systems`` used.
+
+    A second company of the same client names its accounts as the first does, and an old ID names one
+    record per system: those of this company are kept under a system of its own, "<system> <abbr>". The
+    trial balance looks in every system for an account of its company (_by_client_id)."""
     system = import_keys.system_name(system)
-    if not import_keys.choice(ACCOUNT, system):
-        import_keys.set_choice(ACCOUNT, system, "key_map")
     pairs = []
     for index, account in accounts.items():
         node = nodes[index]
         if node["number"]:
             pairs.append((node["number"], account))
         pairs.append((node["name"], account))
+    kept = _keep(session_name, system, pairs)
+    kept["systems"] = [system] if kept["written"] else []
+    if not kept["conflicts"] or not accounts:
+        return kept
+    company = frappe.db.get_value(ACCOUNT, next(iter(accounts.values())), "company")
+    owners = import_keys.resolve(ACCOUNT, system, kept["conflicts"], user="Administrator")
+    elsewhere = {
+        key
+        for key, name in owners.items()
+        if name and frappe.db.get_value(ACCOUNT, name, "company") != company
+    }
+    if not elsewhere:
+        return kept
+    own = import_keys.system_name(f"{system} {frappe.get_cached_value('Company', company, 'abbr')}")
+    again = _keep(session_name, own, [(k, a) for k, a in pairs if import_keys.normalise(k) in elsewhere])
+    kept["written"] += again["written"]
+    kept["conflicts"] = [k for k in kept["conflicts"] if k not in elsewhere] + again["conflicts"]
+    if again["written"]:
+        kept["systems"].append(own)
+    return kept
+
+
+def _keep(session_name: Optional[str], system: str, pairs) -> Dict[str, List[str]]:
+    if not import_keys.choice(ACCOUNT, system):
+        import_keys.set_choice(ACCOUNT, system, "key_map")
     return import_keys.record_pairs(session_name, ACCOUNT, system, pairs)
 
 

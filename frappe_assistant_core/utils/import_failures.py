@@ -128,8 +128,15 @@ def came_back(session) -> set:
         for link in own_links(session)
         if link.source_file and link.source_file != session.source_file
     ]
+    return rows_imported_by(session, earlier)
+
+
+def rows_imported_by(session, data_imports: List[str]) -> set:
+    """Rows of the session's current file that these Data Imports brought in, row for row: the same
+    text in each of the user's columns, read from each import's own file (value maps applied, as here).
+    Each row imported counts once."""
     seen: Counter = Counter()
-    for name in dict.fromkeys(earlier):
+    for name in dict.fromkeys(data_imports):
         success = _success_rows([name])
         rows = _import_file_rows(name) if success else []
         for number in success:

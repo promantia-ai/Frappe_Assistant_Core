@@ -267,6 +267,63 @@ class TestSetupPlan(ImportRunCase):
             frappe.db.get_single_value("Stock Settings", "valuation_method"), "Moving Average"
         )
 
+    def test_an_item_of_the_models_own_cannot_make_a_user(self):
+        # The model composes items itself; the card then showed only its decision: "Head office branch"
+        admin = {
+            "area": "company",
+            "decision": "Head office branch",
+            "target_doctype": "User",
+            "values": {"email": f"boss{self.tag}@example.com", "roles": [{"role": "System Manager"}]},
+        }
+        plan = self._save(items=[admin])
+
+        self.assertTrue(any("doesn't write User" in p for p in plan["problems"]), plan["problems"])
+        self.assertFalse([i for i in plan["items"] if i["target"].startswith("User")])
+        added = self._run("setup_plan", {"action": "update", "plan": plan["plan"], "add": [admin]})
+        self.assertFalse(added["success"])
+        self.assertIn("doesn't write User", added["error"])
+
+    def test_the_card_shows_what_an_item_writes_and_new_values_need_their_decision(self):
+        plan = self._save()
+        number = self._number(plan, f"Payment Term: Net 30 {self.tag}")
+        change = {"values": {"credit_days": 45}}
+
+        refused = self._run(
+            "setup_plan", {"action": "update", "plan": plan["plan"], "items": {str(number): change}}
+        )
+        self.assertFalse(refused["success"])
+        self.assertIn("decision", refused["error"])
+
+        change["decision"] = "Payment term: due 45 days after the invoice"
+        changed = self._run(
+            "setup_plan", {"action": "update", "plan": plan["plan"], "items": {str(number): change}}
+        )["result"]
+        line = next(d for d in changed["approval"]["decisions"] if f"Net 30 {self.tag}" in d)
+        self.assertIn("due 45 days", line)
+        self.assertIn("credit_days 45", line)
+        item = next(i for i in changed["items"] if i["number"] == number)
+        self.assertIn("credit_days 45", item["writes"])
+
+    def test_an_existing_price_list_keeps_its_currency_and_is_not_called_new(self):
+        existing = frappe.get_doc(
+            {
+                "doctype": "Price List",
+                "price_list_name": f"Export {self.tag}",
+                "currency": "USD",
+                "selling": 1,
+            }
+        ).insert()
+        frappe.db.set_value("Price List", existing.name, "enabled", 0)
+
+        plan = self._save(price_lists=[{"name": existing.name}])
+
+        number = self._number(plan, f"Price List: {existing.name}")
+        values = json.loads(frappe.get_doc(PLAN, plan["plan"]).items[number - 1].values)
+        self.assertNotIn("currency", values)
+        line = next(d for d in plan["approval"]["decisions"] if existing.name in d)
+        self.assertIn("(changes the existing one)", line)
+        self.assertNotIn("(new)", line)
+
     def test_an_item_can_be_removed_and_one_added(self):
         plan = self._save()
         number = self._number(plan, f"UOM: Bolt {self.tag}")

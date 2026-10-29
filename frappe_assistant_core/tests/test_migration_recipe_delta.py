@@ -13,7 +13,7 @@ import unittest
 
 import frappe
 
-from frappe_assistant_core.tests.migration_recipe_case import SESSION, DeltaRecipeCase
+from frappe_assistant_core.tests.migration_recipe_case import RECIPE, SESSION, DeltaRecipeCase, step
 from frappe_assistant_core.utils import import_dry_run as dry_run
 from frappe_assistant_core.utils import (
     import_opening_balances,
@@ -48,7 +48,15 @@ class TestDeltaRun(DeltaRecipeCase):
         self.assertTrue(ran["success"], ran)
         self.assertEqual(self._excluded(invoices), [2, 3])  # row 1 is the header
         self.assertIn("Before the cut-off", self._reasons(invoices)["2"])
-        self.assertEqual(ran["result"]["applied"][0]["left_out"], {"before": 2, "opening": 0})
+        self.assertEqual(ran["result"]["applied"][0]["left_out"], {"before": 2, "opening": 0, "again": 0})
+
+    def test_day_first_dates_are_read_as_the_import_reads_them(self):
+        # 11 March is before the cut-off and 1 April after it; month first they swap sides
+        invoices = self._invoices("I1,11-03-2026,C", "I2,01-04-2026,C")
+
+        self._delta(invoices)
+
+        self.assertEqual(self._excluded(invoices), [2])
 
     def test_the_rows_under_a_parent_row_follow_its_date(self):
         journals = self._csv(
@@ -128,6 +136,27 @@ class TestDeltaRun(DeltaRecipeCase):
         self.assertEqual(frappe.db.get_value(SESSION, groups, "import_type"), "Insert New Records")
         self.assertFalse(frappe.db.get_value(SESSION, groups, "excluded_rows"))  # nothing is filtered by date
 
+    def test_a_master_already_in_erpnext_is_left_out_not_asked_about(self):
+        old = frappe.get_doc(
+            {
+                "doctype": "Item Group",
+                "item_group_name": f"Old {self.tag}",
+                "parent_item_group": "All Item Groups",
+            }
+        ).insert()
+        groups = self._csv(
+            "Groups", "Name,Parent", f"{old.name},All Item Groups", f"New {self.tag},All Item Groups"
+        )
+
+        ran = self._delta(groups, self._invoices("I1,2026-04-01,C"), masters=[1])["result"]
+
+        self.assertEqual(self._excluded(groups), [2])
+        self.assertIn("Already in ERPNext", self._reasons(groups)["2"])
+        entry = next(a for a in ran["applied"] if a["session"] == groups)
+        self.assertEqual(entry["left_out"], {"existing": 1})
+        checked = self._run("dry_run_import", {"session": groups})["result"]
+        self.assertFalse(checked.get("groups"), checked)
+
     def test_an_opening_step_is_never_run_in_a_delta_run(self):
         opening = self._csv("Opening stock", "Item,Qty", "A,1")
 
@@ -184,3 +213,64 @@ class TestDeltaRun(DeltaRecipeCase):
             with self.assertRaises(dry_run.DryRunProblem) as caught:
                 engine.check_can_run(session)
             self.assertIn("delta run", str(caught.exception))
+
+    # -- the same delta run twice ---------------------------------------------------------------
+
+    def test_the_same_delta_run_twice_posts_each_entry_once(self):
+        company = frappe.get_all("Company", pluck="name", limit=1)[0]
+        cash, other = frappe.get_all(
+            "Account",
+            filters={"company": company, "is_group": 0, "account_type": ["in", ["Cash", "Bank"]]},
+            pluck="name",
+            limit=2,
+        )
+        journals = frappe.get_doc(
+            {
+                "doctype": RECIPE,
+                "title": f"Journals {self.tag}",
+                "steps": [
+                    step(
+                        1,
+                        "Journals",
+                        "Journal Entry",
+                        ["Voucher", "Booked", "Company", "Account", "Debit", "Credit"],
+                        {
+                            "0": "user_remark",
+                            "1": "posting_date",
+                            "2": "company",
+                            "3": "accounts.account",
+                            "4": "accounts.debit_in_account_currency",
+                            "5": "accounts.credit_in_account_currency",
+                        },
+                        is_transaction_step=1,
+                    )
+                ],
+            }
+        ).insert()
+        lines = (
+            "Voucher,Booked,Company,Account,Debit,Credit\n"
+            f"JV {self.tag},2026-04-02,{company},{cash},10,0\n"
+            f",,,{other},0,10\n"
+        ).encode()
+
+        def delta():
+            session = self._opened("Journals.csv", lines)
+            ran = self._run(
+                "migration_recipe",
+                {"action": "run", "recipe": journals.name, "sessions": [session], "since": CUT_OFF},
+            )
+            self.assertTrue(ran["success"], ran)
+            return session, ran["result"]
+
+        first, ran = delta()
+        answer = [{"id": "plan:failure_rule", "rule": "stop"}]
+        checked = self._run("dry_run_import", {"plan": ran["plan"], "answers": answer})
+        self.assertEqual(import_plan.get_plan(ran["plan"]).status, "Ready to Run", checked)
+        self._approve(ran["plan"])
+        self.assertEqual(frappe.db.count("Journal Entry", {"user_remark": f"JV {self.tag}"}), 1)
+
+        again, ran = delta()
+
+        self.assertEqual(ran["applied"][0]["left_out"]["again"], 2)
+        self.assertEqual(self._excluded(again), [2, 3])
+        self.assertIn("earlier delta run", self._reasons(again)["2"])

@@ -124,6 +124,13 @@ class TestStaffSetup(BaseAssistantTest):
         for who in ("ravi", "meena", "arun"):
             self.assertFalse(frappe.db.exists("User", self._email(who)))  # a Draft plan writes nothing
 
+    def test_an_admin_role_in_another_case_is_refused_too(self):
+        # The database finds "system manager" as System Manager, and saving stores that spelling
+        for spelling in ("system manager", " SYSTEM MANAGER ", "administrator"):
+            group = self._group(f"Admins {spelling.strip()}", roles=(spelling,), people=("ravi",))
+            problems = "\n".join(staff_setup.check_group(1, group, set()))
+            self.assertIn("is not given from a staff list", problems, spelling)
+
     def test_a_failure_midway_undoes_the_whole_group(self):
         made = staff_setup._user
 

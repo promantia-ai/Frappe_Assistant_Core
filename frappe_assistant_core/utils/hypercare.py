@@ -352,6 +352,9 @@ def _links(from_date, to_date) -> str:
     return f"[{_('Open the report')}]({report}) · [{_('Act on it in FAC Chat')}]({chat})"
 
 
+EMAIL_SAVEPOINT = "fac_hypercare_email"
+
+
 def send(hypercare, from_date, to_date) -> None:
     """The summary of one period to the hypercare's consultant: an email and a notification."""
     rows = summary(from_date, to_date, cint(hypercare.stuck_after_days) or STUCK_DAYS)
@@ -361,13 +364,23 @@ def send(hypercare, from_date, to_date) -> None:
         _("nothing to look at") if not rows else _("{0} things to look at").format(len(rows)),
     )
     body = document(rows, from_date, to_date) + "\n\n" + _links(from_date, to_date)
-    frappe.sendmail(
-        recipients=[hypercare.consultant],
-        subject=subject,
-        message=md_to_html(body),
-        reference_doctype=hypercare.doctype,
-        reference_name=hypercare.name,
-    )
+    # A site without an outgoing email account refuses the email: the bell, and the summary being
+    # done, must not go with it, or the same summary failed every day and the hypercare never ended
+    frappe.db.savepoint(EMAIL_SAVEPOINT)
+    try:
+        frappe.sendmail(
+            recipients=[hypercare.consultant],
+            subject=subject,
+            message=md_to_html(body),
+            reference_doctype=hypercare.doctype,
+            reference_name=hypercare.name,
+        )
+    except Exception:
+        frappe.db.rollback(save_point=EMAIL_SAVEPOINT)
+        frappe.log_error(
+            title=_("Hypercare summary email not sent for {0}").format(hypercare.name),
+            message=frappe.get_traceback(),
+        )
     # An Alert shows in the bell without a second email
     frappe.get_doc(
         {

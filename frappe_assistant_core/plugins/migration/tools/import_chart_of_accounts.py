@@ -167,10 +167,27 @@ class ImportChartOfAccounts(BaseTool):
             **result,
             "old_ids_kept": len(kept["written"]),
             "old_id_conflicts": kept["conflicts"],
-            "message": _(
-                "{0} accounts created. The client's account names and numbers are kept as old IDs ({1})."
-            ).format(len(result["created"]), system),
+            "old_id_systems": kept["systems"],
+            "message": _old_ids_message(len(result["created"]), system, kept),
         }
+
+
+def _old_ids_message(created: int, system: str, kept: Dict[str, Any]) -> str:
+    """What the reply says of the old IDs: what was kept, under which system, and what wasn't."""
+    text = _("{0} accounts created.").format(created)
+    if kept["written"]:
+        text += " " + _("{0} of the client's account names and numbers are kept as old IDs ({1}).").format(
+            len(kept["written"]), ", ".join(kept["systems"])
+        )
+    if len(kept["systems"]) > 1 or (kept["systems"] and kept["systems"][0] != system):
+        text += " " + _(
+            "Another company keeps the same names under {0}, so this company's are kept under {1}."
+        ).format(system, kept["systems"][-1])
+    if kept["conflicts"]:
+        text += " " + _(
+            "{0} were not kept: each already names another account of this company ({1})."
+        ).format(len(kept["conflicts"]), ", ".join(kept["conflicts"][:10]))
+    return text
 
 
 def check_chart(name: str, company: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
