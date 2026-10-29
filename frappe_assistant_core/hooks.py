@@ -413,6 +413,10 @@ after_request = ["frappe_assistant_core.chat.embed.inject.inject_widget"]
 
 app_include_js = [
     _widget_asset("/assets/frappe_assistant_core/js/chat_banner.js"),
+    # The go-live banner and checklist (#34419); the endpoint keeps it and the chat banner apart.
+    # Stamped with the Desk scripts' own digest: the widget's would not change when this file does.
+    "/assets/frappe_assistant_core/js/go_live.js?v="
+    + f"{app_version}-{_widget_asset_revision(os.path.join(os.path.dirname(__file__), 'public', 'js'))}",
     # Diagnostics right after the banner: it records console and network from
     # the moment it loads, and a Desk boot error is exactly the one users
     # complain about. Depends only on the redact helper loaded immediately

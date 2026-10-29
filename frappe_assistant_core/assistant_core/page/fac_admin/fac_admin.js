@@ -48,6 +48,9 @@ frappe.pages['fac-admin'].on_page_load = function(wrapper) {
                     </div>
                 </div>
 
+                <!-- Go-live checklist: shown to System Managers while a company is taken live, and to undo "Already live" -->
+                <div id="fac-go-live-card"></div>
+
                 <!-- Two-column body: left = registry, right = sidebar -->
                 <div class="fac-two-col">
 
@@ -466,6 +469,7 @@ frappe.pages['fac-admin'].on_page_load = function(wrapper) {
             ns.loadToolRegistry();
             ns.loadRecentActivity();
             if (typeof ns.loadChatAnalytics === 'function') ns.loadChatAnalytics();
+            if (frappe_assistant_core.go_live) frappe_assistant_core.go_live.load_checklist($('#fac-go-live-card'));
 
             // "Updated Xs ago" ticker — cheap, local-only
             ns.updateLastRefreshedLabel = function() {
