@@ -9,7 +9,7 @@
 """The go-live entry point (#34419): the FAC Go-Live record, the six steps, the stage and the check
 that decides whether a System Manager is offered to take the company live."""
 
-from unittest.mock import patch
+from unittest.mock import create_autospec, patch
 
 import frappe
 
@@ -340,3 +340,263 @@ class TestStage(GoLiveCase):
 
         with patch.object(entry, "_companies", autospec=True, return_value=["Only Co"]):
             self.assertEqual(entry.pick_company("Administrator"), "Only Co")
+
+
+class TestEntryCheck(GoLiveCase):
+    def setUp(self):
+        super().setUp()
+        from frappe_assistant_core.utils.plugin_manager import PluginManager
+
+        frappe.db.delete("GL Entry", {"company": self.company})
+        frappe.db.set_single_value("Assistant Core Settings", "server_enabled", 1)
+        # the setup wizard names the company, so the check is about this one
+        self.go_live(intent_source="Setup wizard")
+        self.user = self.make_throwaway_user("sysmgr", roles=("System Manager",))
+        # never toggle a plugin for real in a test: the plugin manager commits (AGENTS.md)
+        self.manager = create_autospec(PluginManager, instance=True)
+        self.manager.get_enabled_plugins.return_value = {"core", "migration"}
+        patcher = patch(
+            "frappe_assistant_core.onboarding.entry.get_plugin_manager",
+            autospec=True,
+            return_value=self.manager,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def state(self, user=None, view="banner"):
+        from frappe_assistant_core.onboarding import entry
+
+        return entry.get_state(user or self.user, view)
+
+    def assert_hidden_before_stage(self, user=None):
+        from frappe_assistant_core.onboarding import entry
+
+        with patch.object(entry, "stage", autospec=True) as stage:
+            self.assertEqual(self.state(user), {"show": False})
+            stage.assert_not_called()
+
+    def test_new_site_shows_checklist(self):
+        state = self.state()
+        self.assertTrue(state["show"])
+        self.assertEqual(state["variant"], "checklist")
+        self.assertEqual(state["stage"], "not_started")
+        self.assertTrue(state["soft"])
+        self.assertEqual(state["company"], self.company)
+        self.assertEqual(len(state["steps"]), 6)
+        self.assertEqual(state["next_step"], "discovery")
+
+    def test_s1_server_disabled_hides(self):
+        frappe.db.set_single_value("Assistant Core Settings", "server_enabled", 0)
+        self.assert_hidden_before_stage()
+
+    def test_s2_no_erpnext_hides(self):
+        from frappe_assistant_core.onboarding import entry
+
+        # patched at FAC's own check: Frappe reads the installed apps too, and needs ERPNext's hooks
+        with patch.object(entry, "_erpnext_installed", autospec=True, return_value=False):
+            self.assert_hidden_before_stage()
+
+    def test_s3_wizard_not_finished_hides(self):
+        with patch("frappe.is_setup_complete", return_value=False):
+            self.assert_hidden_before_stage()
+
+    def test_s4_no_company_hides(self):
+        from frappe_assistant_core.onboarding import entry
+
+        with patch.object(entry, "_companies", autospec=True, return_value=[]):
+            self.assert_hidden_before_stage()
+
+    def test_s5_marked_live_hides(self):
+        self.go_live(marked_live=1)
+        self.assert_hidden_before_stage()
+
+    def test_u1_guest_hides(self):
+        self.assert_hidden_before_stage("Guest")
+
+    def test_u1_website_user_hides(self):
+        self.assert_hidden_before_stage(self.make_throwaway_user("web"))
+
+    def test_u2_not_system_manager_hides(self):
+        self.assert_hidden_before_stage(self.make_throwaway_user("sales", roles=("Sales User",)))
+
+    def test_u3_no_read_hides(self):
+        real = frappe.has_permission
+
+        def no_hypercare(doctype, *args, **kwargs):
+            return False if doctype == "FAC Hypercare" else real(doctype, *args, **kwargs)
+
+        with patch("frappe.has_permission", side_effect=no_hypercare):
+            self.assert_hidden_before_stage()
+
+    def test_u4_snoozed_hides(self):
+        self.go_live(snoozes=[{"user": self.user, "until": frappe.utils.add_days(None, 1)}])
+        self.assertEqual(self.state(), {"show": False})
+        # for this user only
+        self.assertTrue(self.state(self.make_throwaway_user("other", roles=("System Manager",)))["show"])
+
+    def test_u4_expired_snooze_shows(self):
+        self.go_live(snoozes=[{"user": self.user, "until": frappe.utils.add_days(None, -1)}])
+        self.assertTrue(self.state()["show"])
+
+    def test_hidden_stages(self):
+        from frappe_assistant_core.onboarding import entry
+
+        for stage in ("done", "established"):
+            with self.subTest(stage=stage), patch.object(entry, "stage", autospec=True, return_value=stage):
+                entry.clear_cache()
+                self.assertEqual(self.state(), {"show": False})
+
+    def test_shown_stages_variant(self):
+        from frappe_assistant_core.onboarding import entry
+
+        expected = {
+            "not_started": "checklist",
+            "in_progress": "checklist",
+            "ready_to_go_live": "checklist",
+            "live_hypercare": "hypercare",
+        }
+        self.hypercare("Active")
+        for stage, variant in expected.items():
+            with self.subTest(stage=stage), patch.object(entry, "stage", autospec=True, return_value=stage):
+                entry.clear_cache()
+                state = self.state()
+                self.assertTrue(state["show"])
+                self.assertEqual(state["variant"], variant)
+                self.assertEqual(state["stage"], stage)
+
+    def test_s6_auto_enables_when_nobody_said_no(self):
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        state = self.state()
+        self.manager.enable_plugin.assert_called_once_with("migration")
+        self.assertEqual(state["variant"], "checklist")
+        self.assertTrue(
+            frappe.db.exists(
+                "Assistant Audit Log", {"action": "enable plugin", "source_app": "go-live entry check"}
+            )
+        )
+
+    def test_s6_respects_admin_switch_off(self):
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        self.go_live(tools_disabled_by="Administrator", tools_disabled_on=frappe.utils.now_datetime())
+        state = self.state()
+        self.manager.enable_plugin.assert_not_called()
+        self.assertEqual(state["variant"], "enable_tools")
+        self.assertTrue(state["can_enable_tools"])
+        self.assertEqual(state["primary"], "Turn on onboarding tools")
+        self.assertEqual(
+            state["text"], f"FAC can help take {self.company} live, but its onboarding tools are off."
+        )
+
+    def test_u5_without_settings_write(self):
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        self.go_live(tools_disabled_by="Administrator")
+        real = frappe.has_permission
+
+        def no_settings_write(doctype, ptype="read", *args, **kwargs):
+            if doctype == "Assistant Core Settings" and ptype == "write":
+                return False
+            return real(doctype, ptype, *args, **kwargs)
+
+        with patch("frappe.has_permission", side_effect=no_settings_write):
+            state = self.state()
+        self.assertEqual(state["variant"], "enable_tools")
+        self.assertFalse(state["can_enable_tools"])
+        self.assertIsNone(state["primary"])
+        self.assertEqual(state["buttons"], ["not_now"])
+        self.assertEqual(
+            state["text"],
+            f"FAC can help take {self.company} live. Ask an administrator to turn on its onboarding tools.",
+        )
+
+    def test_established_with_plugin_off_sees_nothing(self):
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        frappe.db.set_value("FAC Go-Live", {"company": self.company}, "intent", "Own business")
+        TestStage.gl_entries(self, 50)
+        self.assertEqual(self.state(), {"show": False})
+        self.manager.enable_plugin.assert_not_called()
+
+    def test_checklist_view_ignores_snooze_and_marked_live(self):
+        self.go_live(
+            marked_live=1,
+            marked_live_by="Administrator",
+            snoozes=[{"user": self.user, "until": frappe.utils.add_days(None, 1)}],
+        )
+        state = self.state(view="checklist")
+        self.assertTrue(state["show"])
+        self.assertEqual(state["marked_live"]["by"], "Administrator")
+        self.assertIn(self.company, state["companies"])
+
+    def test_checklist_view_shows_established(self):
+        frappe.db.set_value("FAC Go-Live", {"company": self.company}, "intent", "Own business")
+        TestStage.gl_entries(self, 50)
+        state = self.state(view="checklist")
+        self.assertTrue(state["show"])
+        self.assertEqual(state["stage"], "established")
+
+    def test_checklist_view_still_needs_system_manager(self):
+        sales = self.make_throwaway_user("sales", roles=("Sales User",))
+        self.assertEqual(self.state(sales, view="checklist"), {"show": False})
+
+    def test_fail_closed(self):
+        from frappe_assistant_core.onboarding import entry
+
+        before = frappe.db.count("Error Log", {"method": "FAC go-live entry check"})
+        with patch.object(entry, "steps", autospec=True, side_effect=RuntimeError("boom")):
+            entry.clear_cache()
+            self.assertEqual(self.state(), {"show": False})
+        self.assertEqual(frappe.db.count("Error Log", {"method": "FAC go-live entry check"}), before + 1)
+
+    def test_texts_match_spec(self):
+        from frappe_assistant_core.onboarding import entry
+
+        c = self.company
+        cases = {
+            "not_started": (f"{c} isn't live yet. Want FACO to help take it live?", "Start"),
+            "not_started_soft": (f"Is {c} a new implementation? FACO can help take it live.", "Start"),
+            "ready_to_go_live": (
+                f"{c} passed its go-live test run. Switch on hypercare after go-live.",
+                "Continue",
+            ),
+        }
+        for stage, (text, primary) in cases.items():
+            with self.subTest(stage=stage), patch.object(entry, "stage", autospec=True, return_value=stage):
+                entry.clear_cache()
+                state = self.state()
+                self.assertEqual(state["text"], text)
+                self.assertEqual(state["primary"], primary)
+                self.assertEqual(state["buttons"], ["not_now", "already_live"])
+
+        self.plan("Completed")
+        entry.clear_cache()
+        state = self.state()
+        self.assertEqual(
+            state["text"], f"{c} isn't live yet: 2 of 6 go-live steps done. Next: Chart of accounts."
+        )
+        self.assertEqual(state["primary"], "Continue")
+
+    def test_hypercare_text_weeks(self):
+        self.hypercare("Active", start=frappe.utils.add_days(None, -8), days=30)
+        state = self.state()
+        self.assertEqual(state["variant"], "hypercare")
+        self.assertEqual(state["text"], f"Hypercare for {self.company}: week 2 of 5.")
+        self.assertEqual(state["primary"], "Open hypercare summary")
+        self.assertEqual(state["buttons"], ["not_now"])
+
+    def test_continue_external_when_chat_off(self):
+        frappe.db.set_single_value("Assistant Core Settings", "enable_fac_chat", 0)
+        state = self.state()
+        self.assertEqual(state["continue"]["mode"], "external")
+        self.assertEqual(state["continue"]["prompt"], f"Take {self.company} live")
+        self.assertTrue(state["mcp_endpoint"])
+
+    def test_continue_prompt_names_next_step(self):
+        self.plan("Draft")
+        state = self.state()
+        self.assertEqual(state["continue"]["prompt"], f"Continue taking {self.company} live: setup plan")
+
+    def test_result_has_no_record_contents(self):
+        self.plan("Completed")
+        state = self.state()
+        for step in state["steps"]:
+            if step["record"]:
+                self.assertEqual(set(step["record"]), {"doctype", "name"})

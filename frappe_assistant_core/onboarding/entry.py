@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 import frappe
 from frappe import _
 
+from frappe_assistant_core.utils.plugin_manager import get_plugin_manager
+
 STEP_KEYS = ("discovery", "setup_plan", "chart_of_accounts", "data_migration", "go_live_test_run", "hypercare")
 # Discovery can't be skipped: it is what the rest is planned from
 SKIPPABLE = STEP_KEYS[1:]
@@ -36,6 +38,13 @@ TEST_RUNS_READ = 20
 # R6: a site this small and this young is offered onboarding although the wizard named no client
 NEW_SITE_MAX_GL_ENTRIES = 50
 NEW_SITE_MAX_AGE_DAYS = 60
+# the site part of the check (stage, steps) is kept this long; the writes that change it clear it
+CACHE_KEY = "fac_go_live_entry"
+CACHE_SECONDS = 300
+SHOWN_STAGES = ("not_started", "not_started_soft", "in_progress", "ready_to_go_live", "live_hypercare")
+MIGRATION_PLUGIN = "migration"
+ERROR_TITLE = "FAC go-live entry check"
+HIDDEN = {"show": False}
 
 
 def _record(doctype: str, name: Optional[str]) -> Optional[Dict[str, str]]:
@@ -261,3 +270,243 @@ def pick_company(user: str) -> Optional[str]:
     if from_wizard:
         return from_wizard[0]
     return frappe.defaults.get_user_default("Company", user) or None
+
+
+def clear_cache(*args, **kwargs) -> None:
+    """Drop the cached site part of the check. Also a doc_events handler, hence the arguments."""
+    frappe.cache().delete_keys(CACHE_KEY)
+
+
+def _hypercare_weeks(care) -> Dict[str, Any]:
+    days_since = max(frappe.utils.date_diff(frappe.utils.nowdate(), care.start_date), 0)
+    total = max(-(-int(care.days or 0) // 7), 1)
+    return {"name": care.name, "week": min(days_since // 7 + 1, total), "total": total}
+
+
+def site_state(company: str) -> Dict[str, Any]:
+    """The part of the check that is the same for every user: stage, steps, the plugin. Cached."""
+    key = f"{CACHE_KEY}:{company}"
+    cached = frappe.cache().get_value(key)
+    if cached:
+        return cached
+    step_list = steps(company)
+    current = stage(company, step_list)
+    care = _hypercare()
+    go_live = frappe.db.get_value(
+        "FAC Go-Live", {"company": company}, ["tools_disabled_by"], as_dict=True
+    ) or frappe._dict()
+    state = {
+        "company": company,
+        "stage": current,
+        "steps": step_list,
+        "next_step": next_step(step_list),
+        "hypercare": _hypercare_weeks(care) if care and current == "live_hypercare" else None,
+        "plugin_on": MIGRATION_PLUGIN in get_plugin_manager().get_enabled_plugins(),
+        "tools_disabled_by": go_live.get("tools_disabled_by"),
+    }
+    frappe.cache().set_value(key, state, expires_in_sec=CACHE_SECONDS)
+    return state
+
+
+def _erpnext_installed() -> bool:
+    return "erpnext" in frappe.get_installed_apps()
+
+
+def _site_hidden() -> bool:
+    """S1-S4, in order: FAC on, ERPNext installed, its setup wizard finished, a company exists."""
+    if not frappe.db.get_single_value("Assistant Core Settings", "server_enabled"):
+        return True
+    if not _erpnext_installed():
+        return True
+    if not frappe.is_setup_complete():
+        return True
+    return not _companies()
+
+
+def _user_hidden(user: str) -> bool:
+    """U1-U3: a Desk user, System Manager, who can read the records the checklist links to."""
+    if not user or user == "Guest":
+        return True
+    if frappe.db.get_value("User", user, "user_type") != "System User":
+        return True
+    if "System Manager" not in frappe.get_roles(user):
+        return True
+    return not all(
+        frappe.has_permission(doctype, "read", user=user)
+        for doctype in ("FAC Setup Plan", "FAC Import Session", "FAC Hypercare")
+    )
+
+
+def _marked_live(company: str) -> Optional[Dict[str, Any]]:
+    row = frappe.db.get_value(
+        "FAC Go-Live",
+        {"company": company},
+        ["marked_live", "marked_live_by", "marked_live_on"],
+        as_dict=True,
+    )
+    if not row or not row.marked_live:
+        return None
+    return {"by": row.marked_live_by, "on": row.marked_live_on}
+
+
+def _snoozed(company: str, user: str) -> bool:
+    parent = frappe.db.get_value("FAC Go-Live", {"company": company})
+    if not parent:
+        return False
+    return bool(
+        frappe.db.exists(
+            "FAC Go-Live Snooze",
+            {"parent": parent, "parenttype": "FAC Go-Live", "user": user, "until": (">", frappe.utils.now_datetime())},
+        )
+    )
+
+
+def maybe_enable_tools(state: Dict[str, Any], user: str) -> bool:
+    """Turn the onboarding tools on when nobody has said no (6.5): an administrator who switched the
+    Migration plugin off in FAC Admin is recorded on FAC Go-Live, and then FAC asks instead."""
+    if state["plugin_on"] or state["tools_disabled_by"]:
+        return False
+    get_plugin_manager().enable_plugin(MIGRATION_PLUGIN)
+    frappe.get_doc(
+        {
+            "doctype": "Assistant Audit Log",
+            "action": "enable plugin",
+            "tool_name": "enable_plugin",
+            "user": user,
+            "status": "Success",
+            "timestamp": frappe.utils.now(),
+            "source_app": "go-live entry check",
+            "target_name": MIGRATION_PLUGIN,
+        }
+    ).insert(ignore_permissions=True)
+    clear_cache()
+    return True
+
+
+def _text(variant: str, current: str, company: str, state: Dict[str, Any], can_enable: bool):
+    """The banner line, its primary button and the other buttons, as in section 5.1."""
+    if variant == "enable_tools":
+        if can_enable:
+            return (
+                _("FAC can help take {0} live, but its onboarding tools are off.").format(company),
+                _("Turn on onboarding tools"),
+                ["not_now", "already_live"],
+            )
+        return (
+            _("FAC can help take {0} live. Ask an administrator to turn on its onboarding tools.").format(company),
+            None,
+            ["not_now"],
+        )
+    if variant == "hypercare":
+        care = state["hypercare"] or {}
+        return (
+            _("Hypercare for {0}: week {1} of {2}.").format(company, care.get("week"), care.get("total")),
+            _("Open hypercare summary"),
+            ["not_now"],
+        )
+    others = ["not_now", "already_live"]
+    if current == "not_started":
+        return _("{0} isn't live yet. Want FACO to help take it live?").format(company), _("Start"), others
+    if current == "not_started_soft":
+        return _("Is {0} a new implementation? FACO can help take it live.").format(company), _("Start"), others
+    if current == "ready_to_go_live":
+        return (
+            _("{0} passed its go-live test run. Switch on hypercare after go-live.").format(company),
+            _("Continue"),
+            others,
+        )
+    if current == "in_progress":
+        done = sum(1 for s in state["steps"] if s["state"] in ("done", "skipped"))
+        text = _("{0} isn't live yet: {1} of 6 go-live steps done.").format(company, done)
+        if state["next_step"]:
+            text += " " + _("Next: {0}.").format(STEP_LABELS[state["next_step"]])
+        return text, _("Continue"), others
+    return None, None, []
+
+
+def _continue(current: str, company: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """Where Start/Continue goes (5.2): FAC Chat when this user can chat, else their own AI client."""
+    from frappe_assistant_core.chat.gate import is_chat_enabled
+
+    mode = "external"
+    if is_chat_enabled():
+        from frappe_assistant_core.chat.api.settings.access import can_use_faco
+
+        if (can_use_faco() or {}).get("can_use"):
+            mode = "fac_chat"
+    if current in ("not_started", "not_started_soft") or not state["next_step"]:
+        prompt = _("Take {0} live").format(company)
+    else:
+        prompt = _("Continue taking {0} live: {1}").format(company, STEP_LABELS[state["next_step"]].lower())
+    return {"mode": mode, "prompt": prompt}
+
+
+def _mcp_endpoint() -> str:
+    # as FAC Admin shows it
+    return frappe.db.get_single_value("Assistant Core Settings", "mcp_endpoint_url") or frappe.utils.get_url(
+        "/api/method/frappe_assistant_core.api.fac_endpoint.handle_mcp"
+    )
+
+
+def get_state(user: str, view: str = "banner", company: Optional[str] = None) -> Dict[str, Any]:
+    """What the Desk banner (view "banner") or the checklist (view "checklist") shows this user.
+
+    Checks run in order and the first that fails hides everything: S1-S4, U1-U3, then for the banner
+    S5 (marked live) and U4 (snoozed), then the stage. S6 and U5 only change the variant of a shown
+    stage. The checklist, on the Go-Live Readiness report and FAC Admin, ignores S5, U4 and the stage,
+    so "Already live" can be undone and an established site can still start. Never raises: any error
+    hides the banner and is logged.
+    """
+    try:
+        return _get_state(user, view, company)
+    except Exception:
+        frappe.log_error(title=ERROR_TITLE, message=frappe.get_traceback())
+        return dict(HIDDEN)
+
+
+def _get_state(user: str, view: str, company: Optional[str]) -> Dict[str, Any]:
+    if _site_hidden() or _user_hidden(user):
+        return dict(HIDDEN)
+    banner = view != "checklist"
+    if not company or company not in _companies():
+        company = pick_company(user)
+    if not company:
+        return dict(HIDDEN)
+    marked_live = _marked_live(company)
+    if banner and (marked_live or _snoozed(company, user)):
+        return dict(HIDDEN)
+
+    state = site_state(company)
+    current = state["stage"]
+    shown = current in SHOWN_STAGES
+    if banner and not shown:
+        return dict(HIDDEN)
+
+    can_enable = bool(frappe.has_permission("Assistant Core Settings", "write", user=user))
+    variant = None
+    if shown:
+        variant = "hypercare" if current == "live_hypercare" else "checklist"
+        # the hypercare summary needs no onboarding tools
+        if variant == "checklist" and not state["plugin_on"] and not maybe_enable_tools(state, user):
+            variant = "enable_tools"
+    text, primary, buttons = _text(variant, current, company, state, can_enable)
+
+    return {
+        "show": True,
+        "variant": variant,
+        "stage": "not_started" if current == "not_started_soft" else current,
+        "soft": current == "not_started_soft",
+        "company": company,
+        "companies": frappe.get_all("FAC Go-Live", pluck="company", order_by="creation asc"),
+        "steps": state["steps"],
+        "next_step": state["next_step"],
+        "hypercare": state["hypercare"],
+        "marked_live": marked_live,
+        "text": text,
+        "primary": primary,
+        "buttons": buttons,
+        "continue": _continue(current, company, state) if variant in ("checklist", "enable_tools") else None,
+        "can_enable_tools": can_enable,
+        "can_enable_chat": can_enable,
+        "mcp_endpoint": _mcp_endpoint(),
+    }
