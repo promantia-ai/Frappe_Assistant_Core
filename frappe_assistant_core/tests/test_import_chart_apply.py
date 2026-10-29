@@ -56,6 +56,21 @@ class TestImportChart(ChartCase):
         self.assertEqual((hdfc.is_group, hdfc.account_number), (0, "1010"))
         self.assertEqual(self._account("Vendor Pool").account_type, "Payable")
 
+    def test_finished_import_records_go_live(self):
+        # the go-live checklist's chart step reads this: the session has no company or final status (#34419)
+        session, _result = self._added()
+        done = frappe.db.get_value(
+            "FAC Go-Live", {"company": self.company}, ["chart_imported_on", "chart_import_session"], as_dict=True
+        )
+        self.assertTrue(done and done.chart_imported_on)
+        self.assertEqual(done.chart_import_session, session)
+
+    def test_refused_import_records_nothing(self):
+        session = self._chart()
+        refused = self._import(session, "neither")
+        self.assertFalse(refused["success"])
+        self.assertFalse(frappe.db.get_value("FAC Go-Live", {"company": self.company}, "chart_imported_on"))
+
     def test_a_root_of_the_client_goes_under_the_companys_root_for_its_type(self):
         self._added()
 

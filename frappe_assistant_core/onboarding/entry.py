@@ -289,6 +289,35 @@ def clear_cache_for_audit(doc, method=None) -> None:
         clear_cache()
 
 
+def _record_result(company: Optional[str], values: Dict[str, Any]) -> None:
+    try:
+        if not company or not frappe.db.exists("Company", company):
+            return
+        from frappe_assistant_core.assistant_core.doctype.fac_go_live.fac_go_live import get_or_create
+
+        doc = get_or_create(company)
+        doc.update(values)
+        doc.save(ignore_permissions=True)
+    except Exception:
+        # the import itself succeeded: a checklist that lags is better than a failed import
+        frappe.log_error(title=ERROR_TITLE, message=frappe.get_traceback())
+
+
+def record_chart(company: str, session: str) -> None:
+    """Step 3 is done: import_chart_of_accounts put the client's chart on the company. The session
+    keeps no company and no final status, so the checklist reads it from here."""
+    _record_result(company, {"chart_imported_on": frappe.utils.now_datetime(), "chart_import_session": session})
+
+
+def record_migration(plan_name: str) -> None:
+    """Step 4 is done: a migration plan ended Completed or Partially Completed. A plan has no company:
+    it is the one the go-live check is about."""
+    _record_result(
+        pick_company(frappe.session.user),
+        {"migration_completed_on": frappe.utils.now_datetime(), "migration_plan": plan_name},
+    )
+
+
 def record_tools_switch(enabled: bool) -> None:
     """Who switched the Migration plugin off in FAC Admin, so the entry check doesn't switch it back on
     (6.5); switching it on clears it. Kept on every company's FAC Go-Live."""

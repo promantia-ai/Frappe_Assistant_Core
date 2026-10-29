@@ -944,3 +944,39 @@ class TestWhatTheReviewFound(ImportPlanCase):
         else:
             self.assertNotIn("gst_hsn_code", mapped)
             self.assertEqual(len(mapped), 4)  # Code, Name, Group, UOM
+
+
+class TestThePlanEndRecordsGoLive(ImportPlanCase):
+    """The go-live checklist's data migration step reads the end of the plan from FAC Go-Live (#34419):
+    the plan has no company of its own, so the company the go-live check is about is used."""
+
+    _two = TestThePlanOnItsFirstSession._two
+    _plan = TestThePlanOnItsFirstSession._plan
+
+    def _ended(self, status):
+        from frappe_assistant_core.onboarding import entry
+
+        if "erpnext" not in frappe.get_installed_apps():
+            self.skipTest("needs ERPNext's Company")
+        frappe.db.delete("FAC Go-Live")
+        plan = self._plan(list(self._two()))
+        import_plan._end(plan, status, "done")
+        company = entry.pick_company(frappe.session.user)
+        return plan, frappe.db.get_value(
+            "FAC Go-Live", {"company": company}, ["migration_completed_on", "migration_plan"], as_dict=True
+        )
+
+    def test_completed_plan_records_go_live(self):
+        plan, done = self._ended("Completed")
+        self.assertTrue(done and done.migration_completed_on)
+        self.assertEqual(done.migration_plan, plan)
+
+    def test_partially_completed_plan_records_go_live(self):
+        plan, done = self._ended("Partially Completed")
+        self.assertEqual(done.migration_plan, plan)
+
+    def test_failed_plan_records_nothing(self):
+        for status in ("Failed", "Stopped"):
+            with self.subTest(status=status):
+                _plan, done = self._ended(status)
+                self.assertFalse(done and done.migration_completed_on)

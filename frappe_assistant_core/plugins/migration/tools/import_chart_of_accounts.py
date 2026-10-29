@@ -159,6 +159,10 @@ class ImportChartOfAccounts(BaseTool):
         except Exception as e:
             frappe.log_error(title=_("Import Chart Of Accounts Error"), message=frappe.get_traceback())
             return {"success": False, "error": exception_message(e)}
+        # the go-live checklist's chart step (#34419)
+        from frappe_assistant_core.onboarding.entry import record_chart
+
+        record_chart(company, name)
         return {
             "success": True,
             "company": company,

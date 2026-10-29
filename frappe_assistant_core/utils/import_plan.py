@@ -1561,6 +1561,11 @@ def _end(plan_name: str, status: str, message: str) -> None:
     from frappe_assistant_core.utils import migration_recipe
 
     migration_recipe.record_run(plan_name, status, message)
+    if status in ("Completed", "Partially Completed"):
+        # the go-live checklist's data migration step (#34419)
+        from frappe_assistant_core.onboarding.entry import record_migration
+
+        record_migration(plan_name)
 
 
 def result(plan) -> Dict[str, Any]:
