@@ -50,6 +50,19 @@ class TestRunRecipe(RecipeCase):
         self.assertEqual(session.migration_plan, result["plan"])
         self.assertEqual(import_plan.get_plan(result["plan"]).failure_rule, "leave_out")
 
+    def test_a_file_opened_when_a_recipe_is_saved_says_so(self):
+        # "import this" with a fresher export: the open is where FACO learns a recipe could run it
+        recipe = self._recipe()
+
+        opened = self._run(
+            "start_import_session",
+            {"file_url": self._file("fresh.csv", f"ID,Name\nG-{self.tag}-8,{self.n1}\n".encode()).file_url},
+        )
+
+        self.assertTrue(opened["success"], opened)
+        self.assertIn(recipe, [r["name"] for r in opened["result"]["recipes"]])
+        self.assertIn("migration_recipe", opened["result"]["note"])
+
     def test_columns_in_another_order_are_mapped_by_their_header(self):
         recipe = self._recipe()
         fresh = self._new_file(

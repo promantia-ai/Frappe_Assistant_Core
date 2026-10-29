@@ -11,7 +11,10 @@ Turn the client's staff list into users with the right roles and restrictions, s
 
 ## Workflow
 
-1. **Read the sheet.** `extract_file_content` with `operation: "parse_data"` on the attached file. You need each person's name, email, department and what they do. Rows without an email can't become users: list them and ask.
+1. **Read the sheet.** `extract_file_content` with `operation: "parse_data"` on the attached file. If it
+   came with files to import and was opened as an import session, that tool can't read it: use
+   `setup_plan(action="discover", staff_session=...)`, which gives every row as `staff_list` and closes
+   the session. You need each person's name, email, department and what they do. Rows without an email can't become users: list them and ask.
 2. **Propose the groups.** Group people by what they do, not by title. For each group: a role profile name ("Sales Executive"), its roles, and its user permissions. Check what exists first: `list_documents` on `Role` (`disabled = 0`, `desk_access = 1`) and on `Role Profile`. Use only roles that exist. Show one table:
 
    | Group (role profile) | Roles | Limited to | People |

@@ -9,6 +9,7 @@
 """Reading and classifying the client's chart, its problems, and the modes (#34422 P4.1, CA-1 to CA-3, CA-8)."""
 
 import unittest
+from unittest.mock import patch
 
 import frappe
 
@@ -266,6 +267,26 @@ class TestReadChart(ChartCase):
         )
 
         self.assertFalse(refused["success"])
+
+    def test_on_a_site_of_one_company_the_check_uses_it_unasked(self):
+        # the shared test site holds a company per test: the list a one-company site returns stands in
+        real = frappe.get_list
+
+        def one_company(doctype, *args, **kwargs):
+            return [self.company] if doctype == "Company" else real(doctype, *args, **kwargs)
+
+        with patch.object(frappe, "get_list", side_effect=one_company):
+            checked = self._check(self._chart())
+
+        self.assertEqual(checked["company"], self.company)
+        self.assertIn("modes", checked)
+
+    def test_on_a_site_of_several_companies_the_check_names_none(self):
+        self.assertGreater(len(frappe.get_all("Company", limit=2)), 1)
+
+        checked = self._check(self._chart())
+
+        self.assertNotIn("company", checked)
 
     # -- categories ----------------------------------------------------------------------------------------
 

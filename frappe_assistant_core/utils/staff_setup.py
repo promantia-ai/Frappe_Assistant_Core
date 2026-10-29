@@ -31,6 +31,60 @@ SAVEPOINT = "fac_set_up_staff"
 REFUSED_ROLES = frozenset(AUTOMATIC_ROLES) | frozenset(ASSISTANT_ACCESS_ROLES) | {"System Manager"}
 #: The order access is described in, widest first
 ACCESS = ("create and submit", "create", "edit", "read only")
+#: A staff list taken from an import session has at most this many people
+MAX_PEOPLE = 1000
+
+
+def record_name(doctype: Any, value: Any) -> Any:
+    """The record a staff list names by its plain name ("Stores" for the warehouse "Stores - P"): a
+    sheet writes what people call it. Only one that is found once; else ``value`` as it is, for the
+    check to report."""
+    if (
+        not doctype
+        or not value
+        or not frappe.db.exists("DocType", doctype)
+        or frappe.db.exists(doctype, value)
+    ):
+        return value
+    meta = frappe.get_meta(doctype)
+    for fieldname in (meta.title_field, f"{frappe.scrub(doctype)}_name"):
+        if fieldname and meta.has_field(fieldname):
+            found = frappe.get_list(doctype, filters={fieldname: value}, pluck="name", limit=2)
+            if len(found) == 1:
+                return found[0]
+    return value
+
+
+def take_staff_list(session_name: str) -> Dict[str, Any]:
+    """The client's staff list, uploaded with other files and opened as an import session: its columns
+    and every row, to propose the groups from. A staff list is set up by the setup plan, not imported,
+    so its session is cancelled: until then it holds the file, which only the import tools may read."""
+    from frappe_assistant_core.utils import import_session
+    from frappe_assistant_core.utils.import_mapping import load_session
+
+    doc = load_session(session_name)
+    if doc.status not in ("File Read", "Mapped"):
+        raise frappe.ValidationError(
+            _(
+                "Import session {0} is {1}: only a file not yet checked or imported can be a staff list."
+            ).format(session_name, _(doc.status))
+        )
+    if doc.get("migration_plan"):
+        raise frappe.ValidationError(
+            _(
+                "Import session {0} is in migration plan {1}: a staff list isn't part of a migration plan."
+            ).format(session_name, doc.migration_plan)
+        )
+    rows = import_session.read_sheet_rows(import_session.readable_session_file(doc), doc.sheet or None)
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if len(rows) - 1 > MAX_PEOPLE:
+        raise frappe.ValidationError(
+            _("A staff list has at most {0} people; this one has {1}.").format(MAX_PEOPLE, len(rows) - 1)
+        )
+    doc.status = "Cancelled"
+    doc.log_step("Staff list", "Success", _("A staff list: set up through the setup plan, not imported."))
+    doc.save(ignore_permissions=True)
+    return {"columns": rows[0] if rows else [], "people": rows[1:]}
 
 
 class StaffProblem(Exception):

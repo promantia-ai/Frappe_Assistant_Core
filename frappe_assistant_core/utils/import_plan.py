@@ -362,6 +362,42 @@ def planned_names(session) -> Dict[str, Dict[str, str]]:
     return _names(before, plan) if plan else {}
 
 
+def link_old_ids(session, rows: List[List[Any]]) -> bool:
+    """Translate a column of the session's file that refers to records of an earlier file of its plan
+    by their old IDs (#34244), as that file keeps them. Until the earlier file is imported its IDs
+    count as names it brings (planned_names); after, only a translation finds the records, so a file
+    the plan checked as ready would fail just before its import. ``rows``: the file, header first.
+    Returns whether a translation was added; the caller saves the session."""
+    from frappe_assistant_core.utils import import_key_setup, import_keys
+    from frappe_assistant_core.utils.import_dry_run import column_to_field_map
+
+    _plan, before, _after = _split(session)
+    if not before or not session.target_doctype or not rows:
+        return False
+    brought: Dict[str, Dict[str, str]] = {}  # DocType -> old ID -> its source system
+    for earlier in before:
+        kept = import_keys.source_key(earlier)
+        if kept and earlier.target_doctype:
+            ids = brought.setdefault(earlier.target_doctype, {})
+            for key in import_key_setup.keys_by_row(earlier).values():
+                ids.setdefault(key, kept["system"])
+    translated = import_keys.key_maps(session)
+    added = {}
+    for position, doctype in import_keys.link_targets(
+        session.target_doctype, column_to_field_map(session)
+    ).items():
+        if position in translated or not brought.get(doctype):
+            continue
+        values = import_keys.distinct_keys(row[position] for row in rows[1:] if position < len(row))
+        systems = [brought[doctype][value] for value in values if value in brought[doctype]]
+        # most of the column: a few IDs the earlier file lacks are reported by the check as missing
+        if systems and len(systems) * 2 > len(values):
+            added[position] = {"doctype": doctype, "system": max(set(systems), key=systems.count)}
+    if added:
+        import_keys.set_key_maps(session, {**translated, **added})
+    return bool(added)
+
+
 def later_names(session) -> Dict[str, Dict[str, str]]:
     """The same for the files imported after the session: a link to one is an order problem."""
     plan, _before, after = _split(session)

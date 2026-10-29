@@ -386,6 +386,10 @@ def run(session_name: str, commit_progress: bool = False, in_background: bool = 
     file_doc = readable_session_file(session)
     sheet_rows = read_sheet_rows(file_doc, session.sheet or None)
     _real_size(len(sheet_rows) - 1, in_background=commit_progress or in_background)
+    from frappe_assistant_core.utils import import_plan
+
+    if import_plan.link_old_ids(session, sheet_rows):
+        session.save(ignore_permissions=True)
     # What is checked is the session as it is now: a change saved while the check runs (a remap
     # in another request) must not be stamped as checked when the result is stored.
     _checking()[session_name] = fingerprint(session, file_doc)
@@ -402,8 +406,6 @@ def run(session_name: str, commit_progress: bool = False, in_background: bool = 
         rows, column_map = import_update.with_ids(session, rows, single)
     import_file = _parse(session, file_doc, rows, column_map)
     payloads = import_file.get_payloads_for_import()
-
-    from frappe_assistant_core.utils import import_plan
 
     checker = _Checker(
         session,
@@ -595,6 +597,19 @@ def _excluded_rows(session) -> set:
     return {int(row) for row in value if isinstance(row, (int, str)) and str(row).isdigit()}
 
 
+def _imported_old_ids(session) -> Dict[int, Tuple[str, str]]:
+    """``{row: (old ID, record)}`` for the rows whose old ID is kept already for a record: a fresher
+    export of the same system brings the records an earlier import made, under the IDs it kept."""
+    from frappe_assistant_core.utils import import_key_setup
+
+    kept = import_keys.source_key(session)
+    if not kept or not import_keys.storage_for(session.target_doctype, kept["system"]):
+        return {}
+    by_row = import_key_setup.keys_by_row(session)
+    found = import_keys.resolve(session.target_doctype, kept["system"], list(by_row.values()))
+    return {row: (key, found[key]) for row, key in by_row.items() if found.get(key)}
+
+
 class _Checker:
     """Checks payloads one by one and collects the groups and the per-row list."""
 
@@ -610,6 +625,10 @@ class _Checker:
         self.alias_field = getattr(header, "tree_alias_field", None)
         self.key_df = _key_field(session, header)
         self.seen_keys: Dict[str, int] = {}
+        # Rows whose old ID an earlier import kept (#34244): the record is there under its own name
+        self.imported_ids = (
+            _imported_old_ids(session) if self.import_type == INSERT and matches is None else {}
+        )
         # The field ERPNext names the record after, by a setting (#34398): a repeat in the file fails
         self.named_df = None if self.key_df else _named_field(session, header)
         self.seen_named: Dict[str, int] = {}
@@ -983,6 +1002,14 @@ class _Checker:
                     {"cause": CAUSE_SAME_RECORD, "label": self.key_label, "message": message},
                 )
             ]
+        old = self.imported_ids.get(payload.rows[0].row_number)
+        if old:
+            label = _("old ID")
+            message = _("Old ID '{0}' was imported before, as {1} '{2}'.").format(
+                old[0], _(self.doctype), old[1]
+            )
+            info = {"cause": CAUSE_ALREADY_EXISTS, "field": "old_id", "label": label}
+            return [((CAUSE_ALREADY_EXISTS, "old_id"), {**info, "message": message})]
         named = self._named_duplicate(payload)
         if named:
             return named

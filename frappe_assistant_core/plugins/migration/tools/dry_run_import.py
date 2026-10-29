@@ -142,7 +142,8 @@ class DryRunImport(BaseTool):
                     "description": (
                         "With session: check the client's chart of accounts in it instead of the rows "
                         "(get_skill('import-chart-of-accounts-usage')). Writes nothing. Keys: company "
-                        "(for the modes it allows and which accounts match), classifications ({account "
+                        "(for the modes it allows and which accounts match; default: the site's only "
+                        "company, so ask only on a site of several), classifications ({account "
                         "name: {root_type, account_type}}, the user's answers for the accounts that "
                         "couldn't be classified) and root_type_column (the heading of a Root Type "
                         "column, when the file has one)."

@@ -16,10 +16,13 @@ columns and sample rows) and take these two another way, without asking the user
   then follow `get_skill("import-chart-of-accounts-usage")`: the check
   (`dry_run_import(session, chart={"company": ...})`) places every account and asks only about the
   ones it can't, and `import_chart_of_accounts` or `replace_chart_of_accounts` puts it on the company.
-  It goes before every other file, and is not part of a migration plan.
+  It goes before every other file, and is not part of a migration plan. Don't mark an old ID column on
+  it and don't ask where to keep the IDs: the chart's import keeps each account's name and number as
+  its old IDs itself.
 - **A staff list** (people with their email and what they do): never an import of `User`. Follow
   `get_skill("staff-setup")`: the people become groups with role profiles, roles and limits, created
-  by the setup plan on one approval.
+  by the setup plan on one approval. Its rows come from `setup_plan(action="discover",
+  staff_session=...)`, which also closes the session you opened to look at it.
 
 The other files of the same upload go on through a migration plan as below.
 
@@ -28,6 +31,24 @@ If one was saved, the files may be a fresher export of the same migration: run i
 (`migration_recipe(action="run", recipe, sessions)`, see `get_skill("migration-recipe-usage")`)
 instead of mapping again. It matches the files itself and asks only what is new. With several
 recipes, ask which one; with none, or when no file matches, go on as below.
+
+## Several files in one upload: keep going until the approvals
+
+The user uploaded the files and said "import these": they expect the work done, not a list of next
+steps. Ask everything you need in **one** round: the company, the cut-off, where to keep each file's
+old IDs (`set_column_mapping` with only the session says what to ask), what you can't map. Then, in
+the same reply as the answers, go on without stopping:
+
+1. the chart: its check (`dry_run_import(session, chart={"company": ...})`);
+2. the staff list: its people (`setup_plan(action="discover", staff_session=...)`), then the groups,
+   saved in the setup plan (`setup_plan(action="save")`);
+3. the other files: the plan's check (`dry_run_import(plan=...)`), answering what you are sure of.
+
+Then show it all in one message, by file: what the chart check found, the staff groups, what the
+plan will import and what it leaves out. End with the approvals, in order: the chart's import, the
+setup plan's run (`run_setup_plan` with the plan's approval), the migration plan's run. A staff list
+uploaded is set up in the same go: never leave its plan as a Draft without its approval card. Stop
+only for a question the user must answer or an approval. **Never end a reply with "Next, I'll …": do it.**
 
 ## Two ways through a migration
 
@@ -247,6 +268,8 @@ migration plan names it in `migration_plan`: the plan's id, the session of its f
 
 If a file carries the old system's own ID for each row (an Odoo id, a Zoho Customer ID, a Tally
 ledger's name), mark it when you map (`set_column_mapping`, with source_key_column and
-source_system; a preset does it itself), and before the dry run ask where to keep the IDs
+source_system; a preset does it itself). Don't map that column to a field as well: it is kept as the
+old ID (unless it is a field anyway, like an Item code), so never put it in another field such as a
+description. Before the dry run ask where to keep the IDs
 (the old_id_storage answer to `set_column_mapping`). Later files that refer to the records by those IDs can then be translated
 instead of corrected by hand.

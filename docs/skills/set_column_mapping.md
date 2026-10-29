@@ -95,7 +95,7 @@ The dry run is refused until the user says where the IDs are kept: ask before it
 4. `offer` is `null` and `storage` is set: it was answered before, for this DocType and source
    system. Don't ask again; go on to the dry run.
 
-Pass `old_id_storage` on a call of its own, without `mapping`: only the answer is recorded.
+`old_id_storage` can come with the mapping, or on a call of its own: the mapping is saved first.
 
 - Never pick for the user, and never use a field the result didn't list: a field that doesn't hold
   this file's IDs is refused.

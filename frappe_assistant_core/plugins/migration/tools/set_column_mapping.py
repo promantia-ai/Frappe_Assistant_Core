@@ -177,12 +177,23 @@ class SetColumnMapping(BaseTool):
         session_name = arguments.get("session")
         mapping = arguments.get("mapping")
         if arguments.get("old_id_storage"):
-            if mapping:
-                return {
-                    "success": False,
-                    "error": _("Pass old_id_storage on a call of its own, without mapping."),
-                }
-            return self._old_id_storage(session_name, arguments)
+            if mapping is None and not arguments.get("source_key_column"):
+                return self._old_id_storage(session_name, arguments)
+            # the mapping and the answer together: the mapping first, as the answer needs its old ID column
+            mapped = self.execute(
+                {k: v for k, v in arguments.items() if k not in ("old_id_storage", "old_id_field")}
+            )
+            if not mapped.get("success"):
+                return mapped
+            stored = self._old_id_storage(session_name, arguments)
+            if not stored.get("success"):
+                return {**stored, "mapping": _("The mapping was saved; where to keep the old IDs wasn't.")}
+            mapped["old_ids"] = {
+                **(mapped.get("old_ids") or {}),
+                "storage": stored.get("storage"),
+                "message": stored.get("message"),
+            }
+            return mapped
         if mapping is None and not arguments.get("source_key_column") and not arguments.get("old_id_columns"):
             # only the session: what to ask about the old IDs, e.g. after a recipe marked the column
             return self._old_id_question(session_name)

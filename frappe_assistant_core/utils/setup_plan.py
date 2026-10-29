@@ -419,6 +419,17 @@ STAFF = "staff"
 def _staff_item(group: Any, welcome: bool) -> Dict[str, Any]:
     if not isinstance(group, dict):
         raise SetupProblem(_("Each staff group is an object: name, roles, user_permissions, people."))
+    from frappe_assistant_core.utils import staff_setup
+
+    group = {
+        **group,
+        "user_permissions": [
+            {**p, "for_value": staff_setup.record_name(p.get("allow"), p.get("for_value"))}
+            if isinstance(p, dict)
+            else p
+            for p in group.get("user_permissions") or []
+        ],
+    }
     people = group.get("people") or []
     limits = ", ".join(f"{p.get('allow')} {p.get('for_value')}" for p in group.get("user_permissions") or [])
     # every person is on the approval card: each becomes a desk user, and the list came from a file

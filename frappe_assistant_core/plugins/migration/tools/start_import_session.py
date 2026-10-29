@@ -147,6 +147,7 @@ class StartImportSession(BaseTool):
                     "sample_rows",
                     "first_rows",
                     "other_sheets",
+                    "recipes",
                     "note",
                     "error",
                     *preset_fields,
@@ -376,6 +377,22 @@ class StartImportSession(BaseTool):
                 _(
                     "Only one tab of the Google Sheet was read: the one open when the link was "
                     "copied, else the first. To import another tab, open it and copy the link again."
+                )
+            )
+        recipes = (
+            frappe.get_list(
+                "FAC Migration Recipe", fields=["name", "title"], order_by="modified desc", limit=5
+            )
+            if frappe.has_permission("FAC Migration Recipe", "read")
+            else []  # a user who can't run recipes isn't told of them
+        )
+        if recipes:
+            # a fresher export of a migration done before is run by its recipe, not mapped again
+            result["recipes"] = recipes
+            notes.append(
+                _(
+                    "Migration recipes are saved on this site (recipes). If this file is a fresher export "
+                    "of one, run it with migration_recipe(action='run') instead of mapping it again."
                 )
             )
         if notes:

@@ -188,6 +188,22 @@ class TestStaffSetup(BaseAssistantTest):
             )
         )
 
+    def test_a_warehouse_named_as_people_call_it_is_found(self):
+        # the sheet says "Stores"; the record is "Stores - <abbr>"
+        warehouse = frappe.get_doc(
+            {"doctype": "Warehouse", "warehouse_name": f"Stores {self.tag}", "company": self.company}
+        ).insert()
+        group = self._group("Storekeeper", roles=("Stock User",), people=("arun",), limits=False)
+        group["user_permissions"] = [{"allow": "Warehouse", "for_value": f"Stores {self.tag}"}]
+
+        saved = self._save([group])
+
+        self.assertEqual(saved["result"]["problems"], [], saved)
+        item = frappe.get_doc(setup_plan.PLAN, saved["result"]["plan"]).items[0]
+        limits = frappe.parse_json(item.values)["group"]["user_permissions"]
+        self.assertEqual(limits[0]["for_value"], warehouse.name)
+        self.assertNotEqual(warehouse.name, f"Stores {self.tag}")
+
     def test_a_person_added_in_chat_to_a_second_group_is_caught(self):
         saved = self._save([self._group(people=("ravi",))])
         twice = self._group("Buyer", roles=("Purchase User",), people=("ravi",))
@@ -207,6 +223,54 @@ class TestStaffSetup(BaseAssistantTest):
         found = self._tool("setup_plan", {"action": "discover", "company": self.company})
         self.assertTrue(found["success"], found)
         self.assertIn("staff", [area["area"] for area in found["result"]["areas"]])
+
+    def _opened_as_an_import(self):
+        """The staff list uploaded with the files to import, opened as FACO opens each of them."""
+        self.track_test_files()
+        self.addCleanup(self.delete_test_files)
+        people = "\n".join(
+            f"{p.title()} Kumar,{self._email(p)},Sales,Makes quotations" for p in ("ravi", "meena")
+        )
+        content = f"Employee Name,Email ID,Department,What they do\n{people}\n".encode()
+        upload = frappe.get_doc(
+            {"doctype": "File", "file_name": f"staff-{self.tag}.csv", "content": content, "is_private": 1}
+        ).insert()
+        opened = self._tool("start_import_session", {"file_id": upload.name})
+        self.assertTrue(opened["success"], opened)
+        return upload, opened["result"]["session_id"]
+
+    def test_a_staff_list_opened_as_an_import_is_handed_to_the_setup_plan(self):
+        from frappe_assistant_core.plugins.data_science.tools.extract_file_content import ExtractFileContent
+        from frappe_assistant_core.utils.import_session import holding_session
+
+        upload, session = self._opened_as_an_import()
+        # the import guard keeps the file reader off it (#34003)
+        self.assertIn("being imported", ExtractFileContent().execute({"file_id": upload.name})["error"])
+
+        found = self._tool(
+            "setup_plan", {"action": "discover", "company": self.company, "staff_session": session}
+        )
+
+        self.assertTrue(found["success"], found)
+        staff = found["result"]["staff_list"]
+        self.assertEqual(staff["columns"][:2], ["Employee Name", "Email ID"])
+        self.assertEqual([row[1] for row in staff["people"]], [self._email("ravi"), self._email("meena")])
+        # a staff list isn't imported: its session ends and the file is free again
+        self.assertEqual(frappe.db.get_value("FAC Import Session", session, "status"), "Cancelled")
+        self.assertIsNone(holding_session(upload.name))
+
+    def test_a_session_already_checked_is_not_taken_as_a_staff_list(self):
+        _upload, session = self._opened_as_an_import()
+        # as a dry run leaves it
+        frappe.db.set_value("FAC Import Session", session, "status", "Ready to Import")
+
+        found = self._tool(
+            "setup_plan", {"action": "discover", "company": self.company, "staff_session": session}
+        )
+
+        self.assertFalse(found["success"])
+        self.assertIn("Ready to Import", found["error"])
+        self.assertEqual(frappe.db.get_value("FAC Import Session", session, "status"), "Ready to Import")
 
     # -- what can this person see and do -------------------------------------------------------
 

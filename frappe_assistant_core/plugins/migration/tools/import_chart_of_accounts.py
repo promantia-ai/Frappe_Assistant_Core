@@ -176,6 +176,10 @@ class ImportChartOfAccounts(BaseTool):
 def check_chart(name: str, company: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     """What the chart would become: read from the session, nothing written. dry_run_import's chart
     check."""
+    if not company:
+        # nothing to ask on a site of one company
+        only = frappe.get_list("Company", pluck="name", limit=2)
+        company = only[0] if len(only) == 1 else ""
     try:
         session = load_session(name)
         nodes = import_chart.read_chart(session, arguments.get("root_type_column"))

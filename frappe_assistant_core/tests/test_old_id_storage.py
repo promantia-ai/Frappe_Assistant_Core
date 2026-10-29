@@ -220,14 +220,37 @@ class TestChooseOldIdStorage(ImportToolTestCase):
         self.assertFalse(response["success"], response)
         self.assertIsNone(keys.storage_for("Customer", self.system))
 
-    def test_an_answer_given_with_a_mapping_is_refused_not_ignored(self):
-        session = self._session_of_ids(self._ids())
+    def test_an_answer_given_with_the_mapping_is_recorded_too(self):
+        # FACO sends the mapping and the user's answer in one call
+        session = self._session_of_ids(self._ids(), mark=False)
         reply = self._run(
             "set_column_mapping",
-            {"session": session, "mapping": {"Customer Name": "customer_name"}, "old_id_storage": "key_map"},
+            {
+                "session": session,
+                "mapping": {"Customer Name": "customer_name"},
+                "source_key_column": "id",
+                "source_system": self.system,
+                "old_id_storage": "key_map",
+            },
+        )
+        self.assertTrue(reply["success"], reply)
+        self.assertEqual(keys.storage_for("Customer", self.system), {"kind": "key_map"})
+        self.assertEqual(reply["result"]["old_ids"]["storage"], "refused_field")
+
+    def test_an_answer_with_a_mapping_that_fails_records_neither(self):
+        session = self._session_of_ids(self._ids(), mark=False)
+        reply = self._run(
+            "set_column_mapping",
+            {
+                "session": session,
+                "mapping": {"Customer Name": "no_such_field"},
+                "source_key_column": "id",
+                "source_system": self.system,
+                "old_id_storage": "key_map",
+            },
         )
         self.assertFalse(reply["success"], reply)
-        self.assertIn("without mapping", reply["error"])
+        self.assertIsNone(keys.storage_for("Customer", self.system))
 
     # -- the check waits for the answer -------------------------------------------------------------
 

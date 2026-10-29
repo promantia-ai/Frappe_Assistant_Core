@@ -40,9 +40,9 @@ class TestPlanWithOldIds(ImportRunCase):
         self.assertTrue(mapped["success"], mapped)
         return session
 
-    def _files(self, item_group_id=None, item_code=None):
+    def _files(self, item_group_id=None, item_code=None, declared=True):
         """The Item Groups file (with the old system's ID of each group) and the Items file, which
-        points at its group by that ID."""
+        points at its group by that ID. ``declared``: FACO said the Items column holds old IDs."""
         groups = self._mapped(
             "groups.csv",
             f"ID,Name,Parent,Is Group\n{self.id1},{self.g1},All Item Groups,1\n{self.id2},{self.g2},{self.g1},0\n".encode(),
@@ -68,7 +68,11 @@ class TestPlanWithOldIds(ImportRunCase):
                 "UOM": "stock_uom",
                 **({"HSN": "gst_hsn_code"} if hsn else {}),
             },
-            old_id_columns={"Group ID": {"doctype": "Item Group", "source_system": self.system}},
+            **(
+                {"old_id_columns": {"Group ID": {"doctype": "Item Group", "source_system": self.system}}}
+                if declared
+                else {}
+            ),
         )
         return groups, items
 
@@ -126,6 +130,16 @@ class TestPlanWithOldIds(ImportRunCase):
         )
         self.assertFalse(frappe.db.exists("Item Group", self.id2))  # no stand-in is left behind
 
+    def test_a_column_of_an_earlier_files_ids_is_translated_though_nobody_said_so(self):
+        # FACO mapped Group ID as a plain link: the plan finds the IDs are the groups file's
+        groups, items = self._files(declared=False)
+        plan, _answered = self._plan(groups, items)
+
+        response = self._approve(plan)
+
+        self.assertTrue(response["success"], response)
+        self.assertEqual(frappe.db.get_value("Item", self.code, "item_group"), self.g2)
+
     def test_an_id_no_file_of_the_plan_brings_is_a_question_of_the_plan(self):
         groups, items = self._files(item_group_id=f"GO-{self.tag}-9")
 
@@ -136,3 +150,135 @@ class TestPlanWithOldIds(ImportRunCase):
         self.assertIn("isn't imported yet", text)
         self.assertIn(f"GO-{self.tag}-9", text)
         self.assertFalse(frappe.db.exists("Item", self.code))
+
+
+@unittest.skipUnless("erpnext" in frappe.get_installed_apps(), "needs ERPNext's Customer and Sales Invoice")
+class TestReceivablesByTheCustomersOldIds(ImportRunCase):
+    """The client's customers and their opening receivables, uploaded together: the receivables name
+    each customer by its code in the old system, the customers file keeps that code as the old ID.
+    set_opening_invoices has no way to say a column holds old IDs, so the plan finds it."""
+
+    def setUp(self):
+        super().setUp()
+        from frappe_assistant_core.tests.test_import_opening_invoices import OpeningInvoicesCase
+        from frappe_assistant_core.utils import import_opening_invoices as opening_invoices
+
+        self.system = f"tally{self.tag}"
+        self.company = frappe.get_all("Company", pluck="name", order_by="creation", limit=1)[0]
+        self.date = frappe.utils.nowdate()
+        if not opening_invoices.in_fiscal_year(self.date, self.company):
+            self.skipTest("today is in no fiscal year of the test company")
+        OpeningInvoicesCase._temporary_account(self)
+        self.code, self.title = f"SV-{self.tag}-1", f"Murugan {self.tag}"
+
+    def _session(self, name, content):
+        started = self._run("start_import_session", {"file_url": self._file(name, content.encode()).file_url})
+        self.assertTrue(started["success"], started)
+        return started["result"]["session_id"]
+
+    def _customers(self, title=None):
+        """The customers file, its code kept as each customer's old ID in FAC's key map."""
+        customers = self._session(
+            "customers.csv",
+            f"Customer Code,Customer Name,Customer Group\n{self.code},{title or self.title},{self.group}\n",
+        )
+        mapped = self._run(
+            "set_column_mapping",
+            {
+                "session": customers,
+                "doctype": "Customer",
+                "mapping": {"Customer Name": "customer_name", "Customer Group": "customer_group"},
+                "source_key_column": "Customer Code",
+                "source_system": self.system,
+            },
+        )
+        self.assertTrue(mapped["success"], mapped)
+        stored = self._run("set_column_mapping", {"session": customers, "old_id_storage": "key_map"})
+        self.assertTrue(stored["success"], stored)
+        return customers
+
+    def _receivables(self):
+        """The opening receivables, naming the customer by its code in the old system."""
+        receivables = self._session(
+            "receivables.csv",
+            f"Bill No,Bill Date,Customer Code,Balance\nOI-{self.tag}-1,{self.date},{self.code},450\n",
+        )
+        setup = self._run(
+            "set_opening_invoices",
+            {
+                "session": receivables,
+                "company": self.company,
+                "invoice_type": "Sales",
+                "cut_off": self.date,
+                "columns": {
+                    "Bill No": "invoice_number",
+                    "Bill Date": "posting_date",
+                    "Customer Code": "party",
+                    "Balance": "outstanding_amount",
+                },
+            },
+        )
+        self.assertTrue(setup["success"], setup)
+        return receivables
+
+    def _run_plan(self, *sessions, openings=True):
+        plan = self._run("plan_migration", {"sessions": list(sessions), "failure_rule": "leave_out"})[
+            "result"
+        ]["plan"]
+        answers = [{"id": "plan:failure_rule", "rule": "leave_out"}]
+        if openings:  # a plan with an opening file asks its cut-off
+            answers.append({"id": "plan:cut_off", "date": self.date})
+        answered = self._run("dry_run_import", {"plan": plan, "answers": answers})
+        self.assertTrue(answered["result"].get("ready"), answered)
+        figures = {"plan": plan, **import_plan.card_figures(import_plan.get_plan(plan))}
+        with self._each_row_commits():
+            response = self._run("run_migration_plan", figures)
+        self.assertTrue(response["success"], response)
+
+    def _opening_invoice_of_the_customer(self):
+        customer = frappe.db.get_value("Customer", {"customer_name": self.title})
+        self.assertTrue(customer)
+        return frappe.db.exists("Sales Invoice", {"customer": customer, "is_opening": "Yes", "docstatus": 1})
+
+    def test_the_receivables_find_the_customers_the_plan_imports_by_their_old_codes(self):
+        receivables = self._receivables()
+
+        self._run_plan(receivables, self._customers())
+
+        self.assertTrue(
+            self._opening_invoice_of_the_customer(),
+            frappe.db.get_value(SESSION, receivables, "transformation_rules"),
+        )
+
+    def test_receivables_uploaded_later_find_customers_imported_before_by_their_old_codes(self):
+        # the customers came in an earlier migration; this file is checked on its own
+        self._run_plan(self._customers(), openings=False)
+
+        checked = self._run("dry_run_import", {"session": self._receivables()})["result"]
+
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+
+    def test_a_fresher_export_does_not_bring_the_customers_imported_before_twice(self):
+        self._run_plan(self._customers(), openings=False)
+
+        # the next month's export: the same customer under the same code, renamed in the old system
+        again = self._customers(title=f"{self.title} Pvt Ltd")
+        checked = self._run("dry_run_import", {"session": again})["result"]
+
+        self.assertEqual(checked["status"], "Dry Run Failed", checked)
+        self.assertIn("old_id", [group.get("field") for group in checked["groups"]], checked)
+        self.assertEqual(frappe.db.count("Customer", {"customer_name": self.title}), 1)
+
+    def test_an_import_checked_before_the_ids_were_kept_is_refused(self):
+        # checked while the customers weren't imported yet, then imported afterwards (#34244)
+        renamed = self._customers(title=f"{self.title} Pvt Ltd")
+        checked = self._run("dry_run_import", {"session": renamed})["result"]
+        self.assertEqual(checked["status"], "Ready to Import", checked)
+        self._run_plan(self._customers(), openings=False)
+
+        with self._each_row_commits():
+            started = self._run("start_import", self._card(renamed, checked))
+
+        self.assertFalse(started["success"], started)
+        self.assertIn(self.code, started["error"])
+        self.assertEqual(frappe.db.count("Customer", {"customer_name": ["like", f"{self.title}%"]}), 1)

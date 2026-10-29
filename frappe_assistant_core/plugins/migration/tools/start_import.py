@@ -142,6 +142,7 @@ class StartImport(BaseTool):
             if session.status == import_run.IMPORTING:
                 data_import, state = import_run.resume(session)
             else:
+                _refuse_old_ids_imported_before(session)
                 data_import, state = import_run.start(session), "started"
         except import_run.StartCollided:
             raise
@@ -175,3 +176,24 @@ class StartImport(BaseTool):
 
 # Make sure class name matches file name for discovery
 start_import = StartImport
+
+
+def _refuse_old_ids_imported_before(session) -> None:
+    """A ready row whose old ID an import kept since the check (#34244) would make its record twice:
+    the check lists such rows, but one taken before they were imported, or before FAC checked for
+    them, doesn't."""
+    from frappe_assistant_core.utils.import_dry_run import _imported_old_ids
+
+    before = _imported_old_ids(session)
+    if not before:
+        return
+    ready = {row["row"] for row in import_run._checked_rows(session) if row.get("status") == "ready"}
+    again = sorted(row for row in before if row in ready)
+    if again:
+        shown = ", ".join(f"{before[row][0]} ({before[row][1]})" for row in again[:5])
+        raise import_run.ImportProblem(
+            _(
+                "Rows {0} were imported before: their old IDs are kept for {1}. Check the file again "
+                "with dry_run_import, which lists them with a fix."
+            ).format(", ".join(str(row) for row in again), shown)
+        )

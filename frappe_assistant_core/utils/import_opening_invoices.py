@@ -416,7 +416,8 @@ def _problem(invoices: Dict[str, Any], cause: str, field: str, value: str, messa
 
 
 def find_party(party_type: str, text: str):
-    """The party named ``text``, or the only one whose customer or supplier name it is."""
+    """The party named ``text``, the only one whose customer or supplier name it is, or the one the
+    old system's ID ``text`` stands for."""
     if not text:
         return None
     fields = ["name", "disabled", "default_currency"]
@@ -426,7 +427,21 @@ def find_party(party_type: str, text: str):
     matches = frappe.get_all(
         party_type, filters={PARTY_NAME_FIELDS[party_type]: text}, fields=fields, limit=2
     )
-    return matches[0] if len(matches) == 1 else None
+    if matches:  # several: a missing link, not a guess
+        return matches[0] if len(matches) == 1 else None
+    return _by_old_id(party_type, text, fields)
+
+
+def _by_old_id(party_type: str, text: str, fields: List[str]):
+    """The party an import kept ``text`` as the old ID of (#34244): the old system's receivables and
+    payables name each party the way it did, by its code there."""
+    from frappe_assistant_core.utils import import_keys
+
+    for system in import_keys.systems_for(party_type):
+        name = import_keys.resolve(party_type, system, [text]).get(import_keys.normalise(text))
+        if name:
+            return frappe.db.get_value(party_type, name, fields, as_dict=True)
+    return None
 
 
 def _fiscal_years(company: str):
