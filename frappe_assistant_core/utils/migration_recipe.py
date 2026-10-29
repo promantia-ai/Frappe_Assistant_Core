@@ -18,7 +18,7 @@ import datetime
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -364,10 +364,13 @@ def whats_new(step, session) -> List[Dict[str, Any]]:
     return out
 
 
-def _checked_mapping(step, headers: List[str], mapping: Dict[str, str], import_type: Optional[str]):
-    """The step's mapping as set_column_mapping would save it, checked the same way: the user may import
-    into its DocType, and each field is one the import can fill, once. A recipe can come from another
-    site's file, so nothing in it is taken as checked. Raises RecipeProblem."""
+def _checked_mapping(
+    step, headers: List[str], mapping: Dict[str, str], import_type: Optional[str]
+) -> Tuple[Dict[str, str], List[str]]:
+    """The step's mapping as set_column_mapping would save it, checked the same way, and why each column
+    left out of it was: a recipe can come from another site's file, or another version of ERPNext, so
+    nothing in it is taken as checked. A field the import can't set here is left unmapped, for the plan
+    to ask about. Raises RecipeProblem when the user can't import into the DocType at all."""
     from frappe_assistant_core.utils import import_mapping, import_update
     from frappe_assistant_core.utils.import_session import import_target_problem
 
@@ -379,13 +382,16 @@ def _checked_mapping(step, headers: List[str], mapping: Dict[str, str], import_t
     if problem:
         raise RecipeProblem(_("Step {0}: {1}").format(step.position, problem))
     schema = import_mapping.build_import_schema(step.target_doctype)
-    resolved, problems = import_mapping.resolve_mapping(step.target_doctype, schema, headers, mapping)
-    problems += import_mapping.duplicate_targets(resolved, headers)
-    if problems:
-        raise RecipeProblem(
-            _("Step {0}'s mapping can't be used: {1}").format(step.position, " ".join(problems))
-        )
-    return resolved
+    resolved, refused = {}, []
+    for column, field in mapping.items():
+        one, problems = import_mapping.resolve_mapping(step.target_doctype, schema, headers, {column: field})
+        refused += problems
+        if not problems:
+            resolved.update(one)
+    twice = import_mapping.duplicate_targets(resolved, headers)
+    if twice:
+        raise RecipeProblem(_("Step {0}'s mapping can't be used: {1}").format(step.position, " ".join(twice)))
+    return resolved, refused
 
 
 def apply_step(step, session_name: str) -> Dict[str, Any]:
@@ -422,7 +428,21 @@ def apply_step(step, session_name: str) -> Dict[str, Any]:
             for i, h in enumerate(headers)
             if _norm(h) in by_header and by_header[_norm(h)] not in missing
         }
-        mapping = _checked_mapping(step, headers, mapping, step.import_type or session.import_type)
+        mapping, refused = _checked_mapping(step, headers, mapping, step.import_type or session.import_type)
+        if refused:
+            questions.append(
+                {
+                    "id": f"{RECIPE_PREFIX}{session.name}:not_importable",
+                    "kind": "recipe_new",
+                    "what": "not_importable",
+                    "session": session.name,
+                    "file_name": session.file_name,
+                    "message": _(
+                        "These columns are left unmapped, as this site's import can't set their fields: {0} "
+                        "Map them with set_column_mapping if they are wanted, then answer ok."
+                    ).format(" ".join(refused)),
+                }
+            )
         session.import_type = step.import_type or session.import_type
         import_mapping.save_mapping(
             session,

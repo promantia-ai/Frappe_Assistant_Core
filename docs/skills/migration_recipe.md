@@ -62,6 +62,9 @@ on another site (rehearsal, then production).
    - `not_on_site`: a DocType or field of the recipe isn't on this site (a custom field of the other
      site). Nothing is guessed; the column is left unmapped or the file isn't imported. Tell the user,
      then answer `{id, ok: true}`.
+   - `not_importable`: a field of the recipe is on this site but its import can't set it (hidden or read
+     only here, as on another ERPNext version). The column is left unmapped. Tell the user; map it to
+     another field with `set_column_mapping` if they want it, then answer `{id, ok: true}`.
    Everything the user already decided in the first run is not asked again. Values that no saved value
    map covers, and references that don't resolve, come as the usual fix questions.
 6. When the plan is ready: `run_migration_plan`, as for any plan.

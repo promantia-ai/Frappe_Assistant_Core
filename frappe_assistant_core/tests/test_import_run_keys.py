@@ -163,7 +163,7 @@ class TestImportKeepsOldIds(ImportRunCase):
 
         self.assertFalse(frappe.db.exists(KEY_MAP, {"source_system": self.system}))
 
-    def test_an_id_already_naming_another_record_is_reported_and_not_overwritten(self):
+    def test_an_id_kept_for_another_record_since_the_check_stops_the_import_and_is_not_overwritten(self):
         session, checked = self._keyed_session("key_map", left_out=())
         other = frappe.get_doc(
             {
@@ -172,18 +172,21 @@ class TestImportKeepsOldIds(ImportRunCase):
                 "customer_group": self.group,
             }
         ).insert()
+        # another import, after this check, kept alpha's old ID for its record
         keys.record_pairs("IMP-OLD", "Customer", self.system, [(self.ids["alpha"], other.name)])
 
         with self._each_row_commits():
-            result = self._import_all(session, checked)
+            refused = self._import(session, checked)
 
+        # importing alpha again would make a second customer for one old record
+        self.assertFalse(refused["success"], refused)
+        self.assertIn("imported before", refused["error"])
+        self.assertIn(other.name, refused["error"])
         self.assertEqual(self._record_of("alpha"), other.name)
-        step = frappe.get_doc("FAC Import Session", session).steps[-1]
-        self.assertEqual(step.step, "Import")
-        self.assertIn("already belong to another record", step.message)
-        self.assertIn(self.ids["alpha"], step.message)
+        self.assertFalse(frappe.db.exists("Customer", {"customer_name": self._names()["alpha"]}))
+        again = self._run("dry_run_import", {"session": session})["result"]
         self.assertEqual(
-            self._record_of("beta"), frappe.db.get_value("Customer", {"customer_name": self._names()["beta"]})
+            [(g["cause"], g["field"]) for g in again["groups"]], [("Already in ERPNext", "old_id")]
         )
 
     def test_the_result_recorded_on_the_session_is_unchanged_by_the_keys(self):

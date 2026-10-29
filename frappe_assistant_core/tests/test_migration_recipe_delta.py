@@ -235,7 +235,7 @@ class TestDeltaRun(DeltaRecipeCase):
                         "Journal Entry",
                         ["Voucher", "Booked", "Company", "Account", "Debit", "Credit"],
                         {
-                            "0": "user_remark",
+                            "0": "bill_no",
                             "1": "posting_date",
                             "2": "company",
                             "3": "accounts.account",
@@ -267,7 +267,7 @@ class TestDeltaRun(DeltaRecipeCase):
         checked = self._run("dry_run_import", {"plan": ran["plan"], "answers": answer})
         self.assertEqual(import_plan.get_plan(ran["plan"]).status, "Ready to Run", checked)
         self._approve(ran["plan"])
-        self.assertEqual(frappe.db.count("Journal Entry", {"user_remark": f"JV {self.tag}"}), 1)
+        self.assertEqual(frappe.db.count("Journal Entry", {"bill_no": f"JV {self.tag}"}), 1)
 
         again, ran = delta()
 
