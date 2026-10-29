@@ -621,6 +621,39 @@ class TestEntryCheck(GoLiveCase):
         self.assertTrue(state["show"])
         self.assertIn("setup_plan with action discover", state["continue"]["prompt"])
 
+    # Each card says what its step is for and can be started on its own: steps don't have to be done
+    # in order, so a consultant may import the chart before the setup plan is approved
+
+    def test_checklist_steps_say_what_they_are_for(self):
+        for step in self.state(view="checklist")["steps"]:
+            with self.subTest(step=step["key"]):
+                self.assertTrue(step["description"])
+
+    def test_each_open_step_can_be_started_on_its_own(self):
+        from frappe_assistant_core.onboarding import entry
+
+        self.install_templates()
+        steps = {s["key"]: s for s in self.state(view="checklist")["steps"]}
+        # Discovery is next, but the chart of accounts can be started as well
+        self.assertIn(entry.step_instruction("chart_of_accounts", self.company), steps["chart_of_accounts"]["prompt"])
+        self.assertIn(self.company, steps["chart_of_accounts"]["prompt"])
+        self.assertIn("setup_plan with action discover", steps["discovery"]["prompt"])
+
+    def test_done_and_skipped_steps_have_no_prompt(self):
+        self.plan("Draft")
+        doc = frappe.get_doc("FAC Go-Live", {"company": self.company})
+        doc.append("skipped_steps", {"step": "data_migration"})
+        doc.save(ignore_permissions=True)
+        steps = {s["key"]: s for s in self.state(view="checklist")["steps"]}
+        self.assertIsNone(steps["discovery"]["prompt"])
+        self.assertIsNone(steps["data_migration"]["prompt"])
+        self.assertTrue(steps["setup_plan"]["prompt"])
+
+    def test_banner_view_renders_no_step_prompts(self):
+        # the banner shows one line on every Desk page: it renders no template per step
+        for step in self.state()["steps"]:
+            self.assertNotIn("prompt", step)
+
     def test_result_has_no_record_contents(self):
         self.plan("Completed")
         state = self.state()

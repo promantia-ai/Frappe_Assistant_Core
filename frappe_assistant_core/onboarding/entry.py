@@ -32,7 +32,16 @@ STEP_LABELS = {
     "go_live_test_run": _("Go-live test run"),
     "hypercare": _("Hypercare"),
 }
-PLAN_NEEDS_ATTENTION = ("Partially Completed", "Failed", "Stopped")
+# one line on each checklist card: what the step is for
+STEP_DESCRIPTIONS = {
+    "discovery": _("What the client does, sells and uses today: the setup plan is built from it."),
+    "setup_plan": _("Company settings, users, roles and masters, set up in one approved run."),
+    "chart_of_accounts": _("The client's own accounts on the company, or ERPNext's chart kept."),
+    "data_migration": _("Customers, suppliers, items and opening balances brought over from the old system."),
+    "go_live_test_run": _("A buying and selling test and the readiness checks, before the client goes live."),
+    "hypercare": _("A weekly summary of what goes wrong in the first weeks after go-live."),
+}
+PLAN_NEEDS_ATTENTION =("Partially Completed", "Failed", "Stopped")
 # how many of the latest go_live_test_run calls are looked through for this company's
 TEST_RUNS_READ = 20
 # R6: a site this small and this young is offered onboarding although the wizard named no client
@@ -144,6 +153,7 @@ def steps(company: str) -> List[Dict[str, Any]]:
             {
                 "key": key,
                 "label": STEP_LABELS[key],
+                "description": STEP_DESCRIPTIONS[key],
                 "state": state,
                 "record": record,
                 "skipped": skipped.get(key) if state == "skipped" else None,
@@ -536,6 +546,15 @@ def _prompt(company: str, step: Optional[str]) -> str:
     return _("Take {0} live.").format(company) + " " + instruction
 
 
+def _with_prompts(step_list: List[Dict[str, Any]], company: str) -> List[Dict[str, Any]]:
+    """The checklist's steps, each one not yet done with the prompt that starts it: steps don't have
+    to be done in order. Copies, as the list is the cached site state."""
+    return [
+        {**step, "prompt": None if step["state"] in ("done", "skipped") else _prompt(company, step["key"])}
+        for step in step_list
+    ]
+
+
 def _continue(company: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Where Start/Continue goes (5.2): FAC Chat when this user can chat, else their own AI client."""
     from frappe_assistant_core.chat.gate import is_chat_enabled
@@ -635,7 +654,7 @@ def _get_state(user: str, view: str, company: Optional[str], may_write: bool = T
         "soft": current == "not_started_soft",
         "company": company,
         "companies": frappe.get_all("FAC Go-Live", pluck="company", order_by="creation asc"),
-        "steps": state["steps"],
+        "steps": state["steps"] if banner else _with_prompts(state["steps"], company),
         "next_step": state["next_step"],
         "hypercare": state["hypercare"],
         "marked_live": marked_live,

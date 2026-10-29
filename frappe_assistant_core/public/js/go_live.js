@@ -41,12 +41,15 @@ frappe.provide("frappe_assistant_core.go_live");
 			.fac-go-live-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 			.fac-go-live-head h4 { flex: 1; margin: 0; font-size: var(--text-lg, 16px); }
 			.fac-go-live-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
-			.fac-go-live-step { padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; min-height: 66px; }
+			.fac-go-live-step { padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; min-height: 66px;
+				display: flex; flex-direction: column; }
+			.fac-go-live-step .step-desc { font-size: var(--text-sm, 12px); color: var(--text-color); margin-top: 4px; }
 			.fac-go-live-step.state-next { border-color: var(--green-500, #2bb673); background: var(--green-50, #ecfdf3); }
 			.fac-go-live-step.state-needs_attention { border-color: var(--orange-400, #f8a83a); }
 			.fac-go-live-step .step-label { font-weight: 600; }
 			.fac-go-live-step .step-meta { font-size: var(--text-sm, 12px); color: var(--text-muted); margin-top: 4px; }
-			.fac-go-live-step .step-actions { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+			.fac-go-live-step .step-actions { margin-top: auto; padding-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;
+				align-items: center; }
 			.fac-go-live-step .step-actions a { font-size: var(--text-sm, 12px); cursor: pointer; }
 			.fac-go-live-foot { margin-top: 10px; font-size: var(--text-sm, 12px); color: var(--text-muted); }
 		`;
@@ -238,13 +241,27 @@ frappe.provide("frappe_assistant_core.go_live");
 			const $step = $(`
 				<div class="fac-go-live-step state-${step.state}">
 					<div class="step-label"></div>
+					<div class="step-desc"></div>
 					<div class="step-meta"></div>
 					<div class="step-actions"></div>
 				</div>
 			`);
 			$step.find(".step-label").text(`${icon} ${step.label}`);
+			$step.find(".step-desc").text(step.description || "");
 			$step.find(".step-meta").text(STATE_LABELS[step.state] || step.state);
 			const $actions = $step.find(".step-actions");
+			// Any step not done can be started on its own: they don't have to be done in order.
+			// Not while the onboarding tools are off: the AI would have nothing to do it with.
+			if (step.prompt && state.continue && state.variant !== "enable_tools") {
+				$(`<button type="button" class="btn btn-default btn-xs">${__("Start")}</button>`)
+					.on("click", () =>
+						ns.open_continue({
+							...state,
+							continue: { ...state.continue, prompt: step.prompt },
+						})
+					)
+					.appendTo($actions);
+			}
 			[step.record, step.setup_record].forEach((record) => {
 				if (!record) return;
 				$("<a>").attr("href", ns.form_link(record)).text(record.name + " ↗").appendTo($actions);
