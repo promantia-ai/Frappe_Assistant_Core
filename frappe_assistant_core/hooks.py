@@ -95,6 +95,9 @@ after_install = [
 ]
 
 
+# The setup wizard's "Who are you setting this up for?", kept for the go-live banner (#34419)
+setup_wizard_complete = "frappe_assistant_core.onboarding.wizard.after_wizard"
+
 # Uninstallation
 # ------------
 
