@@ -948,6 +948,10 @@ def _end(plan_name: str, status: str, message: str) -> None:
     frappe.db.set_value(
         PLAN, plan_name, {"status": status, "applied_on": frappe.utils.now_datetime()}, update_modified=False
     )
+    # set_value runs no doc_events: the go-live checklist's cache is cleared here (#34419)
+    from frappe_assistant_core.onboarding.entry import clear_cache
+
+    clear_cache()
 
 
 def _apply_item(item) -> Tuple[str, str]:

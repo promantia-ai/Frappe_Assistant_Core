@@ -353,9 +353,8 @@ def site_state(company: str) -> Dict[str, Any]:
     step_list = steps(company)
     current = stage(company, step_list)
     care = _hypercare()
-    go_live = frappe.db.get_value(
-        "FAC Go-Live", {"company": company}, ["tools_disabled_by"], as_dict=True
-    ) or frappe._dict()
+    # the plugin is the site's: switched off while the check was about another company counts too
+    disabled_by = frappe.db.get_value("FAC Go-Live", {"tools_disabled_by": ("is", "set")}, "tools_disabled_by")
     state = {
         "company": company,
         "stage": current,
@@ -363,7 +362,7 @@ def site_state(company: str) -> Dict[str, Any]:
         "next_step": next_step(step_list),
         "hypercare": _hypercare_weeks(care) if care and current == "live_hypercare" else None,
         "plugin_on": MIGRATION_PLUGIN in get_plugin_manager().get_enabled_plugins(),
-        "tools_disabled_by": go_live.get("tools_disabled_by"),
+        "tools_disabled_by": disabled_by,
     }
     frappe.cache().set_value(key, state, expires_in_sec=CACHE_SECONDS)
     return state
@@ -427,7 +426,7 @@ def maybe_enable_tools(state: Dict[str, Any], user: str) -> bool:
     Migration plugin off in FAC Admin is recorded on FAC Go-Live, and then FAC asks instead."""
     if state["plugin_on"] or state["tools_disabled_by"]:
         return False
-    get_plugin_manager().enable_plugin(MIGRATION_PLUGIN)
+    # logged first: enable_plugin commits, and a GET request rolls back whatever comes after it
     frappe.get_doc(
         {
             "doctype": "Assistant Audit Log",
@@ -440,6 +439,7 @@ def maybe_enable_tools(state: Dict[str, Any], user: str) -> bool:
             "target_name": MIGRATION_PLUGIN,
         }
     ).insert(ignore_permissions=True)
+    get_plugin_manager().enable_plugin(MIGRATION_PLUGIN)
     clear_cache()
     return True
 
@@ -495,7 +495,8 @@ def _continue(current: str, company: str, state: Dict[str, Any]) -> Dict[str, An
 
         if (can_use_faco() or {}).get("can_use"):
             mode = "fac_chat"
-    if current in ("not_started", "not_started_soft") or not state["next_step"]:
+    # nothing discovered yet (a new site, or an established one started from the checklist)
+    if state["next_step"] in (None, "discovery"):
         prompt = _("Take {0} live").format(company)
     else:
         prompt = _("Continue taking {0} live: {1}").format(company, STEP_LABELS[state["next_step"]].lower())
@@ -566,8 +567,13 @@ def _get_state(user: str, view: str, company: Optional[str]) -> Dict[str, Any]:
     variant = None
     if shown:
         variant = "hypercare" if current == "live_hypercare" else "checklist"
-        # the hypercare summary needs no onboarding tools
-        if variant == "checklist" and not state["plugin_on"] and not maybe_enable_tools(state, user):
+        # the hypercare summary needs no onboarding tools; a company marked live never has them
+        # switched on for it (the checklist view still shows one)
+        if (
+            variant == "checklist"
+            and not state["plugin_on"]
+            and (marked_live or not maybe_enable_tools(state, user))
+        ):
             variant = "enable_tools"
     text, primary, buttons = _text(variant, current, company, state, can_enable)
 
@@ -585,7 +591,8 @@ def _get_state(user: str, view: str, company: Optional[str]) -> Dict[str, Any]:
         "text": text,
         "primary": primary,
         "buttons": buttons,
-        "continue": _continue(current, company, state) if variant in ("checklist", "enable_tools") else None,
+        # the checklist of an established site can still start (R7)
+        "continue": _continue(current, company, state) if variant != "hypercare" else None,
         "can_enable_tools": can_enable,
         "can_enable_chat": can_enable,
         "mcp_endpoint": _mcp_endpoint(),

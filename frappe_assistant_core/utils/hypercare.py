@@ -413,6 +413,10 @@ def send_due_summaries() -> None:
                     send(hypercare, add_days(since, 1), last_day)
             if today > end:
                 hypercare.db_set("status", "Ended")
+                # db_set runs no doc_events: the go-live banner's cache is cleared here (#34419)
+                from frappe_assistant_core.onboarding.entry import clear_cache
+
+                clear_cache()
             frappe.db.commit()  # nosemgrep: frappe-manual-commit — a scheduled job commits its own work
         except Exception:
             frappe.db.rollback()

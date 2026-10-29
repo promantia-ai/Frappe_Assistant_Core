@@ -34,6 +34,9 @@ class TestGoLiveWizard(GoLiveCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # commits are blocked in tests, so callbacks queued for after the commit pile up: start clean
+        frappe.db.after_commit.reset()
+        self.addCleanup(frappe.db.after_commit.reset)
 
     def run_hook(self, **answers):
         from frappe_assistant_core.onboarding.wizard import after_wizard
@@ -69,6 +72,9 @@ class TestGoLiveWizard(GoLiveCase):
 
     def test_consultant_turns_tools_on(self):
         self.run_hook(persona_implementing_for="A client I'm consulting for")
+        # not inside the wizard: enable_plugin commits, and the wizard must be able to roll back
+        self.manager.enable_plugin.assert_not_called()
+        frappe.db.after_commit.run()
         self.manager.enable_plugin.assert_called_once_with("migration")
 
     def test_consultant_tools_already_on(self):

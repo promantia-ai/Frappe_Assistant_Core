@@ -579,3 +579,67 @@ class TestEntryCheck(GoLiveCase):
         for step in state["steps"]:
             if step["record"]:
                 self.assertEqual(set(step["record"]), {"doctype", "name"})
+
+    # --- found in review ---
+
+    def test_checklist_view_never_enables_tools_on_a_live_site(self):
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        self.plan("Draft")
+        self.go_live(marked_live=1, marked_live_by="Administrator")
+        state = self.state(view="checklist")
+        self.manager.enable_plugin.assert_not_called()
+        self.assertEqual(state["variant"], "enable_tools")
+
+    def test_auto_enable_logs_before_the_plugin_commits(self):
+        # enable_plugin commits, and a GET request rolls back what comes after it
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        logged = []
+
+        def enable(name):
+            logged.append(frappe.db.exists("Assistant Audit Log", {"action": "enable plugin"}))
+
+        self.manager.enable_plugin.side_effect = enable
+        self.state()
+        self.assertEqual(len(logged), 1)
+        self.assertTrue(logged[0])
+
+    def test_switch_off_on_another_company_is_respected(self):
+        others = frappe.get_all("Company", filters={"name": ("!=", self.company)}, pluck="name", limit=1)
+        if not others:
+            self.skipTest("needs a second company")
+        self.manager.get_enabled_plugins.return_value = {"core"}
+        # FAC Admin recorded it on the company the check was about then
+        self.go_live(company=others[0], intent_source="Manual", tools_disabled_by="Administrator")
+        state = self.state()
+        self.manager.enable_plugin.assert_not_called()
+        self.assertEqual(state["variant"], "enable_tools")
+
+    def test_checklist_view_on_an_established_site_can_start(self):
+        frappe.db.set_value("FAC Go-Live", {"company": self.company}, "intent", "Own business")
+        self.gl_entries(50)
+        state = self.state(view="checklist")
+        self.assertEqual(state["stage"], "established")
+        self.assertEqual(state["continue"]["prompt"], f"Take {self.company} live")
+
+    def test_setup_plan_end_clears_the_cache(self):
+        from frappe_assistant_core.utils import setup_plan
+
+        plan = self.plan("Running")
+        self.assertNotEqual({s["key"]: s for s in self.state()["steps"]}["setup_plan"]["state"], "done")
+        setup_plan._end(plan.name, "Completed", "done")
+        self.assertEqual({s["key"]: s for s in self.state()["steps"]}["setup_plan"]["state"], "done")
+
+    def test_hypercare_end_clears_the_cache(self):
+        from frappe_assistant_core.utils import hypercare
+
+        care = self.hypercare("Active", days=30)
+        # forty days on: the period is over and its last summary was sent
+        end = frappe.utils.add_days(None, -11)
+        care.db_set(
+            {"start_date": frappe.utils.add_days(None, -40), "end_date": end, "last_summary_on": end}
+        )
+        self.assertEqual(self.state()["variant"], "hypercare")
+        with patch.object(hypercare, "send", autospec=True):
+            hypercare.send_due_summaries()
+        self.assertEqual(frappe.db.get_value("FAC Hypercare", care.name, "status"), "Ended")
+        self.assertEqual(self.state(), {"show": False})

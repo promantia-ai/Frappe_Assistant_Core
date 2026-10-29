@@ -48,11 +48,20 @@ def after_wizard(args: Optional[Dict[str, Any]]) -> None:
             }
         )
         doc.save(ignore_permissions=True)
-        # the wizard runs once, at the start: switching the tools on here overrides nobody's choice
+        # The wizard runs once, at the start: switching the tools on here overrides nobody's choice.
+        # After the wizard's commit, as enable_plugin commits and the wizard must stay able to roll back.
         if intent == "Consultant for a client":
-            manager = entry.get_plugin_manager()
-            if entry.MIGRATION_PLUGIN not in manager.get_enabled_plugins():
-                manager.enable_plugin(entry.MIGRATION_PLUGIN)
+            frappe.db.after_commit.add(_enable_tools)
+        entry.clear_cache()
+    except Exception:
+        frappe.log_error(title="FAC go-live wizard hook", message=frappe.get_traceback())
+
+
+def _enable_tools() -> None:
+    try:
+        manager = entry.get_plugin_manager()
+        if entry.MIGRATION_PLUGIN not in manager.get_enabled_plugins():
+            manager.enable_plugin(entry.MIGRATION_PLUGIN)
         entry.clear_cache()
     except Exception:
         frappe.log_error(title="FAC go-live wizard hook", message=frappe.get_traceback())
