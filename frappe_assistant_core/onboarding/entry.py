@@ -509,6 +509,25 @@ def _mcp_endpoint() -> str:
     )
 
 
+def mcp_instructions(user: str) -> Optional[str]:
+    """The paragraph an MCP client gets in the initialize result while the company isn't live yet,
+    so Claude or ChatGPT offers what the banner offers. None otherwise."""
+    state = get_state(user)
+    if not state.get("show") or state["stage"] not in ("not_started", "in_progress", "ready_to_go_live"):
+        return None
+    step = STEP_LABELS.get(state["next_step"]) if state["next_step"] else None
+    text = _("This site's company {0} isn't live yet (go-live stage: {1}).").format(
+        state["company"], state["stage"].replace("_", " ")
+    )
+    if step:
+        text += " " + _("Next go-live step: {0}.").format(step)
+    text += " " + _(
+        "Offer to help take it live. The go-live prompt continues where it stopped: setup_plan with "
+        "action discover first when the company has no setup plan."
+    )
+    return text
+
+
 def get_state(user: str, view: str = "banner", company: Optional[str] = None) -> Dict[str, Any]:
     """What the Desk banner (view "banner") or the checklist (view "checklist") shows this user.
 

@@ -313,7 +313,7 @@ class MCPServer:
         except Exception:
             pass
 
-        return {
+        result = {
             "protocolVersion": protocol_version,
             "capabilities": {
                 "tools": {},  # We support tools
@@ -322,6 +322,16 @@ class MCPServer:
             },
             "serverInfo": {"name": self.name, "version": "2.0.0"},
         }
+        # A company not live yet: the client is told, as the Desk banner tells a System Manager (#34419)
+        try:
+            from frappe_assistant_core.onboarding.entry import mcp_instructions
+
+            instructions = mcp_instructions(frappe.session.user)
+            if instructions:
+                result["instructions"] = instructions
+        except Exception:
+            pass
+        return result
 
     def _handle_tools_list(self, params: Dict, tool_registry: Optional[Dict] = None) -> Dict:
         """Handle tools/list request with optional token optimization."""
