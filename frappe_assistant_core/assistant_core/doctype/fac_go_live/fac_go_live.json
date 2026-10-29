@@ -1,0 +1,172 @@
+{
+ "actions": [],
+ "autoname": "field:company",
+ "creation": "2026-10-29 12:00:00.000000",
+ "description": "A company being taken live: what the setup wizard said, the steps skipped and what the go-live checklist reads. One per company.",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "intent",
+  "current_system",
+  "intent_source",
+  "column_break_live",
+  "marked_live",
+  "marked_live_by",
+  "marked_live_on",
+  "steps_section",
+  "chart_imported_on",
+  "chart_import_session",
+  "migration_completed_on",
+  "migration_plan",
+  "skipped_steps",
+  "tools_section",
+  "tools_disabled_by",
+  "tools_disabled_on",
+  "snoozes"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "Unknown",
+   "description": "From the setup wizard's \"Who are you setting this up for?\"",
+   "fieldname": "intent",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Setting Up For",
+   "options": "Consultant for a client\nOwn business\nCompany I work for\nUnknown"
+  },
+  {
+   "description": "From the setup wizard's \"What do you use today?\"",
+   "fieldname": "current_system",
+   "fieldtype": "Data",
+   "label": "Current System"
+  },
+  {
+   "default": "Manual",
+   "fieldname": "intent_source",
+   "fieldtype": "Select",
+   "label": "Intent Source",
+   "options": "Setup wizard\nManual"
+  },
+  {
+   "fieldname": "column_break_live",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "FAC doesn't offer to take this company live.",
+   "fieldname": "marked_live",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Already Live"
+  },
+  {
+   "fieldname": "marked_live_by",
+   "fieldtype": "Link",
+   "label": "Marked Live By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "marked_live_on",
+   "fieldtype": "Datetime",
+   "label": "Marked Live On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "steps_section",
+   "fieldtype": "Section Break",
+   "label": "Go-Live Steps"
+  },
+  {
+   "fieldname": "chart_imported_on",
+   "fieldtype": "Datetime",
+   "label": "Chart Imported On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "chart_import_session",
+   "fieldtype": "Link",
+   "label": "Chart Import Session",
+   "options": "FAC Import Session",
+   "read_only": 1
+  },
+  {
+   "fieldname": "migration_completed_on",
+   "fieldtype": "Datetime",
+   "label": "Migration Completed On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "migration_plan",
+   "fieldtype": "Link",
+   "label": "Migration Plan",
+   "options": "FAC Import Session",
+   "read_only": 1
+  },
+  {
+   "fieldname": "skipped_steps",
+   "fieldtype": "Table",
+   "label": "Skipped Steps",
+   "options": "FAC Go-Live Skipped Step"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "tools_section",
+   "fieldtype": "Section Break",
+   "label": "Onboarding Tools"
+  },
+  {
+   "description": "Set when an administrator switches the Migration plugin off in FAC Admin; FAC then doesn't switch it on by itself.",
+   "fieldname": "tools_disabled_by",
+   "fieldtype": "Link",
+   "label": "Tools Switched Off By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tools_disabled_on",
+   "fieldtype": "Datetime",
+   "label": "Tools Switched Off On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "snoozes",
+   "fieldtype": "Table",
+   "label": "Not Now",
+   "options": "FAC Go-Live Snooze"
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-29 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Assistant Core",
+ "name": "FAC Go-Live",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "company",
+ "track_changes": 1
+}

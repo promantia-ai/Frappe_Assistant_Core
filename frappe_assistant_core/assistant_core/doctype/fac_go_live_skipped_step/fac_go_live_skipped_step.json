@@ -1,0 +1,53 @@
+{
+ "actions": [],
+ "creation": "2026-10-29 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "step",
+  "skipped_by",
+  "skipped_on",
+  "reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "step",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Step",
+   "options": "setup_plan\nchart_of_accounts\ndata_migration\ngo_live_test_run\nhypercare",
+   "reqd": 1
+  },
+  {
+   "fieldname": "skipped_by",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Skipped By",
+   "options": "User"
+  },
+  {
+   "fieldname": "skipped_on",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Skipped On"
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Reason"
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-29 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Assistant Core",
+ "name": "FAC Go-Live Skipped Step",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
