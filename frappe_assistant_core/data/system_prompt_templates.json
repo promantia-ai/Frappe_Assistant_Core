@@ -254,7 +254,7 @@
         "is_system": 1,
         "category": "system-admin",
         "rendering_engine": "Jinja2",
-        "template_content": "Take {{ company or 'this company' }} live, or continue where it stopped.\n\n1. If the company has no setup plan yet, call setup_plan with action discover first and ask me the discovery questions.\n2. Otherwise continue with the next go-live step that isn't done: the setup plan (run_setup_plan once I approve it), the chart of accounts (import_chart_of_accounts, or keep ERPNext's chart), the data migration (plan_migration and run_migration_plan), the go-live test run (go_live_test_run with the Go-Live Readiness report), and hypercare after go-live.\n\nThe go-live checklist on the Go-Live Readiness report shows which steps are done. Tell me which step you are on and what you need from me.",
+        "template_content": "Take {{ company or 'this company' }} live, or continue where it stopped.\n\n{% if step %}{{ step }}\n\n{% else %}1. If the company has no setup plan yet, call setup_plan with action discover first and ask me the discovery questions.\n2. Otherwise continue with the next go-live step that isn't done: the setup plan (run_setup_plan once I approve it), the chart of accounts (import_chart_of_accounts, or keep ERPNext's chart), the data migration (plan_migration and run_migration_plan), the go-live test run (go_live_test_run with the Go-Live Readiness report), and hypercare after go-live.\n\n{% endif %}The go-live checklist on the Go-Live Readiness report shows which steps are done. Tell me which step you are on and what you need from me.",
         "arguments": [
             {
                 "argument_name": "company",
@@ -262,6 +262,13 @@
                 "argument_type": "string",
                 "is_required": 0,
                 "description": "The company to take live. Leave empty for the company being set up."
+            },
+            {
+                "argument_name": "step",
+                "display_label": "Step",
+                "argument_type": "string",
+                "is_required": 0,
+                "description": "What to do next, as the go-live checklist says. Leave empty to start from where the company stopped."
             }
         ]
     }

@@ -485,7 +485,58 @@ def _text(variant: str, current: str, company: str, state: Dict[str, Any], can_e
     return None, None, []
 
 
-def _continue(current: str, company: str, state: Dict[str, Any]) -> Dict[str, Any]:
+GO_LIVE_PROMPT = "go-live"
+
+
+def step_instruction(step: Optional[str], company: str) -> str:
+    """What the AI is asked to do for a go-live step: the tool to start with, so it begins where the
+    checklist says and not wherever it guesses."""
+    instructions = {
+        "discovery": _(
+            "Start with discovery: call setup_plan with action discover for {0} and ask me its questions."
+        ),
+        "setup_plan": _(
+            "Continue with the setup plan of {0}: show me what it will set up, and run it with "
+            "run_setup_plan once I approve it."
+        ),
+        "chart_of_accounts": _(
+            "Continue with the chart of accounts of {0}: check the client's chart with dry_run_import, "
+            "then put it on with import_chart_of_accounts, or keep ERPNext's chart if I say so."
+        ),
+        "data_migration": _(
+            "Continue with the data migration of {0}: plan the client's files with plan_migration, and "
+            "run them with run_migration_plan once I approve it."
+        ),
+        "go_live_test_run": _(
+            "Continue with the go-live test run of {0}: run go_live_test_run and go through the Go-Live "
+            "Readiness report with me."
+        ),
+        "hypercare": _(
+            "Continue with hypercare for {0}: after go-live, switch it on with a FAC Hypercare record for "
+            "the consultant."
+        ),
+    }
+    return instructions.get(step or "discovery", instructions["discovery"]).format(company)
+
+
+def _prompt(company: str, step: Optional[str]) -> str:
+    """The go-live prompt template, filled in for the company and the step: the same text an AI client
+    gets from the go-live prompt. A missing or broken template falls back to the instruction alone."""
+    instruction = step_instruction(step, company)
+    try:
+        content = frappe.db.get_value(
+            "Prompt Template", {"prompt_id": GO_LIVE_PROMPT, "status": "Published"}, "template_content"
+        )
+        if content:
+            text = frappe.render_template(content, {"company": company, "step": instruction}).strip()
+            if text:
+                return text
+    except Exception:
+        frappe.log_error(title=ERROR_TITLE, message=frappe.get_traceback())
+    return _("Take {0} live.").format(company) + " " + instruction
+
+
+def _continue(company: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Where Start/Continue goes (5.2): FAC Chat when this user can chat, else their own AI client."""
     from frappe_assistant_core.chat.gate import is_chat_enabled
 
@@ -495,12 +546,7 @@ def _continue(current: str, company: str, state: Dict[str, Any]) -> Dict[str, An
 
         if (can_use_faco() or {}).get("can_use"):
             mode = "fac_chat"
-    # nothing discovered yet (a new site, or an established one started from the checklist)
-    if state["next_step"] in (None, "discovery"):
-        prompt = _("Take {0} live").format(company)
-    else:
-        prompt = _("Continue taking {0} live: {1}").format(company, STEP_LABELS[state["next_step"]].lower())
-    return {"mode": mode, "prompt": prompt}
+    return {"mode": mode, "prompt": _prompt(company, state["next_step"])}
 
 
 def _mcp_endpoint() -> str:
@@ -597,7 +643,7 @@ def _get_state(user: str, view: str, company: Optional[str], may_write: bool = T
         "primary": primary,
         "buttons": buttons,
         # the checklist of an established site can still start (R7)
-        "continue": _continue(current, company, state) if variant != "hypercare" else None,
+        "continue": _continue(company, state) if variant != "hypercare" else None,
         "can_enable_tools": can_enable,
         "can_enable_chat": can_enable,
         "mcp_endpoint": _mcp_endpoint(),

@@ -565,13 +565,61 @@ class TestEntryCheck(GoLiveCase):
         frappe.db.set_single_value("Assistant Core Settings", "enable_fac_chat", 0)
         state = self.state()
         self.assertEqual(state["continue"]["mode"], "external")
-        self.assertEqual(state["continue"]["prompt"], f"Take {self.company} live")
         self.assertTrue(state["mcp_endpoint"])
 
+    # Start and Continue hand the AI the go-live template, filled in for the company and the step to
+    # do next: the user types nothing, and the AI starts where the checklist says (#34419)
+
+    def install_templates(self):
+        from frappe_assistant_core.utils.migration_hooks import _install_system_prompt_templates
+
+        _install_system_prompt_templates()
+
+    def test_start_prompt_begins_with_discovery(self):
+        self.install_templates()
+        prompt = self.state()["continue"]["prompt"]
+        self.assertIn(f"Take {self.company} live", prompt)
+        self.assertIn("setup_plan with action discover", prompt)
+        self.assertNotIn("go_live_test_run", prompt)
+
     def test_continue_prompt_names_next_step(self):
+        self.install_templates()
         self.plan("Draft")
+        prompt = self.state()["continue"]["prompt"]
+        self.assertIn(self.company, prompt)
+        self.assertIn("run_setup_plan", prompt)
+        self.assertNotIn("action discover", prompt)
+
+    def test_every_step_has_an_instruction(self):
+        from frappe_assistant_core.onboarding import entry
+
+        for key in entry.STEP_KEYS:
+            with self.subTest(step=key):
+                self.assertTrue(entry.step_instruction(key, "Acme"))
+
+    def test_continue_prompt_comes_from_the_template(self):
+        # an administrator may reword the template: the button follows it
+        from frappe_assistant_core.onboarding import entry
+
+        self.install_templates()
+        name = frappe.db.get_value("Prompt Template", {"prompt_id": "go-live"})
+        frappe.db.set_value("Prompt Template", name, "template_content", "GO {{ company }} | {{ step }}")
+        prompt = self.state()["continue"]["prompt"]
+        self.assertEqual(prompt, f"GO {self.company} | " + entry.step_instruction("discovery", self.company))
+
+    def test_continue_prompt_without_the_template(self):
+        frappe.db.delete("Prompt Template", {"prompt_id": "go-live"})
+        prompt = self.state()["continue"]["prompt"]
+        self.assertIn(self.company, prompt)
+        self.assertIn("setup_plan with action discover", prompt)
+
+    def test_a_broken_template_falls_back(self):
+        self.install_templates()
+        name = frappe.db.get_value("Prompt Template", {"prompt_id": "go-live"})
+        frappe.db.set_value("Prompt Template", name, "template_content", "{% if %}")
         state = self.state()
-        self.assertEqual(state["continue"]["prompt"], f"Continue taking {self.company} live: setup plan")
+        self.assertTrue(state["show"])
+        self.assertIn("setup_plan with action discover", state["continue"]["prompt"])
 
     def test_result_has_no_record_contents(self):
         self.plan("Completed")
@@ -619,7 +667,7 @@ class TestEntryCheck(GoLiveCase):
         self.gl_entries(50)
         state = self.state(view="checklist")
         self.assertEqual(state["stage"], "established")
-        self.assertEqual(state["continue"]["prompt"], f"Take {self.company} live")
+        self.assertIn("setup_plan with action discover", state["continue"]["prompt"])
 
     def test_setup_plan_end_clears_the_cache(self):
         from frappe_assistant_core.utils import setup_plan

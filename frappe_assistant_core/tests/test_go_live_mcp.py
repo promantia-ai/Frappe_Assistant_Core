@@ -83,4 +83,6 @@ class TestGoLiveMcp(GoLiveCase):
         doc = frappe.get_doc("Prompt Template", name)
         self.assertEqual(doc.status, "Published")
         self.assertIn("setup_plan", doc.template_content)
-        self.assertEqual([a.argument_name for a in doc.arguments], ["company"])
+        self.assertEqual([a.argument_name for a in doc.arguments], ["company", "step"])
+        # without a step it tells the client how to find where the company stopped
+        self.assertIn("setup_plan with action discover", frappe.render_template(doc.template_content, {}))
