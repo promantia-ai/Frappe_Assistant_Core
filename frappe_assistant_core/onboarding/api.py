@@ -21,6 +21,12 @@ from frappe_assistant_core.onboarding import entry
 SNOOZE_DAYS = 7
 
 
+def _only_system_manager() -> None:
+    # not frappe.only_for: on v15 it lets everyone through while tests run, so the check went untested
+    if "System Manager" not in frappe.get_roles():
+        frappe.throw(_("Only a System Manager can do this."), frappe.PermissionError)
+
+
 def _company(company: Optional[str]) -> str:
     company = company or entry.pick_company(frappe.session.user)
     if not company or not frappe.db.exists("Company", company):
@@ -37,7 +43,7 @@ def get_entry_state(view: str = "banner", company: Optional[str] = None) -> Dict
 @frappe.whitelist(methods=["POST"])
 def snooze(company: Optional[str] = None) -> Dict[str, Any]:
     """Not now: the banner stays away from this user for a week."""
-    frappe.only_for("System Manager")
+    _only_system_manager()
     doc = get_or_create(_company(company))
     until = frappe.utils.add_days(frappe.utils.now_datetime(), SNOOZE_DAYS)
     row = next((r for r in doc.snoozes if r.user == frappe.session.user), None)
@@ -52,7 +58,7 @@ def snooze(company: Optional[str] = None) -> Dict[str, Any]:
 @frappe.whitelist(methods=["POST"])
 def mark_live(company: Optional[str] = None) -> Dict[str, Any]:
     """Already live: FAC stops offering to take the company live, for everyone."""
-    frappe.only_for("System Manager")
+    _only_system_manager()
     doc = get_or_create(_company(company))
     doc.update(
         {"marked_live": 1, "marked_live_by": frappe.session.user, "marked_live_on": frappe.utils.now_datetime()}
@@ -63,7 +69,7 @@ def mark_live(company: Optional[str] = None) -> Dict[str, Any]:
 
 @frappe.whitelist(methods=["POST"])
 def unmark_live(company: Optional[str] = None) -> Dict[str, Any]:
-    frappe.only_for("System Manager")
+    _only_system_manager()
     doc = get_or_create(_company(company))
     doc.update({"marked_live": 0, "marked_live_by": None, "marked_live_on": None})
     doc.save(ignore_permissions=True)
@@ -72,7 +78,7 @@ def unmark_live(company: Optional[str] = None) -> Dict[str, Any]:
 
 @frappe.whitelist(methods=["POST"])
 def skip_step(company: str, step: str, reason: Optional[str] = None) -> Dict[str, Any]:
-    frappe.only_for("System Manager")
+    _only_system_manager()
     if step not in entry.SKIPPABLE:
         frappe.throw(_("The step {0} can't be skipped.").format(step))
     doc = get_or_create(_company(company))
@@ -92,7 +98,7 @@ def skip_step(company: str, step: str, reason: Optional[str] = None) -> Dict[str
 
 @frappe.whitelist(methods=["POST"])
 def unskip_step(company: str, step: str) -> Dict[str, Any]:
-    frappe.only_for("System Manager")
+    _only_system_manager()
     doc = get_or_create(_company(company))
     doc.set("skipped_steps", [r for r in doc.skipped_steps if r.step != step])
     doc.save(ignore_permissions=True)
@@ -102,7 +108,7 @@ def unskip_step(company: str, step: str) -> Dict[str, Any]:
 @frappe.whitelist(methods=["POST"])
 def enable_tools() -> Dict[str, Any]:
     """Turn on onboarding tools: switch the Migration plugin on."""
-    frappe.only_for("System Manager")
+    _only_system_manager()
     if not frappe.has_permission("Assistant Core Settings", "write"):
         frappe.throw(_("Ask an administrator to turn on the onboarding tools."), frappe.PermissionError)
     entry.get_plugin_manager().enable_plugin(entry.MIGRATION_PLUGIN)
