@@ -33,6 +33,9 @@ STEP_LABELS = {
 PLAN_NEEDS_ATTENTION = ("Partially Completed", "Failed", "Stopped")
 # how many of the latest go_live_test_run calls are looked through for this company's
 TEST_RUNS_READ = 20
+# R6: a site this small and this young is offered onboarding although the wizard named no client
+NEW_SITE_MAX_GL_ENTRIES = 50
+NEW_SITE_MAX_AGE_DAYS = 60
 
 
 def _record(doctype: str, name: Optional[str]) -> Optional[Dict[str, str]]:
@@ -189,3 +192,72 @@ def next_step(step_list: List[Dict[str, Any]]) -> Optional[str]:
         if step["state"] not in ("done", "skipped"):
             return step["key"]
     return None
+
+
+def _looks_new(company: str) -> bool:
+    """R6: fewer than NEW_SITE_MAX_GL_ENTRIES posted GL entries, the oldest under NEW_SITE_MAX_AGE_DAYS.
+
+    The age is read from when the entry was made, not its posting date: an opening balance import
+    posts on the old system's dates.
+    """
+    filters = {"company": company, "docstatus": 1, "is_cancelled": 0}
+    if frappe.db.count("GL Entry", filters) >= NEW_SITE_MAX_GL_ENTRIES:
+        return False
+    oldest = frappe.get_all("GL Entry", filters=filters, fields=["creation"], order_by="creation asc", limit=1)
+    if not oldest:
+        return True
+    age = frappe.utils.time_diff_in_seconds(frappe.utils.now_datetime(), oldest[0].creation) / 86400
+    return age < NEW_SITE_MAX_AGE_DAYS
+
+
+def stage(company: str, step_list: Optional[List[Dict[str, Any]]] = None) -> str:
+    """Where the company's onboarding is (rules R1-R7, the first that matches wins).
+
+    live_hypercare, done, ready_to_go_live, in_progress, not_started, not_started_soft (no intent
+    from the wizard, but the site looks new) or established.
+    """
+    care = _hypercare()
+    if care and care.status == "Active":
+        return "live_hypercare"
+    if care and care.status == "Ended":
+        return "done"
+    step_list = step_list if step_list is not None else steps(company)
+    if any(s["key"] == "go_live_test_run" and s["state"] == "done" for s in step_list):
+        return "ready_to_go_live"
+    # before the new-site rule: a site with completed setup plans can still have few transactions
+    if frappe.db.exists("FAC Setup Plan", {"company": company}) or frappe.db.exists(
+        "FAC Import Session", {"plan_status": ("is", "set")}
+    ):
+        return "in_progress"
+    if frappe.db.get_value("FAC Go-Live", {"company": company}, "intent") == "Consultant for a client":
+        return "not_started"
+    if _looks_new(company):
+        return "not_started_soft"
+    return "established"
+
+
+def _companies() -> List[str]:
+    return frappe.get_all("Company", pluck="name", order_by="creation asc")
+
+
+def pick_company(user: str) -> Optional[str]:
+    """The company the check is about (one onboarding at a time): the only one; else the latest setup
+    plan's; else the one the setup wizard named; else the user's default company."""
+    companies = _companies()
+    if len(companies) == 1:
+        return companies[0]
+    if not companies:
+        return None
+    plan = frappe.get_all("FAC Setup Plan", fields=["company"], order_by="creation desc", limit=1)
+    if plan and plan[0].company:
+        return plan[0].company
+    from_wizard = frappe.get_all(
+        "FAC Go-Live",
+        filters={"intent_source": "Setup wizard"},
+        pluck="company",
+        order_by="creation desc",
+        limit=1,
+    )
+    if from_wizard:
+        return from_wizard[0]
+    return frappe.defaults.get_user_default("Company", user) or None

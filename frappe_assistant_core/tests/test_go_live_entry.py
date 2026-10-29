@@ -9,6 +9,8 @@
 """The go-live entry point (#34419): the FAC Go-Live record, the six steps, the stage and the check
 that decides whether a System Manager is offered to take the company live."""
 
+from unittest.mock import patch
+
 import frappe
 
 from frappe_assistant_core.tests.go_live_case import GoLiveCase
@@ -198,3 +200,143 @@ class TestSteps(GoLiveCase):
         steps = entry.steps(self.company)
         self.assertEqual({s["state"] for s in steps}, {"done"})
         self.assertIsNone(entry.next_step(steps))
+
+
+class TestStage(GoLiveCase):
+    def setUp(self):
+        super().setUp()
+        # the class shares one company and one transaction: each test starts with no postings
+        frappe.db.delete("GL Entry", {"company": self.company})
+
+    def _stage(self):
+        from frappe_assistant_core.onboarding import entry
+
+        return entry.stage(self.company)
+
+    def gl_entries(self, count, days_old=0):
+        # Posted entries, written straight to the table: the rules only count them and read their
+        # age, and posting real vouchers would take minutes for the larger counts.
+        created = frappe.utils.add_days(frappe.utils.now_datetime(), -days_old)
+        for _i in range(count):
+            doc = frappe.new_doc("GL Entry")
+            doc.update(
+                {
+                    "name": frappe.generate_hash(length=12),
+                    "company": self.company,
+                    "posting_date": frappe.utils.nowdate(),
+                    "account": f"Cash - {self.abbr}",
+                    "debit": 1,
+                    "docstatus": 1,
+                    "is_cancelled": 0,
+                    "creation": created,
+                    "modified": created,
+                }
+            )
+            doc.db_insert()
+
+    def migration_plan(self):
+        # run_migration_plan's plan is an import session with plan_status set
+        doc = frappe.new_doc("FAC Import Session")
+        doc.update(
+            {
+                "name": frappe.generate_hash(length=10),
+                "file_name": "plan",
+                "status": "File Read",
+                "user": "Administrator",
+                "plan_status": "Planning",
+            }
+        )
+        doc.db_insert()
+        return doc
+
+    def test_r1_active_hypercare(self):
+        self.plan("Completed")
+        self.audit({"ready": True, "used": {"company": self.company}})
+        self.hypercare("Active")
+        self.assertEqual(self._stage(), "live_hypercare")
+
+    def test_r2_ended_hypercare(self):
+        self.hypercare("Ended")
+        self.assertEqual(self._stage(), "done")
+
+    def test_r3_ready_test_run_no_hypercare(self):
+        self.plan("Completed")
+        self.audit({"ready": True, "used": {"company": self.company}})
+        self.assertEqual(self._stage(), "ready_to_go_live")
+
+    def test_r4_setup_plan_exists(self):
+        self.plan("Draft")
+        self.assertEqual(self._stage(), "in_progress")
+
+    def test_r4_migration_plan_exists(self):
+        self.migration_plan()
+        self.assertEqual(self._stage(), "in_progress")
+
+    def test_r4_before_r6_qa_site_case(self):
+        # the v16 QA site: 26 GL entries and two completed setup plans
+        self.gl_entries(26)
+        self.plan("Completed")
+        self.plan("Completed")
+        self.assertEqual(self._stage(), "in_progress")
+
+    def test_r5_consultant_intent(self):
+        self.go_live(intent="Consultant for a client", intent_source="Setup wizard")
+        self.gl_entries(60, days_old=200)
+        self.assertEqual(self._stage(), "not_started")
+
+    def test_r6_new_site_no_intent(self):
+        self.assertEqual(self._stage(), "not_started_soft")
+
+    def test_r6_own_business_new_site(self):
+        self.go_live(intent="Own business", intent_source="Setup wizard")
+        self.gl_entries(10, days_old=5)
+        self.assertEqual(self._stage(), "not_started_soft")
+
+    def test_r7_many_gl_entries(self):
+        self.gl_entries(50)
+        self.assertEqual(self._stage(), "established")
+
+    def test_r7_old_gl_entry(self):
+        self.gl_entries(4)
+        self.gl_entries(1, days_old=61)
+        self.assertEqual(self._stage(), "established")
+
+    def test_cancelled_gl_entries_not_counted(self):
+        self.gl_entries(10)
+        frappe.db.set_value("GL Entry", {"company": self.company}, "is_cancelled", 1)
+        self.gl_entries(1, days_old=61)
+        frappe.db.set_value(
+            "GL Entry", {"company": self.company, "is_cancelled": 0}, "is_cancelled", 1
+        )
+        self.assertEqual(self._stage(), "not_started_soft")
+
+    def test_pick_company_fallbacks(self):
+        from frappe_assistant_core.onboarding import entry
+
+        others = frappe.get_all("Company", filters={"name": ("!=", self.company)}, pluck="name", limit=1)
+        if not others:
+            self.skipTest("needs a second company")
+        other = others[0]
+        user = self.make_throwaway_user("pick", roles=("System Manager",))
+
+        self.plan("Draft")
+        self.assertEqual(entry.pick_company(user), self.company)
+
+        frappe.db.delete("FAC Setup Plan")
+        self.go_live(company=other, intent_source="Setup wizard")
+        self.assertEqual(entry.pick_company(user), other)
+
+        frappe.db.delete("FAC Go-Live")
+        # what ERPNext stores when a user picks a default company
+        frappe.defaults.set_user_default("company", self.company, user)
+        self.assertEqual(entry.pick_company(user), self.company)
+
+        frappe.defaults.clear_user_default("company", user)
+        with patch("frappe.defaults.get_user_default", autospec=True, return_value=None):
+            self.assertIsNone(entry.pick_company(user))
+
+    def test_pick_company_single_company(self):
+        from frappe_assistant_core.onboarding import entry
+
+        with patch.object(entry, "_companies", autospec=True, return_value=["Only Co"]):
+            self.assertEqual(entry.pick_company("Administrator"), "Only Co")
