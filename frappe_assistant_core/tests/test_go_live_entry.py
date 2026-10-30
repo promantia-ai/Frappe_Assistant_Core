@@ -569,19 +569,50 @@ class TestEntryCheck(GoLiveCase):
         self.addCleanup(clear_chat_gate_cache)
         state = self.state()
         self.assertEqual(state["continue"]["mode"], "external")
+        self.assertFalse(state["continue"]["chat_on"])
         self.assertTrue(state["mcp_endpoint"])
 
-    def test_continue_in_fac_chat_when_it_is_on_even_if_not_ready(self):
-        # not connected / waitlisted: FAC Chat shows its own setup screen, the dialog isn't needed
-        with patch(
-            "frappe_assistant_core.chat.gate.is_chat_enabled", autospec=True, return_value=True
-        ), patch(
-            "frappe_assistant_core.chat.api.settings.access.can_use_faco",
-            autospec=True,
-            return_value={"can_use": False, "reason": "FACO needs to be connected to FAC Cloud"},
-        ):
+    def chat_access(self, access):
+        """Patch FAC Chat on, with ``access`` as this user's can_use_faco answer."""
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        stack.enter_context(
+            patch("frappe_assistant_core.chat.gate.is_chat_enabled", autospec=True, return_value=True)
+        )
+        stack.enter_context(
+            patch(
+                "frappe_assistant_core.chat.api.settings.access.can_use_faco",
+                autospec=True,
+                return_value=access,
+            )
+        )
+        return stack
+
+    def test_continue_in_fac_chat_when_the_user_can_chat(self):
+        with self.chat_access({"can_use": True, "status": "ready"}):
             go = self.state()["continue"]
         self.assertEqual(go["mode"], "fac_chat")
+        self.assertIn("discover", go["prompt"])
+
+    def test_continue_in_fac_chat_while_it_is_being_connected(self):
+        # not connected / waitlisted, or the owner's own setup: FAC Chat shows its own screen for it
+        cases = (
+            {"can_use": False, "status": "not_registered", "reason": "FACO needs to be connected to FAC Cloud"},
+            {"can_use": False, "status": "ready", "needs_user_setup": True},
+        )
+        for access in cases:
+            with self.subTest(access=access), self.chat_access(access):
+                self.assertEqual(self.state()["continue"]["mode"], "fac_chat")
+
+    def test_continue_says_so_when_the_user_has_no_fac_chat_seat(self):
+        # FAC Chat on, but this System Manager isn't added to it: opening it is a dead end (G1)
+        reason = "Your administrator needs to add you to FACO."
+        with self.chat_access({"can_use": False, "status": "no_role", "reason": reason}):
+            go = self.state()["continue"]
+        self.assertEqual(go["mode"], "external")
+        self.assertTrue(go["chat_on"])
+        self.assertEqual(go["chat_reason"], reason)
         self.assertIn("discover", go["prompt"])
 
     # Start and Continue hand the AI the go-live template, filled in for the company and the step to

@@ -150,8 +150,33 @@ frappe.provide("frappe_assistant_core.go_live");
 			window.open("/copilot/chat?prompt=" + encodeURIComponent(go.prompt), "_blank", "noopener");
 			return;
 		}
-		// FAC Chat is off: ask to turn it on, with the user's own AI client as the other way
 		const company = frappe.utils.escape_html(state.company || "");
+		const copy = () => frappe.utils.copy_to_clipboard(go.prompt);
+		const prompt_fields = [
+			{ fieldname: "prompt", fieldtype: "Small Text", label: __("Prompt"), read_only: 1, default: go.prompt },
+			{ fieldname: "endpoint", fieldtype: "Data", label: __("MCP endpoint"), read_only: 1, default: state.mcp_endpoint },
+		];
+		if (go.chat_on) {
+			// FAC Chat is on but has no seat for this user: opening it would only say "access required"
+			const no_seat = new frappe.ui.Dialog({
+				title: __("You're not in FAC Chat yet"),
+				fields: [
+					{
+						fieldtype: "HTML",
+						options: `<p>${__(
+							"FAC Chat is on, but you haven't been added to it. Ask whoever manages FAC Chat to add you in FAC Chat → Settings → Users, then take {0} live from there.",
+							[company]
+						)}</p><p class="text-muted small">${frappe.utils.escape_html(go.chat_reason || "")}</p>`,
+					},
+					...prompt_fields,
+				],
+				primary_action_label: __("Copy prompt"),
+				primary_action: copy,
+			});
+			no_seat.show();
+			return;
+		}
+		// FAC Chat is off: ask to turn it on, with the user's own AI client as the other way
 		const fields = [
 			{
 				fieldtype: "HTML",
@@ -161,10 +186,8 @@ frappe.provide("frappe_assistant_core.go_live");
 						: __("FAC Chat is off. Ask an administrator to turn it on to take {0} live right here.", [company])
 				}</p>`,
 			},
-			{ fieldname: "prompt", fieldtype: "Small Text", label: __("Prompt"), read_only: 1, default: go.prompt },
-			{ fieldname: "endpoint", fieldtype: "Data", label: __("MCP endpoint"), read_only: 1, default: state.mcp_endpoint },
+			...prompt_fields,
 		];
-		const copy = () => frappe.utils.copy_to_clipboard(go.prompt);
 		const dialog = new frappe.ui.Dialog({
 			title: __("Turn on FAC Chat"),
 			fields: fields,

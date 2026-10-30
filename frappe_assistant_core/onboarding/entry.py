@@ -580,17 +580,26 @@ def _with_prompts(step_list: List[Dict[str, Any]], company: str) -> List[Dict[st
 
 
 def _continue(company: str, state: Dict[str, Any]) -> Dict[str, Any]:
-    """Where Start/Continue goes (5.2): FAC Chat whenever it is on, else the user's own AI client.
+    """Where Start/Continue goes (5.2): FAC Chat when it can take this user, else their own AI client.
 
-    FAC Chat that is on but not ready (not connected to FAC Cloud, waitlisted, user not set up)
-    shows its own screen for that, so the dialog is only for a site with FAC Chat off.
+    FAC Chat that is still being connected (not registered, waitlisted, the owner's own setup) shows
+    its own screen for that, so Start opens it. A user FAC Chat has no seat for would only reach
+    "access required" and lose the prompt: they get the dialog, with chat_reason saying why.
     """
     from frappe_assistant_core.chat.gate import is_chat_enabled
 
-    return {
-        "mode": "fac_chat" if is_chat_enabled() else "external",
-        "prompt": _prompt(company, state["next_step"]),
-    }
+    go = {"mode": "external", "prompt": _prompt(company, state["next_step"]), "chat_on": False}
+    if not is_chat_enabled():
+        return go
+    from frappe_assistant_core.chat.api.settings.access import can_use_faco
+
+    access = can_use_faco() or {}
+    go["chat_on"] = True
+    if access.get("can_use") or access.get("needs_user_setup") or access.get("status") == "not_registered":
+        go["mode"] = "fac_chat"
+    else:
+        go["chat_reason"] = access.get("reason") or _("FAC Chat isn't available to you yet.")
+    return go
 
 
 def _mcp_endpoint() -> str:
