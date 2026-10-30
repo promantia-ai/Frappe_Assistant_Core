@@ -166,7 +166,7 @@ frappe.provide("frappe_assistant_core.go_live");
 						options: `<p>${__(
 							"FAC Chat is on, but you haven't been added to it. Ask whoever manages FAC Chat to add you in FAC Chat → Settings → Users, then take {0} live from there.",
 							[company]
-						)}</p><p class="text-muted small">${frappe.utils.escape_html(go.chat_reason || "")}</p>`,
+						)}</p>`,
 					},
 					...prompt_fields,
 				],
