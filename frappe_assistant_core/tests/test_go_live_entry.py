@@ -656,6 +656,33 @@ class TestEntryCheck(GoLiveCase):
         self.assertIn(self.company, steps["chart_of_accounts"]["prompt"])
         self.assertIn("setup_plan with action discover", steps["discovery"]["prompt"])
 
+    def test_checklist_steps_say_what_they_need(self):
+        for step in self.state(view="checklist")["steps"]:
+            with self.subTest(step=step["key"]):
+                self.assertTrue(step["needs"])
+
+    # Starting a step before the one it builds on warns, never blocks
+
+    def test_starting_before_the_step_it_builds_on_warns(self):
+        steps = {s["key"]: s for s in self.state(view="checklist")["steps"]}
+        self.assertIn("Chart of accounts", steps["data_migration"]["warning"])
+        self.assertIn("Data migration", steps["go_live_test_run"]["warning"])
+        self.assertIn("Go-live test run", steps["hypercare"]["warning"])
+        self.assertIn("Discovery", steps["setup_plan"]["warning"])
+        # nothing comes before these
+        self.assertIsNone(steps["discovery"]["warning"])
+        self.assertIsNone(steps["chart_of_accounts"]["warning"])
+
+    def test_no_warning_once_the_step_before_is_done_or_skipped(self):
+        self.plan("Draft")
+        doc = frappe.get_doc("FAC Go-Live", {"company": self.company})
+        doc.append("skipped_steps", {"step": "chart_of_accounts"})
+        doc.save(ignore_permissions=True)
+        steps = {s["key"]: s for s in self.state(view="checklist")["steps"]}
+        self.assertIsNone(steps["setup_plan"]["warning"])  # discovery done
+        self.assertIsNone(steps["data_migration"]["warning"])  # chart skipped
+        self.assertTrue(steps["go_live_test_run"]["warning"])
+
     def test_done_and_skipped_steps_have_no_prompt(self):
         self.plan("Draft")
         doc = frappe.get_doc("FAC Go-Live", {"company": self.company})

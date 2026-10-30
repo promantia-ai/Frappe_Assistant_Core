@@ -41,6 +41,22 @@ STEP_DESCRIPTIONS = {
     "go_live_test_run": _("A buying and selling test and the readiness checks, before the client goes live."),
     "hypercare": _("A weekly summary of what goes wrong in the first weeks after go-live."),
 }
+# what to have ready before starting the step
+STEP_NEEDS = {
+    "discovery": _("About 15 minutes with someone who knows the business."),
+    "setup_plan": _("The answers from discovery."),
+    "chart_of_accounts": _("The chart exported from the old system (Excel or CSV), or keep ERPNext's."),
+    "data_migration": _("Exports of customers, suppliers, items and opening balances from the old system."),
+    "go_live_test_run": _("Masters and opening balances already in."),
+    "hypercare": _("The go-live date."),
+}
+# the step each one builds on, and why: starting before it is done warns, it never blocks
+STEP_BUILDS_ON = {
+    "setup_plan": ("discovery", _("the setup plan is built from its answers")),
+    "data_migration": ("chart_of_accounts", _("opening balances are posted to its accounts")),
+    "go_live_test_run": ("data_migration", _("the test run checks the migrated data")),
+    "hypercare": ("go_live_test_run", _("hypercare starts after go-live")),
+}
 PLAN_NEEDS_ATTENTION =("Partially Completed", "Failed", "Stopped")
 # how many of the latest go_live_test_run calls are looked through for this company's
 TEST_RUNS_READ = 20
@@ -154,6 +170,7 @@ def steps(company: str) -> List[Dict[str, Any]]:
                 "key": key,
                 "label": STEP_LABELS[key],
                 "description": STEP_DESCRIPTIONS[key],
+                "needs": STEP_NEEDS[key],
                 "state": state,
                 "record": record,
                 "skipped": skipped.get(key) if state == "skipped" else None,
@@ -547,12 +564,19 @@ def _prompt(company: str, step: Optional[str]) -> str:
 
 
 def _with_prompts(step_list: List[Dict[str, Any]], company: str) -> List[Dict[str, Any]]:
-    """The checklist's steps, each one not yet done with the prompt that starts it: steps don't have
-    to be done in order. Copies, as the list is the cached site state."""
-    return [
-        {**step, "prompt": None if step["state"] in ("done", "skipped") else _prompt(company, step["key"])}
-        for step in step_list
-    ]
+    """The checklist's steps, each one not yet done with the prompt that starts it and, when the
+    step it builds on isn't done or skipped, a warning to confirm: steps don't have to be done in
+    order. Copies, as the list is the cached site state."""
+    closed = {s["key"] for s in step_list if s["state"] in ("done", "skipped")}
+    out = []
+    for step in step_list:
+        open_ = step["key"] not in closed
+        before, why = STEP_BUILDS_ON.get(step["key"], (None, None))
+        warning = None
+        if open_ and before and before not in closed:
+            warning = _("{0} isn't done yet: {1}. Start anyway?").format(STEP_LABELS[before], why)
+        out.append({**step, "prompt": _prompt(company, step["key"]) if open_ else None, "warning": warning})
+    return out
 
 
 def _continue(company: str, state: Dict[str, Any]) -> Dict[str, Any]:

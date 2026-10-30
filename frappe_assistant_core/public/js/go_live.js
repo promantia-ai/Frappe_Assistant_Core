@@ -44,6 +44,7 @@ frappe.provide("frappe_assistant_core.go_live");
 			.fac-go-live-step { padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; min-height: 66px;
 				display: flex; flex-direction: column; }
 			.fac-go-live-step .step-desc { font-size: var(--text-sm, 12px); color: var(--text-color); margin-top: 4px; }
+			.fac-go-live-step .step-needs { font-size: var(--text-sm, 12px); color: var(--text-muted); margin-top: 4px; }
 			.fac-go-live-step.state-next { border-color: var(--green-500, #2bb673); background: var(--green-50, #ecfdf3); }
 			.fac-go-live-step.state-needs_attention { border-color: var(--orange-400, #f8a83a); }
 			.fac-go-live-step .step-label { font-weight: 600; }
@@ -237,23 +238,28 @@ frappe.provide("frappe_assistant_core.go_live");
 				<div class="fac-go-live-step state-${step.state}">
 					<div class="step-label"></div>
 					<div class="step-desc"></div>
+					<div class="step-needs"></div>
 					<div class="step-meta"></div>
 					<div class="step-actions"></div>
 				</div>
 			`);
 			$step.find(".step-label").text(`${icon} ${step.label}`);
 			$step.find(".step-desc").text(step.description || "");
+			// what to have ready, only while the step is still to do
+			if (step.needs && step.state !== "done" && step.state !== "skipped") {
+				$step.find(".step-needs").text(__("You'll need: {0}", [step.needs]));
+			}
 			$step.find(".step-meta").text(STATE_LABELS[step.state] || step.state);
 			const $actions = $step.find(".step-actions");
 			// Any step not done can be started on its own: they don't have to be done in order.
 			// Not while the onboarding tools are off: the AI would have nothing to do it with.
 			if (step.prompt && state.continue && state.variant !== "enable_tools") {
+				const start = () =>
+					ns.open_continue({ ...state, continue: { ...state.continue, prompt: step.prompt } });
+				// the step it builds on isn't done: warn, never block
 				$(`<button type="button" class="btn btn-default btn-xs">${__("Start")}</button>`)
 					.on("click", () =>
-						ns.open_continue({
-							...state,
-							continue: { ...state.continue, prompt: step.prompt },
-						})
+						step.warning ? frappe.confirm(frappe.utils.escape_html(step.warning), start) : start()
 					)
 					.appendTo($actions);
 			}
