@@ -35,7 +35,6 @@ frappe.provide("frappe_assistant_core.go_live");
 			.fac-go-live-banner .fac-go-live-icon { display: inline-flex; align-items: center; justify-content: center;
 				width: 26px; height: 26px; border-radius: 6px; background: var(--green-600, #16794c); color: #fff; }
 			.fac-go-live-banner .fac-go-live-text { flex: 1; min-width: 200px; }
-			.fac-go-live-banner .fac-go-live-note { color: var(--text-muted); }
 			.fac-go-live-checklist { margin: 0 0 16px; padding: 16px; border: 1px solid var(--border-color);
 				border-radius: var(--border-radius-md, 8px); background: var(--card-bg, var(--fg-color)); }
 			.fac-go-live-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -94,10 +93,7 @@ frappe.provide("frappe_assistant_core.go_live");
 		const $banner = $(`
 			<div class="fac-go-live-banner" role="region" aria-label="${__("Go-live")}">
 				<span class="fac-go-live-icon" aria-hidden="true">&rarr;</span>
-				<div class="fac-go-live-text">
-					<strong></strong>
-					<span class="fac-go-live-note">${__("Only System Managers see this.")}</span>
-				</div>
+				<div class="fac-go-live-text"><strong></strong></div>
 			</div>
 		`);
 		$banner.find("strong").text(state.text);
@@ -163,9 +159,7 @@ frappe.provide("frappe_assistant_core.go_live");
 					state.can_enable_chat
 						? __("FAC Chat is off. Turn it on to take {0} live right here, step by step.", [company])
 						: __("FAC Chat is off. Ask an administrator to turn it on to take {0} live right here.", [company])
-				}</p><p class="text-muted small">${__(
-					"Or paste this prompt into Claude, ChatGPT or another AI assistant connected to this site:"
-				)}</p>`,
+				}</p>`,
 			},
 			{ fieldname: "prompt", fieldtype: "Small Text", label: __("Prompt"), read_only: 1, default: go.prompt },
 			{ fieldname: "endpoint", fieldtype: "Data", label: __("MCP endpoint"), read_only: 1, default: state.mcp_endpoint },
@@ -187,18 +181,18 @@ frappe.provide("frappe_assistant_core.go_live");
 		dialog.show();
 	};
 
-	// Assistant Core Settings at its FAC Chat tab, the Enable FAC Chat box in view. A URL hash
-	// doesn't pick the tab on v15, so wait for the form and scroll to the field (that opens its tab)
+	// FAC Admin with its FAC Chat card (the Enable Chat button) in view and briefly outlined
 	ns.open_chat_switch = function () {
-		const doctype = "Assistant Core Settings";
-		frappe.set_route("Form", doctype, doctype);
+		frappe.set_route("fac-admin");
 		let tries = 0;
 		const timer = setInterval(() => {
-			const frm = window.cur_frm;
-			if (frm && frm.doctype === doctype && frm.fields_dict.enable_fac_chat) {
+			const card = document.getElementById("fac-chat-card");
+			if (card && card.offsetParent) {
 				clearInterval(timer);
-				frm.scroll_to_field("enable_fac_chat");
-			} else if (++tries > 30) {
+				card.scrollIntoView({ behavior: "smooth", block: "center" });
+				card.style.boxShadow = "0 0 0 2px var(--green-500, #2bb673)";
+				setTimeout(() => (card.style.boxShadow = ""), 2500);
+			} else if (++tries > 50) {
 				clearInterval(timer);
 			}
 		}, 100);
