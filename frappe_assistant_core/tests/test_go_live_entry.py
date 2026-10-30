@@ -562,7 +562,11 @@ class TestEntryCheck(GoLiveCase):
         self.assertEqual(state["buttons"], ["not_now"])
 
     def test_continue_external_when_chat_off(self):
+        from frappe_assistant_core.chat.gate import clear_chat_gate_cache
+
         frappe.db.set_single_value("Assistant Core Settings", "enable_fac_chat", 0)
+        clear_chat_gate_cache()
+        self.addCleanup(clear_chat_gate_cache)
         state = self.state()
         self.assertEqual(state["continue"]["mode"], "external")
         self.assertFalse(state["continue"]["chat_on"])
