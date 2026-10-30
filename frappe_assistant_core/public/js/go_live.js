@@ -170,7 +170,15 @@ frappe.provide("frappe_assistant_core.go_live");
 				)}</p>`,
 			},
 		];
-		if (state.can_enable_chat) {
+		if (go.chat_on) {
+			// FAC Chat is on but can't chat yet (not connected, waitlisted, no access): say why
+			fields.unshift({
+				fieldtype: "HTML",
+				options: `<p class="small">${__("FAC Chat can't take this yet: {0}", [
+					frappe.utils.escape_html(go.chat_reason || ""),
+				])} <a href="/copilot" target="_blank" rel="noopener">${__("Open FAC Chat")}</a></p>`,
+			});
+		} else if (state.can_enable_chat) {
 			fields.push({
 				fieldtype: "HTML",
 				options: `<p class="small"><a href="/app/fac-admin">${__("Enable FAC Chat")}</a> ${__(

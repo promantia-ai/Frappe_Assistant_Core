@@ -556,16 +556,28 @@ def _with_prompts(step_list: List[Dict[str, Any]], company: str) -> List[Dict[st
 
 
 def _continue(company: str, state: Dict[str, Any]) -> Dict[str, Any]:
-    """Where Start/Continue goes (5.2): FAC Chat when this user can chat, else their own AI client."""
+    """Where Start/Continue goes (5.2): FAC Chat when this user can chat, else their own AI client.
+
+    chat_on and chat_reason let the dialog say why FAC Chat can't take it (not connected to FAC
+    Cloud, waitlisted, no access) instead of offering to enable a FAC Chat that is already on.
+    """
     from frappe_assistant_core.chat.gate import is_chat_enabled
 
-    mode = "external"
-    if is_chat_enabled():
+    mode, chat_on, reason = "external", bool(is_chat_enabled()), None
+    if chat_on:
         from frappe_assistant_core.chat.api.settings.access import can_use_faco
 
-        if (can_use_faco() or {}).get("can_use"):
+        access = can_use_faco() or {}
+        if access.get("can_use"):
             mode = "fac_chat"
-    return {"mode": mode, "prompt": _prompt(company, state["next_step"])}
+        else:
+            reason = access.get("reason") or _("FAC Chat isn't ready for you yet.")
+    return {
+        "mode": mode,
+        "prompt": _prompt(company, state["next_step"]),
+        "chat_on": chat_on,
+        "chat_reason": reason,
+    }
 
 
 def _mcp_endpoint() -> str:
