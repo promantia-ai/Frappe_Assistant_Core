@@ -154,35 +154,54 @@ frappe.provide("frappe_assistant_core.go_live");
 			window.open("/copilot/chat?prompt=" + encodeURIComponent(go.prompt), "_blank", "noopener");
 			return;
 		}
-		// FAC Chat is off: hand the prompt to the user's own AI client
+		// FAC Chat is off: ask to turn it on, with the user's own AI client as the other way
+		const company = frappe.utils.escape_html(state.company || "");
 		const fields = [
-			{ fieldname: "prompt", fieldtype: "Small Text", label: __("Prompt"), read_only: 1, default: go.prompt },
-			{ fieldname: "endpoint", fieldtype: "Data", label: __("MCP endpoint"), read_only: 1, default: state.mcp_endpoint },
 			{
 				fieldtype: "HTML",
-				options: `<p class="text-muted small">${__(
-					"Clients that list prompts also offer the {0} prompt.",
-					["<code>go-live</code>"]
+				options: `<p>${
+					state.can_enable_chat
+						? __("FAC Chat is off. Turn it on to take {0} live right here, step by step.", [company])
+						: __("FAC Chat is off. Ask an administrator to turn it on to take {0} live right here.", [company])
+				}</p><p class="text-muted small">${__(
+					"Or paste this prompt into Claude, ChatGPT or another AI assistant connected to this site:"
 				)}</p>`,
 			},
+			{ fieldname: "prompt", fieldtype: "Small Text", label: __("Prompt"), read_only: 1, default: go.prompt },
+			{ fieldname: "endpoint", fieldtype: "Data", label: __("MCP endpoint"), read_only: 1, default: state.mcp_endpoint },
 		];
-		if (state.can_enable_chat) {
-			fields.push({
-				fieldtype: "HTML",
-				options: `<p class="small"><a href="/app/fac-admin">${__("Enable FAC Chat")}</a> ${__(
-					"to continue here instead."
-				)}</p>`,
-			});
-		}
+		const copy = () => frappe.utils.copy_to_clipboard(go.prompt);
 		const dialog = new frappe.ui.Dialog({
-			title: __("Continue in your AI assistant"),
+			title: __("Turn on FAC Chat"),
 			fields: fields,
-			primary_action_label: __("Copy prompt"),
+			// the switch is on the FAC Chat tab of Assistant Core Settings
+			primary_action_label: state.can_enable_chat ? __("Enable FAC Chat") : __("Copy prompt"),
 			primary_action() {
-				frappe.utils.copy_to_clipboard(go.prompt);
+				if (!state.can_enable_chat) return copy();
+				dialog.hide();
+				ns.open_chat_switch();
 			},
+			secondary_action_label: state.can_enable_chat ? __("Copy prompt") : null,
+			secondary_action: state.can_enable_chat ? copy : null,
 		});
 		dialog.show();
+	};
+
+	// Assistant Core Settings at its FAC Chat tab, the Enable FAC Chat box in view. A URL hash
+	// doesn't pick the tab on v15, so wait for the form and scroll to the field (that opens its tab)
+	ns.open_chat_switch = function () {
+		const doctype = "Assistant Core Settings";
+		frappe.set_route("Form", doctype, doctype);
+		let tries = 0;
+		const timer = setInterval(() => {
+			const frm = window.cur_frm;
+			if (frm && frm.doctype === doctype && frm.fields_dict.enable_fac_chat) {
+				clearInterval(timer);
+				frm.scroll_to_field("enable_fac_chat");
+			} else if (++tries > 30) {
+				clearInterval(timer);
+			}
+		}, 100);
 	};
 
 	// --- checklist ----------------------------------------------------------------
@@ -226,7 +245,7 @@ frappe.provide("frappe_assistant_core.go_live");
 				.appendTo($head);
 		} else if (state.continue && state.next_step) {
 			$(`<button class="btn btn-primary btn-xs"></button>`)
-				.text(state.continue.mode === "fac_chat" ? __("Continue in FAC Chat") : __("Continue in your AI assistant"))
+				.text(state.continue.mode === "fac_chat" ? __("Continue in FAC Chat") : __("Continue"))
 				.on("click", () => ns.open_continue(state))
 				.appendTo($head);
 		}
