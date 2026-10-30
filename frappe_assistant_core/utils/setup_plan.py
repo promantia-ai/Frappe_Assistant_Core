@@ -445,10 +445,12 @@ def _staff_item(group: Any, welcome: bool) -> Dict[str, Any]:
     limits = ", ".join(f"{p.get('allow')} {p.get('for_value')}" for p in group.get("user_permissions") or [])
     # every person is on the approval card: each becomes a desk user, and the list came from a file
     who = ", ".join(f"{cstr(p.get('full_name'))} ({cstr(p.get('email'))})" for p in people)
-    decision = _("{0}: {1}; {2} people{3}: {4}").format(
+    # "1 person", not "1 people": the model echoes this line back on approval and fixes bad grammar,
+    # and a changed line no longer matches the card
+    decision = _("{0}: {1}; {2}{3}: {4}").format(
         cstr(group.get("name")),
         ", ".join(group.get("roles") or []),
-        len(people),
+        _("1 person") if len(people) == 1 else _("{0} people").format(len(people)),
         _(", limited to {0}").format(limits) if limits else "",
         who,
     )
@@ -965,9 +967,10 @@ def _apply_item(item) -> Tuple[str, str]:
         done = staff_setup.set_up([values["group"]], bool(values.get("send_welcome_email")))
         if not done["created"]:
             return "Skipped", _("Everyone is a user already.")
-        return "Done", _(
-            "Created {0} users with role profile {1}; {2} already users. FAC access not given."
-        ).format(len(done["created"]), item.target_name, len(done["skipped"]))
+        created = len(done["created"])
+        return "Done", _("Created {0} with role profile {1}; {2} already users. FAC access not given.").format(
+            _("1 user") if created == 1 else _("{0} users").format(created), item.target_name, len(done["skipped"])
+        )
     if item.is_customisation or doctype in CUSTOMISATION_DOCTYPES:
         problem = _matches(item)
         if problem:

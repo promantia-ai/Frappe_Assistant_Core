@@ -70,6 +70,10 @@ class TestStaffSetup(BaseAssistantTest):
         self.assertTrue(ran["success"], ran)
         self.assertEqual([i.state for i in ran["plan"].items], ["Done", "Done"], ran["plan"].as_dict())
         self.assertIn("2 people, limited to Company", ran["plan"].items[0].decision)
+        # one person reads as one person: the model echoes the approval back and "corrects" bad
+        # grammar, which then no longer matches the card and the run is refused (G2)
+        self.assertIn("; 1 person: Arun Kumar", ran["plan"].items[1].decision)
+        self.assertIn("Created 1 user with role profile Storekeeper", ran["plan"].items[1].message)
 
         self.assertEqual(
             set(
