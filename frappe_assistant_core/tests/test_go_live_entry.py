@@ -569,38 +569,20 @@ class TestEntryCheck(GoLiveCase):
         self.addCleanup(clear_chat_gate_cache)
         state = self.state()
         self.assertEqual(state["continue"]["mode"], "external")
-        self.assertFalse(state["continue"]["chat_on"])
         self.assertTrue(state["mcp_endpoint"])
 
-    def test_continue_in_fac_chat_when_it_can_chat(self):
-        with self.chat(can_use=True):
+    def test_continue_in_fac_chat_when_it_is_on_even_if_not_ready(self):
+        # not connected / waitlisted: FAC Chat shows its own setup screen, the dialog isn't needed
+        with patch(
+            "frappe_assistant_core.chat.gate.is_chat_enabled", autospec=True, return_value=True
+        ), patch(
+            "frappe_assistant_core.chat.api.settings.access.can_use_faco",
+            autospec=True,
+            return_value={"can_use": False, "reason": "FACO needs to be connected to FAC Cloud"},
+        ):
             go = self.state()["continue"]
         self.assertEqual(go["mode"], "fac_chat")
-        self.assertIsNone(go["chat_reason"])
-
-    def test_continue_says_why_fac_chat_cannot_chat(self):
-        # FAC Chat is on but not connected yet (e.g. waitlisted): the dialog says so, not "Enable FAC Chat"
-        with self.chat(can_use=False, reason="FACO needs to be connected to FAC Cloud"):
-            go = self.state()["continue"]
-        self.assertEqual(go["mode"], "external")
-        self.assertTrue(go["chat_on"])
-        self.assertEqual(go["chat_reason"], "FACO needs to be connected to FAC Cloud")
-
-    def chat(self, can_use, reason=None):
-        from contextlib import ExitStack
-
-        stack = ExitStack()
-        stack.enter_context(
-            patch("frappe_assistant_core.chat.gate.is_chat_enabled", autospec=True, return_value=True)
-        )
-        stack.enter_context(
-            patch(
-                "frappe_assistant_core.chat.api.settings.access.can_use_faco",
-                autospec=True,
-                return_value={"can_use": can_use, "reason": reason},
-            )
-        )
-        return stack
+        self.assertIn("discover", go["prompt"])
 
     # Start and Continue hand the AI the go-live template, filled in for the company and the step to
     # do next: the user types nothing, and the AI starts where the checklist says (#34419)

@@ -153,13 +153,8 @@ frappe.provide("frappe_assistant_core.go_live");
 			window.open("/copilot/chat?prompt=" + encodeURIComponent(go.prompt), "_blank", "noopener");
 			return;
 		}
+		// FAC Chat is off: hand the prompt to the user's own AI client
 		const fields = [
-			{
-				fieldtype: "HTML",
-				options: `<p>${__(
-					"Paste this into Claude, ChatGPT or another AI assistant connected to this site:"
-				)}</p>`,
-			},
 			{ fieldname: "prompt", fieldtype: "Small Text", label: __("Prompt"), read_only: 1, default: go.prompt },
 			{ fieldname: "endpoint", fieldtype: "Data", label: __("MCP endpoint"), read_only: 1, default: state.mcp_endpoint },
 			{
@@ -170,15 +165,7 @@ frappe.provide("frappe_assistant_core.go_live");
 				)}</p>`,
 			},
 		];
-		if (go.chat_on) {
-			// FAC Chat is on but can't chat yet (not connected, waitlisted, no access): say why
-			fields.unshift({
-				fieldtype: "HTML",
-				options: `<p class="small">${__("FAC Chat can't take this yet: {0}", [
-					frappe.utils.escape_html(go.chat_reason || ""),
-				])} <a href="/copilot" target="_blank" rel="noopener">${__("Open FAC Chat")}</a></p>`,
-			});
-		} else if (state.can_enable_chat) {
+		if (state.can_enable_chat) {
 			fields.push({
 				fieldtype: "HTML",
 				options: `<p class="small"><a href="/app/fac-admin">${__("Enable FAC Chat")}</a> ${__(
