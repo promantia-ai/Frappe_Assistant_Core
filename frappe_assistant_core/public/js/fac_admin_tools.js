@@ -160,6 +160,8 @@
                     if (!result.message) return;
                     const data = result.message;
                     ns._renderChatStatus(data.enabled);
+                    // the go-live checklist's Start opens FAC Chat only while it is on
+                    if (window.frappe_assistant_core && frappe_assistant_core.go_live) frappe_assistant_core.go_live.refresh();
 
                     if (data.enabled) {
                         // Hot-mount the widget on this page. The boot hook always sets
@@ -869,6 +871,8 @@
                     });
                     // Update stats only (not full reload to prevent visual glitch)
                     ns.loadStats();
+                    // the Migration plugin holds the onboarding tools the go-live checklist starts
+                    if (window.frappe_assistant_core && frappe_assistant_core.go_live) frappe_assistant_core.go_live.refresh();
                 } else {
                     // Reset checkbox to original state on error
                     checkbox.prop('checked', originalState);

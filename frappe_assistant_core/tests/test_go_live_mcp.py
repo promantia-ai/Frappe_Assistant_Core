@@ -82,7 +82,9 @@ class TestGoLiveMcp(GoLiveCase):
         self.assertTrue(name)
         doc = frappe.get_doc("Prompt Template", name)
         self.assertEqual(doc.status, "Published")
-        self.assertIn("setup_plan", doc.template_content)
         self.assertEqual([a.argument_name for a in doc.arguments], ["company", "step"])
-        # without a step it tells the client how to find where the company stopped
-        self.assertIn("setup_plan with action discover", frappe.render_template(doc.template_content, {}))
+        # without a step it says where to start, in the user's words: the user sends it as their own
+        # message, so it names no tool (the go-live skill does)
+        text = frappe.render_template(doc.template_content, {})
+        self.assertIn("first go-live step that isn't done yet: discovery", text)
+        self.assertNotIn("setup_plan", text)

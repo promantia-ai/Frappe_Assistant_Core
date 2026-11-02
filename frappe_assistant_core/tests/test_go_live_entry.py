@@ -55,7 +55,14 @@ class TestSteps(GoLiveCase):
 
         self.assertEqual(
             [s["key"] for s in entry.steps(self.company)],
-            ["discovery", "setup_plan", "chart_of_accounts", "data_migration", "go_live_test_run", "hypercare"],
+            [
+                "discovery",
+                "setup_plan",
+                "chart_of_accounts",
+                "data_migration",
+                "go_live_test_run",
+                "hypercare",
+            ],
         )
 
     def test_discovery_done_with_any_plan(self):
@@ -109,7 +116,9 @@ class TestSteps(GoLiveCase):
 
     def test_chart_done_from_go_live_field(self):
         session = frappe.get_all("FAC Import Session", pluck="name", limit=1)
-        self.go_live(chart_imported_on=frappe.utils.now_datetime(), chart_import_session=(session or [None])[0])
+        self.go_live(
+            chart_imported_on=frappe.utils.now_datetime(), chart_import_session=(session or [None])[0]
+        )
         step = self._steps()["chart_of_accounts"]
         self.assertEqual(step["state"], "done")
         if session:
@@ -124,6 +133,46 @@ class TestSteps(GoLiveCase):
         step = self._steps()["go_live_test_run"]
         self.assertEqual(step["state"], "done")
         self.assertEqual(step["record"], {"doctype": "Assistant Audit Log", "name": entry.name})
+
+    # Step 5 is the test run and the readiness checks: a passed run with a failing check said "passed
+    # its go-live test run" while the readiness report said not ready (found in the browser test)
+
+    def test_step5_passed_run_with_a_failing_readiness_check_needs_attention(self):
+        from frappe_assistant_core.onboarding import entry
+
+        self.readiness_fails.return_value = 1
+        self._ready(True)
+        step = self._steps()["go_live_test_run"]
+        self.assertEqual(step["state"], "needs_attention")
+        self.assertEqual(step["note"], "The test run passed, but 1 readiness check fails.")
+        self.assertNotEqual(entry.stage(self.company), "ready_to_go_live")
+
+    def test_step5_counts_the_readiness_report_fails(self):
+        from frappe_assistant_core.utils import go_live_check
+
+        self.readiness_fails.side_effect = self.real_readiness_fails
+        rows = [{"status": "Fail"}, {"status": "Warn"}, {"status": "Fail"}, {"status": "Pass"}]
+        self._ready(True)
+        with patch.object(go_live_check, "check", autospec=True, return_value=rows):
+            step = self._steps()["go_live_test_run"]
+        self.assertEqual(step["state"], "needs_attention")
+        self.assertEqual(step["note"], "The test run passed, but 2 readiness checks fail.")
+        with patch.object(go_live_check, "check", autospec=True, return_value=rows[1:2]):
+            self.assertEqual(self._steps()["go_live_test_run"]["state"], "done")
+
+    def test_step5_readiness_error_falls_back_to_the_run(self):
+        # a broken check must not hide the checklist: the run alone decides, and the error is logged
+        from frappe_assistant_core.utils import go_live_check
+
+        self.readiness_fails.side_effect = self.real_readiness_fails
+        self._ready(True)
+        with patch.object(go_live_check, "check", autospec=True, side_effect=RuntimeError("boom")):
+            self.assertEqual(self._steps()["go_live_test_run"]["state"], "done")
+
+    def test_step5_readiness_not_read_without_a_passed_run(self):
+        self._ready(False)
+        self._steps()
+        self.readiness_fails.assert_not_called()
 
     def test_step5_other_company_ignored(self):
         self._ready(True, company="Some Other Company")
@@ -194,7 +243,9 @@ class TestSteps(GoLiveCase):
         from frappe_assistant_core.onboarding import entry
 
         self.plan("Completed")
-        self.go_live(chart_imported_on=frappe.utils.now_datetime(), migration_completed_on=frappe.utils.now_datetime())
+        self.go_live(
+            chart_imported_on=frappe.utils.now_datetime(), migration_completed_on=frappe.utils.now_datetime()
+        )
         self._ready(True)
         self.hypercare("Active")
         steps = entry.steps(self.company)
@@ -284,9 +335,7 @@ class TestStage(GoLiveCase):
         self.gl_entries(10)
         frappe.db.set_value("GL Entry", {"company": self.company}, "is_cancelled", 1)
         self.gl_entries(1, days_old=61)
-        frappe.db.set_value(
-            "GL Entry", {"company": self.company, "is_cancelled": 0}, "is_cancelled", 1
-        )
+        frappe.db.set_value("GL Entry", {"company": self.company, "is_cancelled": 0}, "is_cancelled", 1)
         self.assertEqual(self._stage(), "not_started_soft")
 
     def test_pick_company_fallbacks(self):
@@ -553,6 +602,18 @@ class TestEntryCheck(GoLiveCase):
         )
         self.assertEqual(state["primary"], "Continue")
 
+    def test_banner_says_when_the_next_step_needs_attention(self):
+        self.plan("Completed")
+        self.go_live(
+            chart_imported_on=frappe.utils.now_datetime(), migration_completed_on=frappe.utils.now_datetime()
+        )
+        self.readiness_fails.return_value = 1
+        self.audit({"ready": True, "used": {"company": self.company}})
+        self.assertEqual(
+            self.state()["text"],
+            f"{self.company} isn't live yet: 4 of 6 go-live steps done. Needs attention: Go-live test run.",
+        )
+
     def test_hypercare_text_weeks(self):
         self.hypercare("Active", start=frappe.utils.add_days(None, -8), days=30)
         state = self.state()
@@ -598,7 +659,11 @@ class TestEntryCheck(GoLiveCase):
     def test_continue_in_fac_chat_while_it_is_being_connected(self):
         # not connected / waitlisted, or the owner's own setup: FAC Chat shows its own screen for it
         cases = (
-            {"can_use": False, "status": "not_registered", "reason": "FACO needs to be connected to FAC Cloud"},
+            {
+                "can_use": False,
+                "status": "not_registered",
+                "reason": "FACO needs to be connected to FAC Cloud",
+            },
             {"can_use": False, "status": "ready", "needs_user_setup": True},
         )
         for access in cases:
@@ -627,7 +692,7 @@ class TestEntryCheck(GoLiveCase):
         self.install_templates()
         prompt = self.state()["continue"]["prompt"]
         self.assertIn(f"Take {self.company} live", prompt)
-        self.assertIn("setup_plan with action discover", prompt)
+        self.assertIn("Let's start with discovery", prompt)
         self.assertNotIn("go_live_test_run", prompt)
 
     def test_continue_prompt_names_next_step(self):
@@ -635,8 +700,28 @@ class TestEntryCheck(GoLiveCase):
         self.plan("Draft")
         prompt = self.state()["continue"]["prompt"]
         self.assertIn(self.company, prompt)
-        self.assertIn("run_setup_plan", prompt)
-        self.assertNotIn("action discover", prompt)
+        self.assertIn("Let's do the setup plan", prompt)
+        self.assertNotIn("discovery", prompt)
+
+    def test_the_users_prompt_names_no_tool(self):
+        # Start fills the user's own message: tool names read as the user typing code, and go stale when
+        # a tool is renamed. The go-live skill says which tool starts each step (found in the browser test)
+        import os
+
+        plugins = frappe.get_app_path("frappe_assistant_core", "plugins")
+        tools = {
+            os.path.splitext(name)[0]
+            for plugin in os.listdir(plugins)
+            if os.path.isdir(os.path.join(plugins, plugin, "tools"))
+            for name in os.listdir(os.path.join(plugins, plugin, "tools"))
+            if name.endswith(".py") and not name.startswith("_")
+        }
+        self.install_templates()
+        for step in self.state(view="checklist")["steps"]:
+            with self.subTest(step=step["key"]):
+                for tool in tools:
+                    self.assertNotIn(tool, step["prompt"])
+                self.assertNotIn("Readiness report", step["prompt"])
 
     def test_every_step_has_an_instruction(self):
         from frappe_assistant_core.onboarding import entry
@@ -659,7 +744,7 @@ class TestEntryCheck(GoLiveCase):
         frappe.db.delete("Prompt Template", {"prompt_id": "go-live"})
         prompt = self.state()["continue"]["prompt"]
         self.assertIn(self.company, prompt)
-        self.assertIn("setup_plan with action discover", prompt)
+        self.assertIn("Let's start with discovery", prompt)
 
     def test_a_broken_template_falls_back(self):
         self.install_templates()
@@ -667,7 +752,7 @@ class TestEntryCheck(GoLiveCase):
         frappe.db.set_value("Prompt Template", name, "template_content", "{% if %}")
         state = self.state()
         self.assertTrue(state["show"])
-        self.assertIn("setup_plan with action discover", state["continue"]["prompt"])
+        self.assertIn("Let's start with discovery", state["continue"]["prompt"])
 
     # Each card says what its step is for and can be started on its own: steps don't have to be done
     # in order, so a consultant may import the chart before the setup plan is approved
@@ -683,9 +768,11 @@ class TestEntryCheck(GoLiveCase):
         self.install_templates()
         steps = {s["key"]: s for s in self.state(view="checklist")["steps"]}
         # Discovery is next, but the chart of accounts can be started as well
-        self.assertIn(entry.step_instruction("chart_of_accounts", self.company), steps["chart_of_accounts"]["prompt"])
+        self.assertIn(
+            entry.step_instruction("chart_of_accounts", self.company), steps["chart_of_accounts"]["prompt"]
+        )
         self.assertIn(self.company, steps["chart_of_accounts"]["prompt"])
-        self.assertIn("setup_plan with action discover", steps["discovery"]["prompt"])
+        self.assertIn("Let's start with discovery", steps["discovery"]["prompt"])
 
     def test_checklist_steps_say_what_they_need(self):
         for step in self.state(view="checklist")["steps"]:
@@ -775,7 +862,7 @@ class TestEntryCheck(GoLiveCase):
         self.gl_entries(50)
         state = self.state(view="checklist")
         self.assertEqual(state["stage"], "established")
-        self.assertIn("setup_plan with action discover", state["continue"]["prompt"])
+        self.assertIn("Let's start with discovery", state["continue"]["prompt"])
 
     def test_setup_plan_end_clears_the_cache(self):
         from frappe_assistant_core.utils import setup_plan
@@ -791,9 +878,7 @@ class TestEntryCheck(GoLiveCase):
         care = self.hypercare("Active", days=30)
         # forty days on: the period is over and its last summary was sent
         end = frappe.utils.add_days(None, -11)
-        care.db_set(
-            {"start_date": frappe.utils.add_days(None, -40), "end_date": end, "last_summary_on": end}
-        )
+        care.db_set({"start_date": frappe.utils.add_days(None, -40), "end_date": end, "last_summary_on": end})
         self.assertEqual(self.state()["variant"], "hypercare")
         with patch.object(hypercare, "send", autospec=True):
             hypercare.send_due_summaries()

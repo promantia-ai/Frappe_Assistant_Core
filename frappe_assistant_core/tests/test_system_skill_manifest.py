@@ -325,6 +325,18 @@ class TestSystemSkillManifest(BaseAssistantTest):
         for skill_id in re.findall(r'get_skill\("([a-z0-9_-]+)"\)', content):
             self.assertIn(skill_id, skill_ids)
 
+    def test_go_live_names_only_tools_and_skills_that_exist(self):
+        # The go-live prompt names no tool (the user sends it): this page is where the AI learns which
+        # tool starts each step, so a renamed tool left in it sends FACO nowhere (#34419)
+        content = _skill_content("go_live.md")
+        tools = _tool_files()
+        for name in set(re.findall(r"`([a-z][a-z0-9_]*)`", content)) - NOT_TOOLS:
+            self.assertIn(name, tools, f"go_live.md names `{name}`, which is not a tool")
+        skill_ids = {e["skill_id"] for e in _load_manifest("system_skills.json")}
+        self.assertIn("go-live", skill_ids)
+        for skill_id in re.findall(r'get_skill\("([a-z0-9_-]+)"\)', content):
+            self.assertIn(skill_id, skill_ids)
+
     def _tool_failure_rule(self) -> str:
         # The section the rule lives in (#34410): FACO fell back to create_document there.
         content = _skill_content("migrate_data.md")

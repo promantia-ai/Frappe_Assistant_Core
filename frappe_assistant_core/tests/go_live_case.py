@@ -11,6 +11,7 @@ records, so the QA site's own setup plans and hypercare don't decide a stage."""
 
 import json
 import unittest
+from unittest.mock import patch
 
 import frappe
 from frappe.utils import now_datetime
@@ -53,6 +54,14 @@ class GoLiveCase(BaseAssistantTest):
         frappe.db.delete("FAC Import Session", {"plan_status": ("is", "set")})
         frappe.db.delete("Assistant Audit Log", {"tool_name": "go_live_test_run"})
         frappe.cache().delete_keys("fac_go_live_entry")
+        # The test company is made bare (no taxes, no defaults), so its real readiness checks fail and a
+        # passed test run would never be done. The step 5 tests set readiness_fails themselves.
+        from frappe_assistant_core.onboarding import entry
+
+        self.real_readiness_fails = entry._readiness_fails
+        patcher = patch.object(entry, "_readiness_fails", autospec=True, return_value=0)
+        self.readiness_fails = patcher.start()
+        self.addCleanup(patcher.stop)
 
     # --- records, made the way the tools make them ---
 

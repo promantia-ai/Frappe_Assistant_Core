@@ -51,6 +51,7 @@ frappe.provide("frappe_assistant_core.go_live");
 			.fac-go-live-step .step-actions { margin-top: auto; padding-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;
 				align-items: center; }
 			.fac-go-live-step .step-actions a { font-size: var(--text-sm, 12px); cursor: pointer; }
+			.fac-go-live-checklist a.fac-go-live-action { text-decoration: underline; cursor: pointer; }
 			.fac-go-live-foot { margin-top: 10px; font-size: var(--text-sm, 12px); color: var(--text-muted); }
 		`;
 		$("<style id='fac-go-live-styles'>").text(css).appendTo("head");
@@ -223,6 +224,17 @@ frappe.provide("frappe_assistant_core.go_live");
 
 	// --- checklist ----------------------------------------------------------------
 
+	// FAC Admin's switches (FAC Chat, the Migration plugin) change where Start goes: the checklist and
+	// the banner already on screen are drawn again, or Start would open FAC Chat after it was switched off
+	ns.refresh = function () {
+		$(".fac-go-live-checklist").each(function () {
+			const $parent = $(this).parent();
+			ns.load_checklist($parent, $parent.data("company"));
+		});
+		$(".fac-go-live-banner").remove();
+		ns.check_and_show_banner();
+	};
+
 	ns.load_checklist = function ($parent, company) {
 		return ns
 			.call("get_entry_state", { view: "checklist", company: company || null }, "GET")
@@ -235,6 +247,7 @@ frappe.provide("frappe_assistant_core.go_live");
 
 	ns.render_checklist = function ($parent, state) {
 		ns.add_styles();
+		$parent.data("company", state.company);
 		const reload = (next) => {
 			$parent.empty();
 			if (next && next.show) ns.render_checklist($parent, next);
@@ -285,7 +298,8 @@ frappe.provide("frappe_assistant_core.go_live");
 			if (step.needs && step.state !== "done" && step.state !== "skipped") {
 				$step.find(".step-needs").text(__("You'll need: {0}", [step.needs]));
 			}
-			$step.find(".step-meta").text(STATE_LABELS[step.state] || step.state);
+			const label = STATE_LABELS[step.state] || step.state;
+			$step.find(".step-meta").text(step.note ? `${label}: ${step.note}` : label);
 			const $actions = $step.find(".step-actions");
 			// Any step not done can be started on its own: they don't have to be done in order.
 			// Not while the onboarding tools are off: the AI would have nothing to do it with.
@@ -307,13 +321,13 @@ frappe.provide("frappe_assistant_core.go_live");
 				if (step.skipped && step.skipped.reason) {
 					$step.find(".step-meta").text(`${STATE_LABELS.skipped}: ${step.skipped.reason}`);
 				}
-				$(`<a>${__("Undo")}</a>`)
+				$(`<a class="fac-go-live-action">${__("Undo")}</a>`)
 					.on("click", () =>
 						ns.call("unskip_step", { company: state.company, step: step.key }).then(reload)
 					)
 					.appendTo($actions);
 			} else if (step.state !== "done" && step.key !== "discovery") {
-				$(`<a>${__("Skip")}</a>`)
+				$(`<a class="fac-go-live-action">${__("Skip")}</a>`)
 					.on("click", () => ns.skip(state, step, reload))
 					.appendTo($actions);
 			}
@@ -333,10 +347,11 @@ frappe.provide("frappe_assistant_core.go_live");
 			$live.text(
 				__("Marked live by {0} on {1}. ", [
 					state.marked_live.by,
-					frappe.datetime.str_to_user(state.marked_live.on),
+					// the day is enough: the time came with seconds
+					frappe.datetime.str_to_user(state.marked_live.on, false, true),
 				])
 			);
-			$(`<a>${__("Undo")}</a>`)
+			$(`<a class="fac-go-live-action">${__("Undo")}</a>`)
 				.on("click", () => ns.call("unmark_live", { company: state.company }).then(reload))
 				.appendTo($live);
 		}

@@ -727,6 +727,15 @@
     "content_file": "role_guides.md"
   },
   {
+    "skill_id": "go-live",
+    "title": "Go Live",
+    "description": "Use to take a company live or continue a go-live step (discovery, setup plan, chart of accounts, data migration, go-live test run, hypercare), as the go-live checklist's Start and Continue ask (\"Let's do the chart of accounts for Acme\"): which tool starts each step, and staying on it.",
+    "skill_type": "Workflow",
+    "status": "Published",
+    "visibility": "Public",
+    "content_file": "go_live.md"
+  },
+  {
     "skill_id": "hypercare",
     "title": "Hypercare",
     "description": "Use after go-live: to switch on the weekly hypercare summary for a consultant (\"watch the site for the first month\"), or to read and act on a summary (\"what went wrong this week?\", \"open the hypercare summary\").",

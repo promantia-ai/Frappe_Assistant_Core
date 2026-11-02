@@ -21,43 +21,71 @@ from frappe import _
 
 from frappe_assistant_core.utils.plugin_manager import get_plugin_manager
 
-STEP_KEYS = ("discovery", "setup_plan", "chart_of_accounts", "data_migration", "go_live_test_run", "hypercare")
+STEP_KEYS = (
+    "discovery",
+    "setup_plan",
+    "chart_of_accounts",
+    "data_migration",
+    "go_live_test_run",
+    "hypercare",
+)
 # Discovery can't be skipped: it is what the rest is planned from
 SKIPPABLE = STEP_KEYS[1:]
-STEP_LABELS = {
-    "discovery": _("Discovery"),
-    "setup_plan": _("Setup plan"),
-    "chart_of_accounts": _("Chart of accounts"),
-    "data_migration": _("Data migration"),
-    "go_live_test_run": _("Go-live test run"),
-    "hypercare": _("Hypercare"),
-}
-# one line on each checklist card: what the step is for
-STEP_DESCRIPTIONS = {
-    "discovery": _("What the client does, sells and uses today: the setup plan is built from it."),
-    "setup_plan": _("Company settings, users, roles and masters, set up in one approved run."),
-    "chart_of_accounts": _("The client's own accounts on the company, or ERPNext's chart kept."),
-    "data_migration": _("Customers, suppliers, items and opening balances brought over from the old system."),
-    "go_live_test_run": _("A buying and selling test and the readiness checks, before the client goes live."),
-    "hypercare": _("A weekly summary of what goes wrong in the first weeks after go-live."),
-}
-# what to have ready before starting the step
-STEP_NEEDS = {
-    "discovery": _("About 15 minutes with someone who knows the business."),
-    "setup_plan": _("The answers from discovery."),
-    "chart_of_accounts": _("The chart exported from the old system (Excel or CSV), or keep ERPNext's."),
-    "data_migration": _("Exports of customers, suppliers, items and opening balances from the old system."),
-    "go_live_test_run": _("Masters and opening balances already in."),
-    "hypercare": _("The go-live date."),
-}
-# the step each one builds on, and why: starting before it is done warns, it never blocks
-STEP_BUILDS_ON = {
-    "setup_plan": ("discovery", _("the setup plan is built from its answers")),
-    "data_migration": ("chart_of_accounts", _("opening balances are posted to its accounts")),
-    "go_live_test_run": ("data_migration", _("the test run checks the migrated data")),
-    "hypercare": ("go_live_test_run", _("hypercare starts after go-live")),
-}
-PLAN_NEEDS_ATTENTION =("Partially Completed", "Failed", "Stopped")
+
+
+# The step texts are built on each call, not at import: _() translates into the language of the request
+def step_labels() -> Dict[str, str]:
+    return {
+        "discovery": _("Discovery"),
+        "setup_plan": _("Setup plan"),
+        "chart_of_accounts": _("Chart of accounts"),
+        "data_migration": _("Data migration"),
+        "go_live_test_run": _("Go-live test run"),
+        "hypercare": _("Hypercare"),
+    }
+
+
+def step_descriptions() -> Dict[str, str]:
+    """One line on each checklist card: what the step is for."""
+    return {
+        "discovery": _("What the client does, sells and uses today: the setup plan is built from it."),
+        "setup_plan": _("Company settings, users, roles and masters, set up in one approved run."),
+        "chart_of_accounts": _("The client's own accounts on the company, or ERPNext's chart kept."),
+        "data_migration": _(
+            "Customers, suppliers, items and opening balances brought over from the old system."
+        ),
+        "go_live_test_run": _(
+            "A buying and selling test and the readiness checks, before the client goes live."
+        ),
+        "hypercare": _("A weekly summary of what goes wrong in the first weeks after go-live."),
+    }
+
+
+def step_needs() -> Dict[str, str]:
+    """What to have ready before starting the step."""
+    return {
+        "discovery": _("About 15 minutes with someone who knows the business."),
+        "setup_plan": _("The answers from discovery."),
+        "chart_of_accounts": _("The chart exported from the old system (Excel or CSV), or keep ERPNext's."),
+        "data_migration": _(
+            "Exports of customers, suppliers, items and opening balances from the old system."
+        ),
+        "go_live_test_run": _("Masters and opening balances already in."),
+        "hypercare": _("The go-live date."),
+    }
+
+
+def step_builds_on() -> Dict[str, tuple]:
+    """The step each one builds on, and why: starting before it is done warns, it never blocks."""
+    return {
+        "setup_plan": ("discovery", _("the setup plan is built from its answers")),
+        "data_migration": ("chart_of_accounts", _("opening balances are posted to its accounts")),
+        "go_live_test_run": ("data_migration", _("the test run checks the migrated data")),
+        "hypercare": ("go_live_test_run", _("hypercare starts after go-live")),
+    }
+
+
+PLAN_NEEDS_ATTENTION = ("Partially Completed", "Failed", "Stopped")
 # how many of the latest go_live_test_run calls are looked through for this company's
 TEST_RUNS_READ = 20
 # R6: a site this small and this young is offered onboarding although the wizard named no client
@@ -133,6 +161,19 @@ def _test_run(company: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _readiness_fails(company: str) -> int:
+    """How many of the Go-Live Readiness checks fail for the company. Step 5 is the test run and the
+    readiness checks: a passed test run with a failing check isn't done. An error counts as none, so
+    the checklist falls back to the test run alone rather than hiding."""
+    from frappe_assistant_core.utils import go_live_check
+
+    try:
+        return go_live_check.counts(go_live_check.check(company))[go_live_check.FAIL]
+    except Exception:
+        frappe.log_error(title=ERROR_TITLE, message=frappe.get_traceback())
+        return 0
+
+
 def _hypercare() -> Optional[Dict[str, Any]]:
     # FAC Hypercare has no company field: it counts for the site, one onboarding at a time
     rows = frappe.get_all(
@@ -161,19 +202,22 @@ def steps(company: str) -> List[Dict[str, Any]]:
     run = _test_run(company)
     care = _hypercare()
     out = []
+    labels, descriptions, needs = step_labels(), step_descriptions(), step_needs()
 
-    def add(key, state, record=None, **extra):
+    def add(key, state, record=None, note=None, **extra):
         if state != "done" and key in skipped:
             state = "skipped"
         out.append(
             {
                 "key": key,
-                "label": STEP_LABELS[key],
-                "description": STEP_DESCRIPTIONS[key],
-                "needs": STEP_NEEDS[key],
+                "label": labels[key],
+                "description": descriptions[key],
+                "needs": needs[key],
                 "state": state,
                 "record": record,
                 "skipped": skipped.get(key) if state == "skipped" else None,
+                # why a step needs attention, shown on its card
+                "note": note,
                 **extra,
             }
         )
@@ -202,11 +246,19 @@ def steps(company: str) -> List[Dict[str, Any]]:
         "done" if go_live and go_live.migration_completed_on else "not_started",
         _record("FAC Import Session", go_live and go_live.migration_plan),
     )
-    add(
-        "go_live_test_run",
-        "done" if run and run["ready"] else "not_started",
-        _record("Assistant Audit Log", run and run["name"]),
-    )
+    run_state, run_note = "not_started", None
+    if run and run["ready"]:
+        fails = _readiness_fails(company)
+        if fails:
+            run_state = "needs_attention"
+            run_note = (
+                _("The test run passed, but 1 readiness check fails.")
+                if fails == 1
+                else _("The test run passed, but {0} readiness checks fail.").format(fails)
+            )
+        else:
+            run_state = "done"
+    add("go_live_test_run", run_state, _record("Assistant Audit Log", run and run["name"]), run_note)
     add(
         "hypercare",
         "done" if care and care.status in ("Active", "Ended") else "not_started",
@@ -239,7 +291,9 @@ def _looks_new(company: str) -> bool:
     filters = {"company": company, "docstatus": 1, "is_cancelled": 0}
     if frappe.db.count("GL Entry", filters) >= NEW_SITE_MAX_GL_ENTRIES:
         return False
-    oldest = frappe.get_all("GL Entry", filters=filters, fields=["creation"], order_by="creation asc", limit=1)
+    oldest = frappe.get_all(
+        "GL Entry", filters=filters, fields=["creation"], order_by="creation asc", limit=1
+    )
     if not oldest:
         return True
     age = frappe.utils.time_diff_in_seconds(frappe.utils.now_datetime(), oldest[0].creation) / 86400
@@ -333,7 +387,9 @@ def _record_result(company: Optional[str], values: Dict[str, Any]) -> None:
 def record_chart(company: str, session: str) -> None:
     """Step 3 is done: import_chart_of_accounts put the client's chart on the company. The session
     keeps no company and no final status, so the checklist reads it from here."""
-    _record_result(company, {"chart_imported_on": frappe.utils.now_datetime(), "chart_import_session": session})
+    _record_result(
+        company, {"chart_imported_on": frappe.utils.now_datetime(), "chart_import_session": session}
+    )
 
 
 def record_migration(plan_name: str) -> None:
@@ -381,7 +437,9 @@ def site_state(company: str) -> Dict[str, Any]:
     current = stage(company, step_list)
     care = _hypercare()
     # the plugin is the site's: switched off while the check was about another company counts too
-    disabled_by = frappe.db.get_value("FAC Go-Live", {"tools_disabled_by": ("is", "set")}, "tools_disabled_by")
+    disabled_by = frappe.db.get_value(
+        "FAC Go-Live", {"tools_disabled_by": ("is", "set")}, "tools_disabled_by"
+    )
     state = {
         "company": company,
         "stage": current,
@@ -443,7 +501,12 @@ def _snoozed(company: str, user: str) -> bool:
     return bool(
         frappe.db.exists(
             "FAC Go-Live Snooze",
-            {"parent": parent, "parenttype": "FAC Go-Live", "user": user, "until": (">", frappe.utils.now_datetime())},
+            {
+                "parent": parent,
+                "parenttype": "FAC Go-Live",
+                "user": user,
+                "until": (">", frappe.utils.now_datetime()),
+            },
         )
     )
 
@@ -481,7 +544,9 @@ def _text(variant: str, current: str, company: str, state: Dict[str, Any], can_e
                 ["not_now", "already_live"],
             )
         return (
-            _("FAC can help take {0} live. Ask an administrator to turn on its onboarding tools.").format(company),
+            _("FAC can help take {0} live. Ask an administrator to turn on its onboarding tools.").format(
+                company
+            ),
             None,
             ["not_now"],
         )
@@ -496,7 +561,11 @@ def _text(variant: str, current: str, company: str, state: Dict[str, Any], can_e
     if current == "not_started":
         return _("{0} isn't live yet. Want FACO to help take it live?").format(company), _("Start"), others
     if current == "not_started_soft":
-        return _("Is {0} a new implementation? FACO can help take it live.").format(company), _("Start"), others
+        return (
+            _("Is {0} a new implementation? FACO can help take it live.").format(company),
+            _("Start"),
+            others,
+        )
     if current == "ready_to_go_live":
         return (
             _("{0} passed its go-live test run. Switch on hypercare after go-live.").format(company),
@@ -507,7 +576,11 @@ def _text(variant: str, current: str, company: str, state: Dict[str, Any], can_e
         done = sum(1 for s in state["steps"] if s["state"] in ("done", "skipped"))
         text = _("{0} isn't live yet: {1} of 6 go-live steps done.").format(company, done)
         if state["next_step"]:
-            text += " " + _("Next: {0}.").format(STEP_LABELS[state["next_step"]])
+            label = step_labels()[state["next_step"]]
+            attention = any(
+                s["key"] == state["next_step"] and s["state"] == "needs_attention" for s in state["steps"]
+            )
+            text += " " + (_("Needs attention: {0}.") if attention else _("Next: {0}.")).format(label)
         return text, _("Continue"), others
     return None, None, []
 
@@ -516,32 +589,27 @@ GO_LIVE_PROMPT = "go-live"
 
 
 def step_instruction(step: Optional[str], company: str) -> str:
-    """What the AI is asked to do for a go-live step: the tool to start with, so it begins where the
-    checklist says and not wherever it guesses."""
+    """What the user asks for a go-live step, in their words: the step by name, so the AI begins where
+    the checklist says and not wherever it guesses. The user sends it as their own message, so it
+    names no tool; the go-live skill says which tool starts each step."""
     instructions = {
-        "discovery": _(
-            "Start with discovery: call setup_plan with action discover for {0} and ask me its questions."
-        ),
+        "discovery": _("Let's start with discovery for {0}: ask me about the business, for the setup plan."),
         "setup_plan": _(
-            "Continue with the setup plan of {0}: show me what it will set up, and run it with "
-            "run_setup_plan once I approve it."
+            "Let's do the setup plan for {0}: show me what it will set up, and run it once I approve."
         ),
         "chart_of_accounts": _(
-            "Continue with the chart of accounts of {0}: check the client's chart with dry_run_import, "
-            "then put it on with import_chart_of_accounts, or keep ERPNext's chart if I say so."
+            "Let's do the chart of accounts for {0}: I'll share the client's chart from the old system, "
+            "or we keep ERPNext's."
         ),
         "data_migration": _(
-            "Continue with the data migration of {0}: plan the client's files with plan_migration, and "
-            "run them with run_migration_plan once I approve it."
+            "Let's do the data migration for {0}: I'll share the old system's exports, and you run them "
+            "once I approve the plan."
         ),
         "go_live_test_run": _(
-            "Continue with the go-live test run of {0}: run go_live_test_run and go through the Go-Live "
-            "Readiness report with me."
+            "Let's do the go-live test run for {0}: test buying and selling end to end, and the "
+            "readiness checks."
         ),
-        "hypercare": _(
-            "Continue with hypercare for {0}: after go-live, switch it on with a FAC Hypercare record for "
-            "the consultant."
-        ),
+        "hypercare": _("Let's switch on hypercare for {0}, for the first weeks after go-live."),
     }
     return instructions.get(step or "discovery", instructions["discovery"]).format(company)
 
@@ -551,11 +619,18 @@ def _prompt(company: str, step: Optional[str]) -> str:
     gets from the go-live prompt. A missing or broken template falls back to the instruction alone."""
     instruction = step_instruction(step, company)
     try:
-        content = frappe.db.get_value(
-            "Prompt Template", {"prompt_id": GO_LIVE_PROMPT, "status": "Published"}, "template_content"
-        )
-        if content:
-            text = frappe.render_template(content, {"company": company, "step": instruction}).strip()
+        name = frappe.db.get_value("Prompt Template", {"prompt_id": GO_LIVE_PROMPT, "status": "Published"})
+        if name:
+            from frappe_assistant_core.api.handlers.prompts import get_prompt_manager
+
+            # the MCP prompt's own renderer, sandboxed: an administrator can edit the template
+            text = (
+                get_prompt_manager()
+                .render_prompt(
+                    frappe.get_doc("Prompt Template", name), {"company": company, "step": instruction}
+                )
+                .strip()
+            )
             if text:
                 return text
     except Exception:
@@ -568,13 +643,14 @@ def _with_prompts(step_list: List[Dict[str, Any]], company: str) -> List[Dict[st
     step it builds on isn't done or skipped, a warning to confirm: steps don't have to be done in
     order. Copies, as the list is the cached site state."""
     closed = {s["key"] for s in step_list if s["state"] in ("done", "skipped")}
+    labels, builds_on = step_labels(), step_builds_on()
     out = []
     for step in step_list:
         open_ = step["key"] not in closed
-        before, why = STEP_BUILDS_ON.get(step["key"], (None, None))
+        before, why = builds_on.get(step["key"], (None, None))
         warning = None
         if open_ and before and before not in closed:
-            warning = _("{0} isn't done yet: {1}. Start anyway?").format(STEP_LABELS[before], why)
+            warning = _("{0} isn't done yet: {1}. Start anyway?").format(labels[before], why)
         out.append({**step, "prompt": _prompt(company, step["key"]) if open_ else None, "warning": warning})
     return out
 
@@ -615,7 +691,7 @@ def mcp_instructions(user: str) -> Optional[str]:
     state = get_state(user, may_write=False)
     if not state.get("show") or state["stage"] not in ("not_started", "in_progress", "ready_to_go_live"):
         return None
-    step = STEP_LABELS.get(state["next_step"]) if state["next_step"] else None
+    step = step_labels().get(state["next_step"]) if state["next_step"] else None
     text = _("This site's company {0} isn't live yet (go-live stage: {1}).").format(
         state["company"], state["stage"].replace("_", " ")
     )
@@ -623,7 +699,8 @@ def mcp_instructions(user: str) -> Optional[str]:
         text += " " + _("Next go-live step: {0}.").format(step)
     text += " " + _(
         "Offer to help take it live. The go-live prompt continues where it stopped: setup_plan with "
-        "action discover first when the company has no setup plan."
+        "action discover first when the company has no setup plan. get_skill('go-live') says which "
+        "tool starts each step."
     )
     return text
 
@@ -667,7 +744,7 @@ def _get_state(user: str, view: str, company: Optional[str], may_write: bool = T
     if banner and not shown:
         return dict(HIDDEN)
 
-    can_enable = bool(frappe.has_permission("Assistant Core Settings", "write", user=user))
+    can_enable = bool(frappe.has_permission("Assistant Core Settings", "write", user=user, throw=False))
     variant = None
     if shown:
         variant = "hypercare" if current == "live_hypercare" else "checklist"

@@ -38,6 +38,7 @@ Each document is made from the one before with ERPNext's own "Make" functions an
 ## Workflow
 
 1. Run the Go-Live Readiness report first (`get_skill("site-health-check")`, Go-live section) and fix its Fail items: a missing fiscal year or default account fails every step here too.
-2. Run `go_live_test_run`. Show one table: Flow | Step | Result | Why.
-3. For each failure, explain it in business words and offer the fix through `get_skill("setup-change-protocol")`. Then run the test again.
-4. A step blocked by an approval workflow is not a setup gap if the client wants that approval: say so.
+2. **Ask which item, customer and supplier to test with**, unless the user named them: one question, with suggestions the client really uses (the customers, suppliers and items the data migration just brought in, newest first, read with `list_documents`). Left out, the tool takes the first records on the site, which on a site with test or sample data aren't the client's, so the run proves little.
+3. Run `go_live_test_run` with them. Show one table: Flow | Step | Result | Why.
+4. For each failure, explain it in business words and offer the fix through `get_skill("setup-change-protocol")`. Then run the test again.
+5. A step blocked by an approval workflow is not a setup gap if the client wants that approval: say so.
