@@ -968,8 +968,12 @@ def _apply_item(item) -> Tuple[str, str]:
         if not done["created"]:
             return "Skipped", _("Everyone is a user already.")
         created = len(done["created"])
-        return "Done", _("Created {0} with role profile {1}; {2} already users. FAC access not given.").format(
-            _("1 user") if created == 1 else _("{0} users").format(created), item.target_name, len(done["skipped"])
+        return "Done", _(
+            "Created {0} with role profile {1}; {2} already users. FAC access not given."
+        ).format(
+            _("1 user") if created == 1 else _("{0} users").format(created),
+            item.target_name,
+            len(done["skipped"]),
         )
     if item.is_customisation or doctype in CUSTOMISATION_DOCTYPES:
         problem = _matches(item)
@@ -1119,7 +1123,9 @@ def record(doc) -> Any:
     )
     progress = json.loads(doc.progress or "{}")
     progress["record"] = saved.name
-    frappe.db.set_value(PLAN, doc.name, "progress", json.dumps(progress), update_modified=False)
+    frappe.db.set_value(
+        PLAN, doc.name, {"progress": json.dumps(progress), "setup_record": saved.name}, update_modified=False
+    )
     return saved
 
 

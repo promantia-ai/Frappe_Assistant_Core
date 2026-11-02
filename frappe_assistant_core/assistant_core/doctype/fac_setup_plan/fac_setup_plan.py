@@ -11,6 +11,8 @@
 Drafted and changed in chat without writing to the site; approved once; applied by a background job
 (utils/setup_plan.py). It outlives the chat: it is the setup record the client is handed."""
 
+import json
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -37,6 +39,31 @@ def _what_is_planned(doc):
 
 
 class FACSetupPlan(Document):
+    def onload(self):
+        """What the form shows in plain words (#34660): each area's title instead of its key, and the
+        setup record of a plan that ran before the link field was there (it was kept in progress)."""
+        from frappe_assistant_core.utils.setup_plan import AREAS
+
+        self.set_onload("area_titles", {area["key"]: _(area["title"]) for area in AREAS})
+        if not self.setup_record:
+            try:
+                self.setup_record = (json.loads(self.progress or "{}") or {}).get("record")
+            except (TypeError, ValueError, AttributeError):
+                pass
+
+    @frappe.whitelist(methods=["POST"])
+    def stop(self):
+        """The form's Stop: a running plan stops before its next item, and what it applied stays.
+        Frappe checks only read access before a document method, so write is checked here."""
+        self.check_permission("write")
+        if self.status != "Running":
+            frappe.throw(
+                _("Plan {0} is {1}: only a running plan can be stopped.").format(self.name, _(self.status))
+            )
+        from frappe_assistant_core.utils.setup_plan import request_stop
+
+        request_stop(self.name)
+
     def validate(self):
         before = self.get_doc_before_save()
         if before and before.status in FROZEN and _what_is_planned(before) != _what_is_planned(self):

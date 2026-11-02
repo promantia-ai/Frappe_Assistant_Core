@@ -491,6 +491,8 @@ class TestRunSetupPlan(ImportRunCase):
         self.assertIn("Applied by Administrator", record.content)
         self.assertIn("Three-step PO approval", record.content)
         self.assertEqual(setup_plan.describe(doc)["record"], name)
+        # the form links it straight, not only inside the progress JSON (#34660)
+        self.assertEqual(doc.setup_record, name)
 
     def test_a_plan_that_failed_still_leaves_its_record_saying_so(self):
         plan = self._plan_with_a_bad_second_item()

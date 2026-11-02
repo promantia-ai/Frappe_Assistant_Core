@@ -98,3 +98,63 @@ class TestSetupPlanDocType(BaseAssistantTest):
         frappe.set_user(self.make_desk_user("setupplan"))
 
         self.assertFalse(frappe.has_permission(PLAN, "read", doc=plan))
+
+    # -- the form (#34660): an approved plan in plain words, read-only, with Stop while it runs ----
+
+    def test_the_form_gets_each_areas_title(self):
+        plan = frappe.get_doc(PLAN, self._plan().name)
+        plan.run_method("onload")
+
+        titles = plan.get_onload().area_titles
+        self.assertEqual(titles["payment_terms"], "Payment terms")
+        self.assertEqual(titles["stock"], "Stock and valuation")
+
+    def test_a_plan_that_ran_before_the_link_still_shows_its_setup_record(self):
+        # such a plan kept the record only in its progress JSON
+        plan = self._plan()
+        frappe.db.set_value(
+            PLAN, plan.name, {"status": "Completed", "progress": json.dumps({"record": "X-1"})}
+        )
+        plan = frappe.get_doc(PLAN, plan.name)
+        plan.run_method("onload")
+
+        self.assertEqual(plan.setup_record, "X-1")
+
+    def test_a_broken_progress_does_not_break_the_form(self):
+        plan = self._plan()
+        frappe.db.set_value(PLAN, plan.name, "progress", "{not json")
+        plan = frappe.get_doc(PLAN, plan.name)
+        plan.run_method("onload")
+
+        self.assertFalse(plan.setup_record)
+
+    def test_stop_asks_a_running_plan_to_stop(self):
+        plan = self._plan()
+        frappe.db.set_value(PLAN, plan.name, "status", "Running")
+        frappe.get_doc(PLAN, plan.name).stop()
+
+        self.assertEqual(frappe.db.get_value(PLAN, plan.name, "stop_requested"), 1)
+
+    def test_only_a_running_plan_can_be_stopped(self):
+        plan = self._plan()
+        for status in ("Draft", "Completed"):
+            with self.subTest(status=status):
+                frappe.db.set_value(PLAN, plan.name, "status", status)
+                with self.assertRaises(frappe.ValidationError):
+                    frappe.get_doc(PLAN, plan.name).stop()
+        self.assertFalse(frappe.db.get_value(PLAN, plan.name, "stop_requested"))
+
+    def test_stop_needs_write_not_only_read(self):
+        # Frappe checks only read before a document method: a reader must not stop a run
+        plan = self._plan()
+        frappe.db.set_value(PLAN, plan.name, "status", "Running")
+        user = self.make_desk_user("planreader")
+        frappe.share.add(PLAN, plan.name, user, read=1, write=0)
+        self.assert_cannot(user, "write", PLAN, plan.name)
+        frappe.set_user(user)
+        try:
+            with self.assertRaises(frappe.PermissionError):
+                frappe.get_doc(PLAN, plan.name).stop()
+        finally:
+            frappe.set_user("Administrator")
+        self.assertFalse(frappe.db.get_value(PLAN, plan.name, "stop_requested"))
