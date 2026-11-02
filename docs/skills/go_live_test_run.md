@@ -32,7 +32,7 @@ Each document is made from the one before with ERPNext's own "Make" functions an
 
 - `ready`: every step passed.
 - `used`: the company, item, customer, supplier and warehouse the run took. Say which, so the user knows what was tested.
-- `steps`: per step `flow`, `step` (the DocType), `status` (`passed`, `failed`, `not run`) and, for a failure, `message`. A passed step has the `amount` and the number of `taxes` rows it got: a sale with no taxes on a taxed business is worth pointing out.
+- `steps`: per step `flow`, `step` (the DocType), `status` (`passed`, `failed`, `not run`); for a failure ERPNext's `message` and, where FAC can tell, an `explanation` in plain words: the role that would allow the step, an approval workflow, or no stock to deliver. Give the explanation first. `setup_gap: false` means the step failed for a reason that isn't the setup: say so, and don't offer a setup fix for it. A passed step has the `amount` and the number of `taxes` rows it got: a sale with no taxes on a taxed business is worth pointing out.
 - `notes`: things the run had to fill in, such as an item with no price.
 
 ## Workflow

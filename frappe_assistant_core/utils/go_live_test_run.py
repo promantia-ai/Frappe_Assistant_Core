@@ -19,7 +19,7 @@ The ticket's other way, a test company deleted afterwards, would test a copy of 
 the client's own, and leave a company's worth of records to delete.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -72,11 +72,25 @@ def _given(doctype: str, name: Optional[str]) -> Optional[str]:
     return name
 
 
-def _item(item: Optional[str]) -> str:
+def _stocked(warehouse: str, qty: float) -> List[str]:
+    """The items with at least ``qty`` in stock in the warehouse."""
+    return frappe.get_list(
+        "Bin", filters={"warehouse": warehouse, "actual_qty": (">=", qty)}, pluck="item_code"
+    )
+
+
+def _item(item: Optional[str], warehouse: str, qty: float, sell_only: bool) -> str:
     if _given("Item", item):
         return item
     plain = {"disabled": 0, "has_variants": 0, "has_batch_no": 0, "has_serial_no": 0}
     both = {**plain, "is_sales_item": 1, "is_purchase_item": 1}
+    if sell_only:
+        # no buying flow receives stock first: an item already in stock gets past the Delivery Note
+        stocked = _stocked(warehouse, qty)
+        if stocked and frappe.get_list(
+            "Item", filters={**plain, "is_sales_item": 1, "name": ("in", stocked)}, limit=1
+        ):
+            return _first("Item", {**plain, "is_sales_item": 1, "name": ("in", stocked)}, _("item"))
     if frappe.db.exists("Item", {**both, "is_stock_item": 1}):
         return _first("Item", {**both, "is_stock_item": 1}, _("item"))
     return _first("Item", both, _("item bought and sold"))
@@ -107,12 +121,12 @@ def setup(arguments: Dict[str, Any]) -> Dict[str, Any]:
     flows = [f for f in (arguments.get("flows") or FLOWS) if f in FLOWS] or list(FLOWS)
     used = {
         "company": company,
-        "item": _item(arguments.get("item")),
         "qty": flt(arguments.get("qty")) or 1,
         "rate": flt(arguments.get("rate")) or None,
         "flows": [f for f in FLOWS if f in flows],
     }
     used["warehouse"] = _warehouse(company, arguments.get("warehouse"))
+    used["item"] = _item(arguments.get("item"), used["warehouse"], used["qty"], used["flows"] == [SELL])
     if BUY in used["flows"]:
         used["supplier"] = _given("Supplier", arguments.get("supplier")) or _first(
             "Supplier", {"disabled": 0, "on_hold": 0}, _("supplier")
@@ -248,19 +262,54 @@ def _sell_steps(used: Dict[str, Any], notes: List[str]) -> List[tuple]:
     ]
 
 
-def _why(doctype: str, e: Exception) -> str:
-    """ERPNext's message for a step that failed, with the workflow named when one is in the way."""
-    _kind, message = dry_run.refusal(e)
-    workflow = frappe.db.get_value("Workflow", {"document_type": doctype, "is_active": 1}, "name")
-    if workflow:
-        message = _("{0} has the approval workflow {1}, which the test run can't approve. {2}").format(
-            _(doctype), workflow, message
+def _one_of(roles: List[str]) -> str:
+    if len(roles) == 1:
+        return roles[0]
+    return _("{0} or {1}").format(", ".join(roles[:-1]), roles[-1])
+
+
+def _permission_gap(doctype: str) -> Optional[str]:
+    """What the user can't do with a step's document, in their words, and the roles that would let
+    them: ERPNext only says "does not have access to this document: Purchase Order - None"."""
+    from frappe.permissions import get_doctype_roles
+
+    for ptype, action in (("create", _("create")), ("submit", _("submit"))):
+        if frappe.has_permission(doctype, ptype, throw=False):
+            continue
+        roles = [r for r in dict.fromkeys(get_doctype_roles(doctype, ptype)) if r != "Administrator"]
+        if not roles:
+            return _("You can't {0} a {1}: no role on this site allows it.").format(action, _(doctype))
+        return _("You can't {0} a {1}: none of your roles allows it. {2} would.").format(
+            action, _(doctype), _one_of(roles[:3])
         )
-    return message
+    return None
 
 
-def _run_flow(flow: str, steps: List[tuple]) -> List[Dict[str, Any]]:
-    """Each step from the document before it; after a failure the rest of the flow is not run."""
+def _why(doctype: str, e: Exception) -> Tuple[Optional[str], Optional[str]]:
+    """(ERPNext's message, FAC's explanation) for a step that failed. The message quotes the client's
+    records and is fenced; the explanation is FAC's own words, naming no record."""
+    if isinstance(e, frappe.PermissionError):
+        gap = _permission_gap(doctype)
+        if gap:
+            return None, gap
+    _kind, message = dry_run.refusal(e)
+    explanation = None
+    if frappe.db.exists("Workflow", {"document_type": doctype, "is_active": 1}):
+        explanation = _("{0} has an approval workflow, which the test run can't approve.").format(_(doctype))
+    return message, explanation
+
+
+def _short_of_stock(used: Dict[str, Any]) -> bool:
+    """A selling run without the buying flow, on a stock item with less in stock than it sells: the
+    Delivery Note can't be made, and that's no setup gap."""
+    if BUY in used["flows"] or not frappe.db.get_value("Item", used["item"], "is_stock_item"):
+        return False
+    return used["item"] not in _stocked(used["warehouse"], used["qty"])
+
+
+def _run_flow(flow: str, steps: List[tuple], no_stock: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Each step from the document before it; after a failure the rest of the flow is not run.
+    ``no_stock``: the item has no stock to deliver, so a failed Delivery Note is said to be that."""
     results, before, failed = [], None, None
     for doctype, make in steps:
         if failed:
@@ -269,7 +318,7 @@ def _run_flow(flow: str, steps: List[tuple]) -> List[Dict[str, Any]]:
                     "flow": flow,
                     "step": doctype,
                     "status": NOT_RUN,
-                    "message": _("Not run: {0} failed.").format(_(failed)),
+                    "explanation": _("Not run: {0} failed.").format(_(failed)),
                 }
             )
             continue
@@ -289,7 +338,13 @@ def _run_flow(flow: str, steps: List[tuple]) -> List[Dict[str, Any]]:
         except Exception as e:
             frappe.db.rollback(save_point=STEP_SAVEPOINT)
             failed = doctype
-            results.append({"flow": flow, "step": doctype, "status": FAILED, "message": _why(doctype, e)})
+            message, explanation = _why(doctype, e)
+            step = {"flow": flow, "step": doctype, "status": FAILED, "message": message}
+            if no_stock and doctype == "Delivery Note":
+                step.update({"explanation": no_stock, "setup_gap": False})
+            elif explanation:
+                step["explanation"] = explanation
+            results.append(step)
     return results
 
 
@@ -297,6 +352,12 @@ def run(used: Dict[str, Any]) -> Dict[str, Any]:
     """Run the flows and roll every document back. Nothing the run made is kept."""
     notes: List[str] = []
     steps: List[Dict[str, Any]] = []
+    no_stock = None
+    if SELL in used["flows"] and _short_of_stock(used):
+        no_stock = _(
+            "The item has no stock in the warehouse to deliver, so the Delivery Note can't be made. That's "
+            "not a setup gap: run the buying flow too, or bring in the opening stock first."
+        )
     flags = frappe.local.flags
     with dry_run.own_messages(), dry_run.held_back():
         # held_back marks the request as an import, which turns some of ERPNext's checks off:
@@ -307,11 +368,12 @@ def run(used: Dict[str, Any]) -> Dict[str, Any]:
             if BUY in used["flows"]:
                 steps += _run_flow(BUY, _buy_steps(used, notes))
             if SELL in used["flows"]:
-                steps += _run_flow(SELL, _sell_steps(used, notes))
+                steps += _run_flow(SELL, _sell_steps(used, notes), no_stock)
         finally:
             frappe.db.rollback(save_point=SAVEPOINT)
     failed = [s for s in steps if s["status"] == FAILED]
     return {
+        # a Delivery Note held up by stock alone isn't a setup gap, but the run didn't get past it
         "ready": not failed and all(s["status"] == PASSED for s in steps),
         "used": used,
         "steps": steps,

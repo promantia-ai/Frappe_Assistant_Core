@@ -88,6 +88,8 @@ class TestGoLiveTestRun(BaseAssistantTest):
             "warehouse": self.warehouse,
             **arguments,
         }
+        # an argument given as None is left out, as a caller that doesn't name it
+        arguments = {key: value for key, value in arguments.items() if value is not None}
         return get_tool_registry().get_tool("go_live_test_run")._safe_execute(arguments)
 
     def _left(self):
@@ -154,8 +156,73 @@ class TestGoLiveTestRun(BaseAssistantTest):
         self.assertIn(self.supplier, buy["Purchase Order"]["message"])
         for step in ("Purchase Receipt", "Purchase Invoice", "Payment Entry"):
             self.assertEqual(buy[step]["status"], "not run")
+            # FAC's own words, not fenced as the client's data: equal to the sentence itself (#34661)
+            self.assertEqual(buy[step]["explanation"], "Not run: Purchase Order failed.")
+            self.assertNotIn("message", buy[step])
         self.assertFalse(result["ready"])
         self.assertEqual(set(self._left().values()), {0}, self._left())
+
+    # #34661: the failures a consultant couldn't read
+
+    def test_a_missing_role_is_said_in_the_users_words(self):
+        # A storekeeper may raise the Material Request but not the Purchase Order. ERPNext said
+        # "does not have access to this document: Purchase Order - None"
+        user = self.make_throwaway_user("golive-stock", roles=("Stock User",))
+        self.assert_cannot(user, "create", "Purchase Order")
+        frappe.set_user(user)
+        try:
+            result = self._run(flows=["buy"])["result"]
+        finally:
+            frappe.set_user("Administrator")
+        buy = {s["step"]: s for s in result["steps"]}
+        self.assertEqual(buy["Material Request"]["status"], "passed", result["steps"])
+        order = buy["Purchase Order"]
+        self.assertEqual(order["status"], "failed")
+        self.assertTrue(
+            order["explanation"].startswith(
+                "You can't create a Purchase Order: none of your roles allows it."
+            ),
+            order,
+        )
+        self.assertIn("Purchase User", order["explanation"])
+        self.assertIn("Purchase Manager", order["explanation"])
+        self.assertIsNone(order["message"])
+        self.assertEqual(set(self._left().values()), {0}, self._left())
+
+    def test_a_sell_only_run_on_an_item_without_stock_is_no_setup_gap(self):
+        # the run's item is new: nothing has been received into the warehouse
+        reply = self._run(flows=["sell"], supplier=None)
+        self.assertTrue(reply["success"], reply)
+        result = reply["result"]
+        sell = {s["step"]: s for s in result["steps"]}
+        self.assertEqual(sell["Sales Order"]["status"], "passed", result["steps"])
+        delivery = sell["Delivery Note"]
+        self.assertEqual(delivery["status"], "failed")
+        self.assertIs(delivery["setup_gap"], False)
+        self.assertIn("no stock in the warehouse", delivery["explanation"])
+        self.assertFalse(result["ready"])
+        # a selling run buys nothing: it needs no supplier
+        self.assertNotIn("supplier", result["used"])
+        self.assertEqual(set(self._left().values()), {0}, self._left())
+
+    def test_a_sell_only_run_picks_an_item_in_stock(self):
+        # stock received the way a client's opening stock comes in: a submitted receipt
+        frappe.get_doc(
+            {
+                "doctype": "Stock Entry",
+                "stock_entry_type": "Material Receipt",
+                "company": self.company,
+                "items": [
+                    {"item_code": self.item, "qty": 5, "t_warehouse": self.warehouse, "basic_rate": 10}
+                ],
+            }
+        ).insert().submit()
+        used = test_run.setup({"company": self.company, "warehouse": self.warehouse, "flows": ["sell"]})
+        in_stock = frappe.db.get_value(
+            "Bin", {"item_code": used["item"], "warehouse": self.warehouse}, "actual_qty"
+        )
+        self.assertGreaterEqual(in_stock or 0, 1, used)
+        self.assertNotIn("supplier", used)
 
     def test_a_user_who_may_not_read_the_company_is_refused_before_anything_runs(self):
         # the run picks and names records as the user: one they may not read is not found to them

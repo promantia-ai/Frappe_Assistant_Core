@@ -37,12 +37,15 @@ class GoLiveTestRun(BaseTool):
             "workflows are what is tested. NOTHING IS KEPT: the whole run is rolled back, so there "
             "is nothing to delete afterwards; never offer to clean up. Without item, customer, "
             "supplier or warehouse it takes the site's defaults or its first ones: say which it "
-            "used. A step after a failed one is 'not run'. Use it with the Go-Live Readiness report "
-            "(get_skill('site-health-check'))."
+            "used. A step after a failed one is 'not run'. A failed step has ERPNext's message and, where "
+            "FAC can tell, an explanation in plain words (a missing role, a workflow, no stock to "
+            "deliver); setup_gap false means it isn't a setup problem. Use it with the Go-Live "
+            "Readiness report (get_skill('site-health-check'))."
         )
         self.category = "Builder checks"
         self.requires_permission = None  # each document checks the user's own permission
-        # ERPNext's messages quote the client's record names
+        # ERPNext's messages and the notes quote the client's record names. steps[].explanation is
+        # FAC's own sentence, naming no record, so it isn't fenced (#34661)
         self.untrusted_fields = ("steps[].message", "notes", "error")
 
         self.inputSchema = {
