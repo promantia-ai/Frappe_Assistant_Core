@@ -324,6 +324,49 @@ class TestSetupPlan(ImportRunCase):
         self.assertIn("(changes the existing one)", line)
         self.assertNotIn("(new)", line)
 
+    def test_an_area_may_be_named_by_the_title_discover_shows(self):
+        # discover shows "Numbering": the model wrote that, and the key is naming
+        uom = {
+            "target_doctype": "UOM",
+            "target_name": f"Box {self.tag}",
+            "values": {"uom_name": f"Box {self.tag}"},
+        }
+        plan = self._save(items=[{**uom, "area": "Numbering", "decision": "A unit"}])
+
+        self.assertIn(f"UOM: Box {self.tag}", [i["target"] for i in plan["items"]])
+        self.assertEqual(frappe.get_doc(PLAN, plan["plan"]).items[-1].area, "naming")
+
+    def test_a_decision_that_changes_nothing_is_shown_and_never_applied(self):
+        kept = [
+            {"area": "naming", "decision": "Keep the current invoice and order numbering"},
+            {"area": "GST registration", "decision": "GSTINs and addresses come later"},
+        ]
+        plan = self._save(items=kept)
+
+        lines = plan["approval"]["decisions"]
+        self.assertIn("Numbering: Keep the current invoice and order numbering (no change)", lines)
+        self.assertIn("GST registration: GSTINs and addresses come later (no change)", lines)
+        self.assertEqual([n["decision"] for n in plan["notes"]][0], "GSTINs and addresses come later")
+        self.assertFalse([i for i in plan["items"] if "numbering" in i["decision"].lower()])
+
+        added = self._run(
+            "setup_plan",
+            {"action": "update", "plan": plan["plan"], "add": [{"area": "pricing", "decision": "INR only"}]},
+        )["result"]
+        self.assertIn("Price lists and currencies: INR only (no change)", added["approval"]["decisions"])
+
+    def test_an_area_that_is_neither_a_key_nor_a_title_is_still_refused(self):
+        refused = self._run(
+            "setup_plan",
+            {
+                "action": "save",
+                "company": self.company,
+                "answers": self._answers(items=[{"area": "weather", "decision": "x"}]),
+            },
+        )
+        self.assertFalse(refused["success"])
+        self.assertIn("weather", refused["error"])
+
     def test_an_item_can_be_removed_and_one_added(self):
         plan = self._save()
         number = self._number(plan, f"UOM: Bolt {self.tag}")

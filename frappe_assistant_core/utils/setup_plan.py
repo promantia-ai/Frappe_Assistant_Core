@@ -416,6 +416,9 @@ def _from_answers(company: str, answers: Dict[str, Any]) -> List[Dict[str, Any]]
         items.append(_staff_item(group, welcome))
 
     for raw in _typed(answers, "items", list) or []:
+        if _is_note(raw):
+            _note(raw)  # checked here; kept in the answers, which the plan saves as they are
+            continue
         items.append(_raw_item(raw))
     return items
 
@@ -482,15 +485,58 @@ def _staff_emails(rows) -> set:
     return emails
 
 
+def _area_key(value: Any) -> str:
+    """An area as the interview names it: its key, or the title discover shows ("Numbering" is naming)."""
+    text = cstr(value).strip().casefold()
+    for area in AREAS:
+        if text in (area["key"], area["title"].casefold()):
+            return area["key"]
+    raise SetupProblem(_("Area {0} isn't one of: {1}.").format(value, ", ".join(AREA_KEYS)))
+
+
+def _is_note(raw: Any) -> bool:
+    """An item with no record and no values: a decision that changes nothing ("keep the numbering as it
+    is", "the GSTINs come later"). It is kept in the answers and shown, never applied."""
+    return (
+        isinstance(raw, dict)
+        and not cstr(raw.get("target_doctype"))
+        and not raw.get("values")
+        and "group" not in raw  # a staff group added in chat: its people are what it makes
+    )
+
+
+def _note(raw: Dict[str, Any]) -> Dict[str, str]:
+    decision = cstr(raw.get("decision")).strip()
+    if not decision:
+        raise SetupProblem(_("A decision that changes nothing needs its decision, in words."))
+    return {"area": _area_key(raw.get("area")), "decision": decision}
+
+
+def notes(doc) -> List[Dict[str, str]]:
+    """The plan's decisions that change nothing, from its answers, in the order of the areas."""
+    answers = json.loads(doc.answers or "{}") if isinstance(doc.answers or "{}", str) else doc.answers
+    found = []
+    for raw in (answers or {}).get("items") or []:
+        if _is_note(raw):
+            try:
+                found.append(_note(raw))
+            except SetupProblem:
+                continue  # saved before the check: shown nowhere rather than failing the plan
+    return sorted(found, key=lambda n: AREA_KEYS.index(n["area"]))
+
+
 def _raw_item(raw: Any) -> Dict[str, Any]:
     """An item the interview's model composed itself (anything the answers above don't name)."""
     if not isinstance(raw, dict):
         raise SetupProblem(_("Each item is an object."))
-    area, doctype = cstr(raw.get("area")), cstr(raw.get("target_doctype"))
-    if area not in AREA_KEYS:
-        raise SetupProblem(_("Area {0} isn't one of: {1}.").format(area, ", ".join(AREA_KEYS)))
+    area, doctype = _area_key(raw.get("area")), cstr(raw.get("target_doctype"))
     if not doctype:
-        raise SetupProblem(_("An item needs its target_doctype."))
+        raise SetupProblem(
+            _(
+                "An item needs its target_doctype and values. A decision that changes nothing is an item "
+                "with only area and decision."
+            )
+        )
     values = raw.get("values")
     if not isinstance(values, dict) or not values:
         raise SetupProblem(_("An item needs the values it sets, as an object."))
@@ -612,7 +658,8 @@ def save(company: str, answers: Dict[str, Any], title: Optional[str] = None, fai
     if failure_rule not in ("stop", "continue"):
         raise SetupProblem(_("The failure rule is stop or continue."))
     built = build(company, answers)
-    if not built["items"] and not built["gaps"]:
+    kept = [raw for raw in _typed(answers, "items", list) or [] if _is_note(raw)]
+    if not built["items"] and not built["gaps"] and not kept:
         raise SetupProblem(_("The answers make no plan items: nothing to save."))
     doc = frappe.get_doc(
         {
@@ -698,7 +745,12 @@ def edit(plan_name: str, changes: Dict[str, Any]):
     keep = [r for i, r in enumerate(rows, start=1) if i not in removed]
     doc.set("items", keep)
     for raw in changes.get("add") or []:
-        is_group = isinstance(raw, dict) and raw.get("area") == STAFF and "group" in raw
+        if _is_note(raw):
+            stored = json.loads(doc.answers or "{}")
+            stored.setdefault("items", []).append(_note(raw))
+            doc.answers = json.dumps(stored, default=str)
+            continue
+        is_group = isinstance(raw, dict) and "group" in raw and _area_key(raw.get("area")) == STAFF
         item = _staff_item(raw["group"], bool(raw.get("send_welcome_email"))) if is_group else _raw_item(raw)
         good, problems = check_items([item], **context())
         if problems:
@@ -766,9 +818,15 @@ def decisions(doc) -> List[str]:
     """One line per item for the approval card, by area: what it does and whether it is new, already set
     on the site, or a customisation created beforehand (S-D3)."""
     lines = []
-    for item in sorted(
-        doc.items, key=lambda i: (AREA_KEYS.index(i.area) if i.area in AREA_KEYS else 99, i.idx)
-    ):
+    ranked = sorted(
+        [(AREA_KEYS.index(i.area) if i.area in AREA_KEYS else 99, 0, i.idx, i) for i in doc.items]
+        + [(AREA_KEYS.index(n["area"]), 1, number, n) for number, n in enumerate(notes(doc))],
+        key=lambda r: r[:3],
+    )
+    for _rank, is_note, _order, item in ranked:
+        if is_note:
+            lines.append(f"{_(_title(item['area']))}: {item['decision']} ({_('no change')})")
+            continue
         if item.is_customisation or item.target_doctype in CUSTOMISATION_DOCTYPES:
             how = _("already created: {0}").format(item.created_record or _("not created yet"))
         elif already_set(_as_dict(item)):
@@ -1099,11 +1157,15 @@ def record(doc) -> Any:
     by_area: Dict[str, List[Dict[str, Any]]] = {}
     for item in facts["items"]:
         by_area.setdefault(item["area"], []).append(item)
+    kept: Dict[str, List[str]] = {}
+    for note in notes(doc):
+        kept.setdefault(note["area"], []).append(note["decision"])
     for area in AREA_KEYS:
-        if area not in by_area:
+        if area not in by_area and area not in kept:
             continue
         lines += ["", f"## {_(_title(area))}", ""]
-        for item in by_area[area]:
+        lines += [f"- {decision}: {_('no change')}" for decision in kept.get(area, [])]
+        for item in by_area.get(area, []):
             lines.append(
                 f"- {item['decision']}"
                 + (f" [{item['writes']}]" if item["writes"] else "")
@@ -1158,6 +1220,8 @@ def describe(doc) -> Dict[str, Any]:
             }
             for item in doc.items
         ],
+        # decisions that change nothing: shown, never applied
+        "notes": [{**n, "area": _(_title(n["area"]))} for n in notes(doc)],
         "fit_gap": [
             {"requirement": g.requirement, "why_not_standard": g.why_not_standard, "suggestion": g.suggestion}
             for g in doc.gaps
