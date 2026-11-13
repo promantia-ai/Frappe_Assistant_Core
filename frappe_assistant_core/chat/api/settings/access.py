@@ -106,6 +106,7 @@ def _discovery_preferences(prefs) -> dict:
 
     return {
         "show_tips": on("show_tips"),
+        "show_whats_new": on("show_whats_new"),
         "show_progress": on("show_progress"),
         "state": parse_discovery_state(getattr(prefs, "discovery_state", None)),
     }
